@@ -233,7 +233,7 @@ mod tests {
     fn build_header(v: u16) -> Vec<u8> {
         let mut b = vec![0u8; HEADER_SIZE_V4 as usize];
         b[0..4].copy_from_slice(&MPQ_MAGIC.to_le_bytes());
-        b[4..8].copy_from_slice(&(HEADER_SIZE_V1 as u32).to_le_bytes());
+        b[4..8].copy_from_slice(&HEADER_SIZE_V1.to_le_bytes());
         b[12..14].copy_from_slice(&v.to_le_bytes());
         b[14..16].copy_from_slice(&3u16.to_le_bytes()); // 4096-byte sectors
         b

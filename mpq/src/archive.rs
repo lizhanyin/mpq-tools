@@ -183,7 +183,16 @@ impl<R: Read + Seek> Archive<R> {
             let mut in_off = 0usize;
             while in_off + 0x20 <= want {
                 let w = &window[in_off..];
-                let magic = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+                if w.len() < 4 {
+                    break 'outer;
+                }
+
+                let magic = u32::from_le_bytes([
+                    w.first().copied().unwrap_or_default(),
+                    w.get(1).copied().unwrap_or_default(),
+                    w.get(2).copied().unwrap_or_default(),
+                    w.get(3).copied().unwrap_or_default(),
+                ]);
                 if magic == USERDATA_MAGIC {
                     if let Some(ud) = UserDataHeader::parse(w) {
                         let target = offset + in_off as u64 + ud.archive_offset as u64;
@@ -331,7 +340,7 @@ impl<R: Read + Seek> Archive<R> {
         let has_files = self.classic.as_ref().is_some_and(|c| !c.block_table.is_empty())
             || self.bet.is_some();
 
-        if !has_index {
+        if !has_index{
             return Err(Error::Corrupt(
                 "no usable hash index (classic hash table or HET table)",
             ));
@@ -881,5 +890,5 @@ fn crc32(data: &[u8]) -> u32 {
             crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
         }
     }
-    !crc
+    crc ^ 0xFFFF_FFFF
 }

@@ -17,8 +17,8 @@
 use crate::crypt::{decrypt_bytes, KEY_BLOCK_TABLE, KEY_HASH_TABLE};
 use crate::error::{Error, Result};
 use crate::header::{
-    FormatVersion, MpqHeader, UserDataHeader, HEADER_SIZE_V1, HEADER_SIZE_V2, HEADER_SIZE_V3,
-    HEADER_SIZE_V4, MPQ_MAGIC, USERDATA_MAGIC,
+    MpqHeader, UserDataHeader, HEADER_SIZE_V1, HEADER_SIZE_V2, HEADER_SIZE_V3, HEADER_SIZE_V4,
+    MPQ_MAGIC, USERDATA_MAGIC,
 };
 use crate::tables::{BlockEntry, HashEntry, FILE_EXISTS};
 
@@ -88,22 +88,6 @@ fn rd64(d: &[u8], off: usize) -> u64 {
     b.copy_from_slice(&d[off..off + 8]);
     u64::from_le_bytes(b)
 }
-fn wr16(d: &mut [u8], off: usize, v: u16) {
-    if off + 2 <= d.len() {
-        d[off..off + 2].copy_from_slice(&v.to_le_bytes());
-    }
-}
-fn wr32(d: &mut [u8], off: usize, v: u32) {
-    if off + 4 <= d.len() {
-        d[off..off + 4].copy_from_slice(&v.to_le_bytes());
-    }
-}
-fn wr64(d: &mut [u8], off: usize, v: u64) {
-    if off + 8 <= d.len() {
-        d[off..off + 8].copy_from_slice(&v.to_le_bytes());
-    }
-}
-
 /// Locate the MPQ header inside raw bytes: offset 0, behind a `MPQ\x1B`
 /// user-data header, or by 0x200-aligned scan (up to 128 MB).
 pub fn locate_header(data: &[u8]) -> Option<u64> {
@@ -164,7 +148,7 @@ pub fn locate_header(data: &[u8]) -> Option<u64> {
 /// score how plausible the result is (free-entry pattern or a consistent
 /// occupied entry). Returns a 0..=1 score.
 fn score_hash_table(data: &[u8], abs: usize, entries: usize, block_bound: u32) -> f32 {
-    let probe = entries.min(16).max(1);
+    let probe = entries.clamp(1, 16);
     let len = probe * 16;
     if abs >= data.len() || abs + len > data.len() {
         return 0.0;
@@ -199,7 +183,7 @@ fn score_hash_table(data: &[u8], abs: usize, entries: usize, block_bound: u32) -
 
 /// Same idea for the block table.
 fn score_block_table(data: &[u8], abs: usize, entries: usize, span: u64) -> f32 {
-    let probe = entries.min(16).max(1);
+    let probe = entries.clamp(1, 16);
     let len = probe * 16;
     if abs >= data.len() || abs + len > data.len() {
         return 0.0;
@@ -219,7 +203,7 @@ fn score_block_table(data: &[u8], abs: usize, entries: usize, span: u64) -> f32 
         let ok = e.flags == 0
             || (e.flags & FILE_EXISTS != 0
                 && (e.pos as u64) <= span
-                && e.csize <= span.saturating_add(0x10_0000) as u32);
+                && e.csize as u64 <= span + 0x10_0000);
         if free || ok {
             plausible += 1;
         }
@@ -254,7 +238,7 @@ fn scan_range<F>(data: &[u8], a: usize, b: usize, entries: usize, score: F) -> O
 where
     F: Fn(&[u8], usize, usize) -> f32,
 {
-    let probe_len = entries.min(16).max(1) * 16;
+    let probe_len = entries.clamp(1, 16) * 16;
     let mut off = a - (a % 4);
     while off + probe_len <= b {
         if score(data, off, entries) >= 0.9 {
@@ -271,7 +255,6 @@ where
 struct Patch {
     offset: usize,
     bytes: Vec<u8>,
-    issue: RepairIssue,
 }
 
 /// Analyze the buffer and return every issue found; when `apply` is set
@@ -307,17 +290,9 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         patches.push(Patch {
             offset: base + 0x0C,
             bytes: inferred.to_le_bytes().to_vec(),
-            issue: RepairIssue::fixed("", "", ""),
         });
         version = inferred;
     }
-
-    let std_size = match version {
-        0 => HEADER_SIZE_V1 as usize,
-        1 => HEADER_SIZE_V2 as usize,
-        2 => HEADER_SIZE_V3 as usize,
-        _ => HEADER_SIZE_V4 as usize,
-    };
 
     // --- header_size ------------------------------------------------------
     if version == 0 && header_size != HEADER_SIZE_V1 as usize {
@@ -328,8 +303,7 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         ));
         patches.push(Patch {
             offset: base + 0x04,
-            bytes: (HEADER_SIZE_V1 as u32).to_le_bytes().to_vec(),
-            issue: RepairIssue::fixed("", "", ""),
+            bytes: { HEADER_SIZE_V1 }.to_le_bytes().to_vec(),
         });
         header_size = HEADER_SIZE_V1 as usize;
     } else if version == 1 && header_size != HEADER_SIZE_V2 as usize {
@@ -342,12 +316,10 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         patches.push(Patch {
             offset: base + 0x0C,
             bytes: 0u16.to_le_bytes().to_vec(),
-            issue: RepairIssue::fixed("", "", ""),
         });
         patches.push(Patch {
             offset: base + 0x04,
-            bytes: (HEADER_SIZE_V1 as u32).to_le_bytes().to_vec(),
-            issue: RepairIssue::fixed("", "", ""),
+            bytes: { HEADER_SIZE_V1 }.to_le_bytes().to_vec(),
         });
         version = 0;
         header_size = HEADER_SIZE_V1 as usize;
@@ -359,8 +331,7 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         ));
         patches.push(Patch {
             offset: base + 0x04,
-            bytes: (HEADER_SIZE_V4 as u32).to_le_bytes().to_vec(),
-            issue: RepairIssue::fixed("", "", ""),
+            bytes: { HEADER_SIZE_V4 }.to_le_bytes().to_vec(),
         });
         header_size = HEADER_SIZE_V4 as usize;
     }
@@ -377,7 +348,6 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         patches.push(Patch {
             offset: base + 0x0E,
             bytes: 3u16.to_le_bytes().to_vec(),
-            issue: RepairIssue::fixed("", "", ""),
         });
     }
 
@@ -419,13 +389,11 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
                     patches.push(Patch {
                         offset: base + 0x10,
                         bytes: (hash_pos as u32).to_le_bytes().to_vec(),
-                        issue: RepairIssue::fixed("", "", ""),
                     });
                     if version >= 1 {
                         patches.push(Patch {
                             offset: base + 0x28,
                             bytes: 0u16.to_le_bytes().to_vec(),
-                            issue: RepairIssue::fixed("", "", ""),
                         });
                     }
                 }
@@ -455,13 +423,11 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
                         patches.push(Patch {
                             offset: base + 0x10,
                             bytes: (hash_pos as u32).to_le_bytes().to_vec(),
-                            issue: RepairIssue::fixed("", "", ""),
                         });
                         if version >= 1 {
                             patches.push(Patch {
                                 offset: base + 0x28,
                                 bytes: 0u16.to_le_bytes().to_vec(),
-                                issue: RepairIssue::fixed("", "", ""),
                             });
                         }
                     }
@@ -474,17 +440,22 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         if (abs as usize) < n {
             let end = abs as usize + hash_entries * 16;
             if end > n {
-                let trimmed = (n - abs as usize) / 16;
+                // Hash table sizes must be powers of two (the reader probes
+                // with modulo), so snap the trimmed count down to one.
+                let mut trimmed = (n - abs as usize) / 16;
+                // largest power of two <= trimmed (stable-friendly form)
+                while trimmed > 1 && !trimmed.is_power_of_two() {
+                    trimmed &= trimmed - 1;
+                }
                 if trimmed > 0 {
                     issues.push(RepairIssue::fixed(
                         "hash_table_size",
                         format!("{hash_entries} 项越出文件末尾"),
-                        format!("截断为 {trimmed} 项"),
+                        format!("截断为 {trimmed} 项（2 的幂）"),
                     ));
                     patches.push(Patch {
                         offset: base + 0x18,
                         bytes: (trimmed as u32).to_le_bytes().to_vec(),
-                        issue: RepairIssue::fixed("", "", ""),
                     });
                 } else {
                     issues.push(RepairIssue::fatal(
@@ -522,13 +493,11 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
                     patches.push(Patch {
                         offset: base + 0x14,
                         bytes: (block_pos as u32).to_le_bytes().to_vec(),
-                        issue: RepairIssue::fixed("", "", ""),
                     });
                     if version >= 1 {
                         patches.push(Patch {
                             offset: base + 0x2A,
                             bytes: 0u16.to_le_bytes().to_vec(),
-                            issue: RepairIssue::fixed("", "", ""),
                         });
                     }
                 }
@@ -556,13 +525,11 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
                         patches.push(Patch {
                             offset: base + 0x14,
                             bytes: (block_pos as u32).to_le_bytes().to_vec(),
-                            issue: RepairIssue::fixed("", "", ""),
                         });
                         if version >= 1 {
                             patches.push(Patch {
                                 offset: base + 0x2A,
                                 bytes: 0u16.to_le_bytes().to_vec(),
-                                issue: RepairIssue::fixed("", "", ""),
                             });
                         }
                     }
@@ -584,7 +551,6 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
                     patches.push(Patch {
                         offset: base + 0x1C,
                         bytes: (trimmed as u32).to_le_bytes().to_vec(),
-                        issue: RepairIssue::fixed("", "", ""),
                     });
                 } else {
                     issues.push(RepairIssue::fatal(
@@ -608,7 +574,6 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
             patches.push(Patch {
                 offset: base + 0x20,
                 bytes: 0u64.to_le_bytes().to_vec(),
-                issue: RepairIssue::fixed("", "", ""),
             });
         }
     }
@@ -627,7 +592,6 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
                 patches.push(Patch {
                     offset: base + off,
                     bytes: 0u64.to_le_bytes().to_vec(),
-                    issue: RepairIssue::fixed("", "", ""),
                 });
             }
         }
@@ -641,7 +605,6 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
             patches.push(Patch {
                 offset: base + 0x2C,
                 bytes: span.to_le_bytes().to_vec(),
-                issue: RepairIssue::fixed("", "", ""),
             });
         }
     }
@@ -658,7 +621,6 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         patches.push(Patch {
             offset: base + 0x08,
             bytes: (expect32 as u32).to_le_bytes().to_vec(),
-            issue: RepairIssue::fixed("", "", ""),
         });
     }
 
@@ -713,10 +675,12 @@ mod tests {
         buf[0x204..0x208].copy_from_slice(&0x20u32.to_le_bytes());
         assert_eq!(locate_header(&buf), Some(0x200));
 
-        // embedded (scan)
+        // embedded (scan): garbage prefix, minimal but valid header fields
         let mut buf = vec![0x11u8; 0x400];
         buf[0x200..0x204].copy_from_slice(&MPQ_MAGIC.to_le_bytes());
-        buf[0x204..0x208].copy_from_slice(&0x20u32.to_le_bytes());
+        buf[0x204..0x208].copy_from_slice(&0x20u32.to_le_bytes()); // header size
+        buf[0x20C..0x20E].copy_from_slice(&0u16.to_le_bytes()); // version 1
+        buf[0x20E..0x210].copy_from_slice(&3u16.to_le_bytes()); // sector exp
         assert_eq!(locate_header(&buf), Some(0x200));
     }
 }

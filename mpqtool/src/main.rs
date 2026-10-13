@@ -1,4 +1,7 @@
-//! mpqtool — inspect and extract MPQ archives.
+//! mpqtool — inspect, extract and repair MPQ archives (CLI + GUI).
+
+mod gui;
+mod tasks;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -10,14 +13,15 @@ use mpq::{Archive, Error, FormatVersion};
 #[command(
     name = "mpqtool",
     version,
-    about = "Inspect and extract Blizzard MPQ archives (v1–v4, v3 protocol focus)",
+    about = "Inspect, extract and repair Blizzard MPQ archives (v1–v4, v3 protocol focus)",
     long_about = "Reads MPQ archives following the v3 protocol (also opens v1/v2/v4 \
 archives through their classic tables). Non-essential data such as (listfile), \
-(attributes) or HET/BET tables may be missing — the archive still opens."
+(attributes) or HET/BET tables may be missing — the archive still opens. \
+Run without arguments to launch the graphical interface."
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -56,20 +60,61 @@ enum Command {
         /// File name inside the archive.
         name: String,
     },
+    /// Diagnose and repair damaged header metadata.
+    Repair {
+        /// Archive file.
+        archive: PathBuf,
+        /// Only report issues, do not write anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Modify the input file instead of writing a new one.
+        #[arg(long)]
+        in_place: bool,
+        /// Output file (default: <name>.fixed.<ext>).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Disable the deep scan that relocates misplaced tables.
+        #[arg(long)]
+        no_deep: bool,
+    },
+    /// Launch the graphical interface.
+    Gui,
 }
 
 fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
-        Command::Info { archive } => cmd_info(&archive),
-        Command::List { archive, verbose } => cmd_list(&archive, verbose),
-        Command::Extract {
+        // No subcommand: launch the GUI.
+        None => match gui::run() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        },
+        Some(Command::Info { archive }) => cmd_info(&archive),
+        Some(Command::List { archive, verbose }) => cmd_list(&archive, verbose),
+        Some(Command::Extract {
             archive,
             files,
             output,
             all_entries,
-        } => cmd_extract(&archive, &files, output, all_entries),
-        Command::Cat { archive, name } => cmd_cat(&archive, &name),
+        }) => cmd_extract(&archive, &files, output, all_entries),
+        Some(Command::Cat { archive, name }) => cmd_cat(&archive, &name),
+        Some(Command::Repair {
+            archive,
+            dry_run,
+            in_place,
+            output,
+            no_deep,
+        }) => cmd_repair(&archive, dry_run, in_place, output, !no_deep),
+        Some(Command::Gui) => match gui::run() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e}");
+                1
+            }
+        },
     };
     std::process::exit(code);
 }
@@ -149,7 +194,7 @@ fn cmd_list(path: &Path, verbose: bool) -> i32 {
         for e in &entries {
             println!(
                 "{:<6} {:>10} {:>10} {:>5} {:<4} {}",
-                flag_summary(e.flags),
+                tasks::flag_summary(e.flags),
                 e.size,
                 e.compressed_size,
                 e.locale,
@@ -167,29 +212,6 @@ fn cmd_list(path: &Path, verbose: bool) -> i32 {
     }
     eprintln!("{} file(s)", entries.len());
     0
-}
-
-fn flag_summary(flags: u32) -> String {
-    let mut s = String::new();
-    if flags & mpq::FILE_EXISTS != 0 {
-        s.push('E');
-    }
-    if flags & mpq::FILE_ENCRYPTED != 0 {
-        s.push('K');
-    }
-    if flags & (mpq::FILE_COMPRESS | mpq::FILE_IMPLODE) != 0 {
-        s.push('C');
-    }
-    if flags & mpq::FILE_SINGLE_UNIT != 0 {
-        s.push('1');
-    }
-    if flags & mpq::FILE_SECTOR_CRC != 0 {
-        s.push('#');
-    }
-    if flags & mpq::FILE_PATCH != 0 {
-        s.push('P');
-    }
-    s
 }
 
 fn cmd_extract(
@@ -210,7 +232,6 @@ fn cmd_extract(
         p
     });
 
-    // Selection: explicit names, or every named entry, or every entry.
     let entries: Vec<_> = if !files.is_empty() {
         let mut picked = Vec::new();
         for name in files {
@@ -231,47 +252,12 @@ fn cmd_extract(
             .collect()
     };
 
-    if entries.is_empty() {
-        eprintln!(
-            "note: nothing to extract (no file names known; try --all-entries)"
-        );
-        return 0;
+    let result = tasks::extract_entries(&archive, &entries, &out_dir);
+    for msg in &result.messages {
+        println!("{msg}");
     }
-
-    if std::fs::create_dir_all(&out_dir).is_err() {
-        eprintln!("error: cannot create output directory {}", out_dir.display());
-        return 1;
-    }
-
-    let mut ok = 0usize;
-    let mut failed = 0usize;
-    for entry in &entries {
-        let display = entry.display_name();
-        let data = match archive.read_entry(entry) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("error: {display}: {e}");
-                failed += 1;
-                continue;
-            }
-        };
-        let out_path = safe_join(&out_dir, &display);
-        if let Some(parent) = out_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match std::fs::write(&out_path, &data) {
-            Ok(()) => {
-                println!("{} ({})", out_path.display(), data.len());
-                ok += 1;
-            }
-            Err(e) => {
-                eprintln!("error: {}: {e}", out_path.display());
-                failed += 1;
-            }
-        }
-    }
-    eprintln!("{ok} extracted, {failed} failed");
-    if failed == 0 {
+    eprintln!("{} extracted, {} failed", result.ok, result.failed);
+    if result.failed == 0 {
         0
     } else {
         1
@@ -294,20 +280,79 @@ fn cmd_cat(path: &Path, name: &str) -> i32 {
     0
 }
 
+fn cmd_repair(
+    path: &Path,
+    dry_run: bool,
+    in_place: bool,
+    output: Option<PathBuf>,
+    deep: bool,
+) -> i32 {
+    let mut bytes = match tasks::read_file(path) {
+        Ok(b) => b,
+        Err(e) => return fail(Error::Io(e)),
+    };
+
+    if dry_run {
+        match mpq::diagnose(&bytes) {
+            Ok(report) => {
+                print_issues(&report);
+                if report.issues.is_empty() {
+                    println!("未发现问题。");
+                }
+                0
+            }
+            Err(e) => fail(e),
+        }
+    } else {
+        let report = match mpq::repair(&mut bytes, deep) {
+            Ok(r) => r,
+            Err(e) => return fail(e),
+        };
+        print_issues(&report);
+        if report.issues.is_empty() {
+            println!("未发现问题，无需修复。");
+            return 0;
+        }
+        if report.changed {
+            // Verify the repaired bytes actually open.
+            match Archive::new(std::io::Cursor::new(&bytes)) {
+                Ok(a) => {
+                    for w in a.warnings() {
+                        eprintln!("note: {w}");
+                    }
+                }
+                Err(e) => eprintln!("warning: 修复后仍无法打开: {e}"),
+            }
+        }
+
+        let out_path = if in_place {
+            path.to_path_buf()
+        } else {
+            output.unwrap_or_else(|| tasks::repaired_path(path))
+        };
+        match std::fs::write(&out_path, &bytes) {
+            Ok(()) => {
+                println!("已写入 {}", out_path.display());
+                0
+            }
+            Err(e) => {
+                eprintln!("error: 无法写入 {}: {e}", out_path.display());
+                1
+            }
+        }
+    }
+}
+
+fn print_issues(report: &mpq::RepairReport) {
+    for issue in &report.issues {
+        match &issue.action {
+            Some(action) => println!("[可修复] {}: {} → {}", issue.field, issue.problem, action),
+            None => println!("[无法修复] {}: {}", issue.field, issue.problem),
+        }
+    }
+}
+
 fn fail(e: Error) -> i32 {
     eprintln!("error: {e}");
     1
-}
-
-/// Join an in-archive name onto the output dir, refusing path escapes.
-fn safe_join(base: &Path, name: &str) -> PathBuf {
-    let mut path = base.to_path_buf();
-    let cleaned = name.replace('/', "\\");
-    for part in cleaned.split('\\') {
-        if part.is_empty() || part == "." || part == ".." {
-            continue; // never escape the output directory
-        }
-        path.push(part);
-    }
-    path
 }

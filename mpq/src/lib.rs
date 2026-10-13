@@ -37,6 +37,7 @@ mod header;
 mod hetbet;
 mod jenkins;
 mod pkware;
+mod repair;
 mod tables;
 
 pub use archive::{Archive, FileEntry, TableSource, SPECIAL_FILES};
@@ -58,3 +59,6 @@ pub use crate::error::{Error, Result};
 
 /// Decompress helpers exposed for advanced users / tooling.
 pub use compression::{decompress_imploded, decompress_masked};
+
+/// Header diagnosis and repair.
+pub use repair::{diagnose, locate_header, repair, RepairIssue, RepairReport};

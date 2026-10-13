@@ -176,12 +176,14 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
         .map(|f| encode_file(f, 0, sector_size).0.len())
         .collect();
 
-    // Assign block positions (needed for key-v2 derivation).
+    // Assign block positions (needed for key-v2 derivation); pad each
+    // block to dword alignment like real archives do.
     let mut cursor = header_size as u64;
     let mut block_positions = Vec::with_capacity(files.len());
     for len in &measured {
         block_positions.push(cursor);
         cursor += *len as u64;
+        cursor = (cursor + 3) & !3;
     }
 
     // Encode file blocks.
@@ -308,12 +310,14 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
     // they already are (cursor started at header_size), and the header goes
     // down at archive_start, so no adjustment needed.
     out.extend_from_slice(&header);
-    for data in &block_data {
+    for (i, data) in block_data.iter().enumerate() {
         out.extend_from_slice(data);
+        let pad = (4 - measured[i] % 4) % 4;
+        out.extend(std::iter::repeat_n(0, pad));
     }
     out.extend_from_slice(&hash_table);
     out.extend_from_slice(&block_table);
-    if let Some(_) = hi_pos {
+    if hi_pos.is_some() {
         for _ in 0..blocks.len() {
             put_u16(&mut out, 0);
         }
@@ -485,6 +489,7 @@ pub fn build_hetbet(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     for (name, data) in files {
         let pos = cursor;
         cursor += data.len() as u64;
+        cursor = (cursor + 3) & !3;
         let flags = FILE_EXISTS;
         blocks.push((name, data, pos, data.len() as u32, flags));
     }
@@ -505,9 +510,9 @@ pub fn build_hetbet(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     let bc_flag = bits_needed(flag_list.len() as u64);
     let entry_size = (bc_pos + bc_size + bc_csize + bc_flag) as usize;
 
-    let records_bytes = (n * entry_size + 7) / 8;
+    let records_bytes = (n * entry_size).div_ceil(8);
     let hash_bits = 56usize;
-    let hash_bytes = (n * hash_bits + 7) / 8;
+    let hash_bytes = (n * hash_bits).div_ceil(8);
     let mut bet_body = Vec::new();
     let table_size = 76 + flag_list.len() * 4 + records_bytes + hash_bytes;
     put_u32(&mut bet_body, table_size as u32); // +0x0C dwTableSize
@@ -515,14 +520,14 @@ pub fn build_hetbet(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     put_u32(&mut bet_body, 0); // unknown08
     put_u32(&mut bet_body, entry_size as u32); // table entry size (bits)
     put_u32(&mut bet_body, 0); // bit index file pos
-    put_u32(&mut bet_body, bc_pos as u32); // bit index file size
+    put_u32(&mut bet_body, bc_pos); // bit index file size
     put_u32(&mut bet_body, bc_pos + bc_size); // bit index cmp size
     put_u32(&mut bet_body, bc_pos + bc_size + bc_csize); // bit index flag
-    put_u32(&mut bet_body, (bc_pos + bc_size + bc_csize + bc_flag) as u32); // bit index unknown
-    put_u32(&mut bet_body, bc_pos as u32); // bit count file pos
-    put_u32(&mut bet_body, bc_size as u32); // bit count file size
-    put_u32(&mut bet_body, bc_csize as u32); // bit count cmp size
-    put_u32(&mut bet_body, bc_flag as u32); // bit count flag
+    put_u32(&mut bet_body, bc_pos + bc_size + bc_csize + bc_flag); // bit index unknown
+    put_u32(&mut bet_body, bc_pos); // bit count file pos
+    put_u32(&mut bet_body, bc_size); // bit count file size
+    put_u32(&mut bet_body, bc_csize); // bit count cmp size
+    put_u32(&mut bet_body, bc_flag); // bit count flag
     put_u32(&mut bet_body, 0); // bit count unknown
     put_u32(&mut bet_body, hash_bits as u32); // bit total name hash2
     put_u32(&mut bet_body, 0); // bit extra name hash2
@@ -552,7 +557,7 @@ pub fn build_hetbet(files: &[(String, Vec<u8>)]) -> Vec<u8> {
             bc_flag as usize,
             flag_index as u64,
         );
-        let h = file_name_hash(&b.0) & ((1u64 << hash_bits) - 1);
+        let h = file_name_hash(b.0) & ((1u64 << hash_bits) - 1);
         set_bits(&mut hashes, i * hash_bits, hash_bits, h);
     }
     bet_body.extend_from_slice(&records);
@@ -567,11 +572,11 @@ pub fn build_hetbet(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     // --- HET table ---
     let total_count = next_pow2(n * 4 / 3);
     let index_bits = bits_needed(n as u64) as usize;
-    let index_bytes = (total_count * index_bits + 7) / 8;
+    let index_bytes = (total_count * index_bits).div_ceil(8);
     let mut probe = vec![0u8; total_count];
     let mut indexes = vec![0u8; index_bytes];
     for (i, b) in blocks.iter().enumerate() {
-        let h = file_name_hash(&b.0) | (1u64 << 63); // OrMask
+        let h = file_name_hash(b.0) | (1u64 << 63); // OrMask
         let b1 = (h >> 56) as u8;
         let mut slot = (h % total_count as u64) as usize;
         while probe[slot] != 0 {
@@ -625,6 +630,8 @@ pub fn build_hetbet(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     debug_assert_eq!(out.len(), 0x44);
     for (_, data, _, _, _) in &blocks {
         out.extend_from_slice(data);
+        let pad = (4 - data.len() % 4) % 4;
+        out.extend(std::iter::repeat_n(0, pad));
     }
     out.extend_from_slice(&het);
     out.extend_from_slice(&bet);
