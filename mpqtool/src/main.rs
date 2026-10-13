@@ -72,6 +72,10 @@ enum Command {
         /// Output file (default: modify the input in place).
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Store re-encoded key-v2 files unencrypted instead of
+        /// re-encrypting them at their new offset (default).
+        #[arg(long)]
+        no_reencrypt_key2: bool,
     },
     /// Delete files from the archive by name.
     Delete {
@@ -83,6 +87,10 @@ enum Command {
         /// Output file (default: modify the input in place).
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Store re-encoded key-v2 files unencrypted instead of
+        /// re-encrypting them at their new offset (default).
+        #[arg(long)]
+        no_reencrypt_key2: bool,
     },
     /// Diagnose and repair damaged header metadata.
     Repair {
@@ -129,12 +137,14 @@ fn main() {
             archive,
             files,
             output,
-        }) => cmd_add(&archive, &files, output),
+            no_reencrypt_key2,
+        }) => cmd_add(&archive, &files, output, !no_reencrypt_key2),
         Some(Command::Delete {
             archive,
             names,
             output,
-        }) => cmd_delete(&archive, &names, output),
+            no_reencrypt_key2,
+        }) => cmd_delete(&archive, &names, output, !no_reencrypt_key2),
         Some(Command::Repair {
             archive,
             dry_run,
@@ -396,6 +406,7 @@ fn run_modify(
     deletions: Vec<mpq::Deletion>,
     additions: Vec<(String, Vec<u8>)>,
     output: Option<PathBuf>,
+    reencrypt_key2: bool,
 ) -> i32 {
     // Reject deletions of names that do not exist (like `zip -d`).
     for del in &deletions {
@@ -416,11 +427,14 @@ fn run_modify(
         Ok(b) => b,
         Err(e) => return fail(Error::Io(e)),
     };
-    let outcome = match mpq::modify(&bytes, &deletions, &additions) {
+    let options = mpq::ModifyOptions {
+        reencrypt_key_v2: reencrypt_key2,
+    };
+    let outcome = match mpq::modify_with(&bytes, &deletions, &additions, &options) {
         Ok(o) => o,
         Err(e) => return fail(e),
     };
-    print_modify_report(&outcome.report);
+    print_modify_report(&outcome.report, reencrypt_key2);
 
     let out_path = output.unwrap_or_else(|| path.to_path_buf());
     match std::fs::write(&out_path, &outcome.bytes) {
@@ -439,7 +453,7 @@ fn run_modify(
     }
 }
 
-fn print_modify_report(report: &mpq::ModifyReport) {
+fn print_modify_report(report: &mpq::ModifyReport, reencrypted: bool) {
     if !report.added.is_empty() {
         println!("新增 {}：{}", report.added.len(), report.added.join("、"));
     }
@@ -465,13 +479,23 @@ fn print_modify_report(report: &mpq::ModifyReport) {
     }
     if !report.re_encoded.is_empty() {
         println!(
-            "重新编码（key-v2 偏移变化）：{}",
+            "重新编码（key-v2，{}）：{}",
+            if reencrypted {
+                "按新偏移重新加密"
+            } else {
+                "存为未加密"
+            },
             report.re_encoded.join("、")
         );
     }
 }
 
-fn cmd_add(path: &Path, files: &[PathBuf], output: Option<PathBuf>) -> i32 {
+fn cmd_add(
+    path: &Path,
+    files: &[PathBuf],
+    output: Option<PathBuf>,
+    reencrypt_key2: bool,
+) -> i32 {
     let mut additions: Vec<(String, Vec<u8>)> = Vec::new();
     for file in files {
         let name = match file.file_name() {
@@ -492,15 +516,20 @@ fn cmd_add(path: &Path, files: &[PathBuf], output: Option<PathBuf>) -> i32 {
             }
         }
     }
-    run_modify(path, Vec::new(), additions, output)
+    run_modify(path, Vec::new(), additions, output, reencrypt_key2)
 }
 
-fn cmd_delete(path: &Path, names: &[String], output: Option<PathBuf>) -> i32 {
+fn cmd_delete(
+    path: &Path,
+    names: &[String],
+    output: Option<PathBuf>,
+    reencrypt_key2: bool,
+) -> i32 {
     let deletions: Vec<mpq::Deletion> = names
         .iter()
         .map(|n| mpq::Deletion::ByName(n.clone()))
         .collect();
-    run_modify(path, deletions, Vec::new(), output)
+    run_modify(path, deletions, Vec::new(), output, reencrypt_key2)
 }
 
 fn fail(e: Error) -> i32 {

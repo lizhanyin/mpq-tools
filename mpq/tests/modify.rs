@@ -222,7 +222,7 @@ fn delete_by_name_in_listfile_less_archive() {
 }
 
 #[test]
-fn key_v2_files_are_re_encoded() {
+fn key_v2_files_are_re_encrypted_at_new_offset() {
     let s = ArchiveSpec {
         version: 1,
         sector_shift: 3,
@@ -242,9 +242,87 @@ fn key_v2_files_are_re_encoded() {
 
     assert_eq!(out.report.re_encoded, ["fixed.bin"]);
     let (archive, _) = open(&out.bytes).unwrap();
-    // Readable at its new offset, with the same content.
+    // Readable at its new offset, with the same content…
     assert_eq!(archive.read_file("fixed.bin").unwrap(), b"key-v2 payload");
     assert_eq!(archive.read_file("filler.txt").unwrap(), b"filler");
+    // …and still key-v2 encrypted (default option).
+    let e = archive.find_file("fixed.bin").unwrap();
+    assert!(e.flags & mpq::FILE_ENCRYPTED != 0);
+    assert!(e.flags & mpq::FILE_KEY_V2 != 0);
+}
+
+#[test]
+fn key_v2_plaintext_option() {
+    let s = ArchiveSpec {
+        version: 0,
+        sector_shift: 3,
+        with_listfile: true,
+        with_attributes: false,
+        with_hi_block: false,
+        userdata: false,
+        prefix_garbage: 0,
+        zero_archive_size: false,
+        files: vec![
+            FileSpec::text("filler.txt", "filler").compress(),
+            FileSpec::text("fixed.bin", "key-v2 payload").encrypt().fix_key().compress(),
+        ],
+    };
+    let src = build(&s);
+    let out = mpq::modify_with(
+        &src,
+        &[],
+        &[("appended.bin".into(), b"tail".to_vec())],
+        &mpq::ModifyOptions {
+            reencrypt_key_v2: false,
+        },
+    )
+    .expect("modify");
+
+    assert_eq!(out.report.re_encoded, ["fixed.bin"]);
+    let (archive, _) = open(&out.bytes).unwrap();
+    assert_eq!(archive.read_file("fixed.bin").unwrap(), b"key-v2 payload");
+    let e = archive.find_file("fixed.bin").unwrap();
+    assert_eq!(e.flags & mpq::FILE_ENCRYPTED, 0, "should be stored plainly");
+}
+
+#[test]
+fn key_v2_multisector_re_encryption() {
+    // Multi-sector key-v2 file mixing compressible and incompressible
+    // regions: exercises the sector offset table (key-1), per-sector keys
+    // (key+i) and dword-padded sectors.
+    let mut content = Vec::new();
+    for i in 0..4000u32 {
+        content.extend_from_slice(format!("line {i:06} of the payload\n").as_bytes());
+    }
+    let noise: Vec<u8> = (0..5000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8).collect();
+    content.extend_from_slice(&noise);
+    content.extend_from_slice(b"tail");
+
+    let s = ArchiveSpec {
+        version: 0,
+        sector_shift: 3, // 4096-byte sectors
+        with_listfile: true,
+        with_attributes: false,
+        with_hi_block: false,
+        userdata: false,
+        prefix_garbage: 0,
+        zero_archive_size: false,
+        files: vec![
+            FileSpec::bytes("filler.bin", b"filler".to_vec()),
+            FileSpec::bytes("big_fixed.bin", content.clone())
+                .encrypt()
+                .fix_key()
+                .compress(),
+        ],
+    };
+    let src = build(&s);
+    let out = modify(&src, &[], &[("appended.bin".into(), b"tail".to_vec())]);
+
+    let (archive, _) = open(&out.bytes).unwrap();
+    assert_eq!(archive.read_file("big_fixed.bin").unwrap(), content);
+    let e = archive.find_file("big_fixed.bin").unwrap();
+    assert!(e.flags & mpq::FILE_ENCRYPTED != 0);
+    assert!(e.flags & mpq::FILE_KEY_V2 != 0);
 }
 
 #[test]

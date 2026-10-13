@@ -26,7 +26,9 @@
 //!   fresh — possibly larger — table is built instead.
 //! * Files encrypted with the key-v2 variant derive their key from the
 //!   block offset; since their offset changes, they are re-encoded from
-//!   their decoded content instead of being copied.
+//!   their decoded content — by default re-encrypted with the key derived
+//!   at their *new* offset ([`ModifyOptions::reencrypt_key_v2`]); disabling
+//!   that option stores them compressed but unencrypted.
 //! * v4 headers are written back as v3 headers — the v4-only MD5 fields
 //!   cannot be recomputed, and v4 archives open fine through classic
 //!   tables.
@@ -39,14 +41,14 @@ use std::collections::{HashMap, HashSet};
 use crate::archive::Archive;
 use crate::compression::M_ZLIB;
 use crate::crypt::{
-    encrypt_bytes, hash_bytes, hash_string, normalize_name, KEY_BLOCK_TABLE, KEY_HASH_TABLE,
-    HASH_NAME_A, HASH_NAME_B, HASH_TABLE_INDEX,
+    encrypt_bytes, file_key, hash_bytes, hash_string, normalize_name, KEY_BLOCK_TABLE,
+    KEY_HASH_TABLE, HASH_NAME_A, HASH_NAME_B, HASH_TABLE_INDEX,
 };
 use crate::error::{Error, Result};
 use crate::header::{FormatVersion, HEADER_SIZE_V1, HEADER_SIZE_V2, HEADER_SIZE_V3, MPQ_MAGIC};
 use crate::tables::{
-    HashEntry, FILE_COMPRESS, FILE_EXISTS, FILE_KEY_V2, FILE_SINGLE_UNIT, HASH_ENTRY_DELETED,
-    HASH_ENTRY_FREE,
+    HashEntry, FILE_COMPRESS, FILE_ENCRYPTED, FILE_EXISTS, FILE_KEY_V2, FILE_SINGLE_UNIT,
+    HASH_ENTRY_DELETED, HASH_ENTRY_FREE,
 };
 use crate::{FileEntry, TableSource};
 
@@ -64,6 +66,25 @@ pub enum Deletion {
     /// Delete exactly one table entry, identified like the GUI's selection
     /// keys — the only way to address unnamed entries.
     ByKey(TableSource, usize),
+}
+
+/// Knobs for [`modify_with`].
+#[derive(Debug, Clone, Copy)]
+pub struct ModifyOptions {
+    /// Re-encrypt key-v2 encrypted files with the key derived at their
+    /// *new* block offset (the offset is part of the key, so their bytes
+    /// can never be copied verbatim). When false, those files are re-stored
+    /// compressed but unencrypted. Ordinary (name-keyed) encrypted files
+    /// are always copied encrypted, regardless of this option.
+    pub reencrypt_key_v2: bool,
+}
+
+impl Default for ModifyOptions {
+    fn default() -> Self {
+        ModifyOptions {
+            reencrypt_key_v2: true,
+        }
+    }
 }
 
 /// What a [`modify`] run changed.
@@ -97,6 +118,10 @@ enum Payload {
     /// Content encoded fresh: zlib sectors / single unit, unencrypted (so
     /// the encoding never depends on the block position).
     Fresh { data: Vec<u8> },
+    /// Content re-encoded *and* re-encrypted with the key-v2 key derived
+    /// at the block's new offset — position-dependent, so encoded during
+    /// layout once the offset is known.
+    ReEncrypted { name: String, data: Vec<u8> },
 }
 
 /// Classic hash entry fields, for blocks that must be (re-)anchored by
@@ -136,15 +161,21 @@ struct OutBlock {
 }
 
 /// Import files into an archive and/or delete entries, returning the full
-/// modified file.
-///
-/// Additions whose name matches an existing file replace it (case- and
-/// slash-insensitive, locale variants included). An empty change list
-/// returns the input unchanged.
+/// modified file. See [`modify_with`] for the configurable variant.
 pub fn modify(
     data: &[u8],
     deletions: &[Deletion],
     additions: &[(String, Vec<u8>)],
+) -> Result<ModifyOutcome> {
+    modify_with(data, deletions, additions, &ModifyOptions::default())
+}
+
+/// [`modify`] with explicit [`ModifyOptions`].
+pub fn modify_with(
+    data: &[u8],
+    deletions: &[Deletion],
+    additions: &[(String, Vec<u8>)],
+    options: &ModifyOptions,
 ) -> Result<ModifyOutcome> {
     if deletions.is_empty() && additions.is_empty() {
         return Ok(ModifyOutcome {
@@ -322,6 +353,8 @@ pub fn modify(
     let mut blocks: Vec<OutBlock> = Vec::new();
     // old classic block index -> new block index (hash slot remapping)
     let mut remap: HashMap<usize, usize> = HashMap::new();
+    // Re-encoded key-v2 files (name, original content) for the self-check.
+    let mut reencoded: Vec<(String, Vec<u8>)> = Vec::new();
 
     for b in &src {
         if dropped_keys.contains(&(b.source, b.index)) {
@@ -346,8 +379,14 @@ pub fn modify(
             };
             match archive.read_entry(&entry) {
                 Ok(content) => {
-                    report.re_encoded.push(b.name.clone().unwrap_or_default());
-                    Payload::Fresh { data: content }
+                    let name = b.name.clone().unwrap_or_default();
+                    report.re_encoded.push(name.clone());
+                    reencoded.push((name.clone(), content.clone()));
+                    if options.reencrypt_key_v2 {
+                        Payload::ReEncrypted { name, data: content }
+                    } else {
+                        Payload::Fresh { data: content }
+                    }
                 }
                 // Already unreadable in the source; copying keeps it that
                 // way rather than failing the whole modification.
@@ -436,11 +475,16 @@ pub fn modify(
     let mut cursor = header_size;
     let mut placed: Vec<Placed> = Vec::with_capacity(blocks.len());
     for b in &blocks {
+        // The block position must be known before encoding: re-encrypted
+        // key-v2 blocks derive their key from it.
+        let pos = cursor;
         let (bytes, flags) = match &b.payload {
             Payload::Raw { bytes, flags } => (bytes.clone(), *flags),
             Payload::Fresh { data } => encode_fresh(data, sector_size),
+            Payload::ReEncrypted { name, data } => {
+                encode_fresh_reencrypted(name, data, sector_size, pos)
+            }
         };
-        let pos = cursor;
         cursor += bytes.len() as u64;
         cursor = (cursor + 3) & !3; // dword alignment, like real archives
         placed.push(Placed { pos, bytes, flags });
@@ -563,6 +607,16 @@ pub fn modify(
     for (name, bytes) in &adds {
         let read = check.read_file(name)?;
         if &read != bytes {
+            return Err(Error::InvalidData(format!("校验失败：{name} 内容不一致")));
+        }
+    }
+    // Re-encoded key-v2 files must read back byte-identical content,
+    // whether they were re-encrypted or stored plainly.
+    for (name, content) in &reencoded {
+        let read = check
+            .read_file(name)
+            .map_err(|e| Error::InvalidData(format!("校验失败：{name} 重编码后无法读取：{e}")))?;
+        if &read != content {
             return Err(Error::InvalidData(format!("校验失败：{name} 内容不一致")));
         }
     }
@@ -709,6 +763,103 @@ fn zlib(data: &[u8]) -> Vec<u8> {
     let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
     enc.write_all(data).expect("in-memory zlib");
     enc.finish().expect("in-memory zlib")
+}
+
+/// [`encode_fresh`] plus key-v2 encryption with the key derived from the
+/// block's new offset — the layout a key-v2 file must get when its bytes
+/// cannot be copied. Mirrors the on-disk conventions the reader expects:
+///
+/// * single unit: whole payload encrypted with the file key
+/// * compressed sectors: offset table (dword-aligned by construction)
+///   encrypted with `key - 1`, each sector independently with `key + i`,
+///   sectors padded to dword boundaries (offsets include the padding)
+/// * incompressible sectors: stored raw at fixed offsets, each encrypted
+///   with `key + i`
+///
+/// A sector only counts as compressible when it stays smaller than the
+/// original even after padding (the reader tells compressed sectors apart
+/// by `stored_len < uncompressed_len`), hence the +4 slack in the test.
+fn encode_fresh_reencrypted(
+    name: &str,
+    data: &[u8],
+    sector_size: u32,
+    pos: u64,
+) -> (Vec<u8>, u32) {
+    const ENC: u32 = FILE_ENCRYPTED | FILE_KEY_V2;
+    let fsize = data.len() as u32;
+    let key = file_key(name, true, pos, fsize);
+
+    if fsize == 0 {
+        return (Vec::new(), FILE_SINGLE_UNIT);
+    }
+
+    if fsize < sector_size {
+        let z = zlib(data);
+        let compressed = z.len() + 1 < data.len();
+        let mut payload = if compressed {
+            let mut b = Vec::with_capacity(z.len() + 1);
+            b.push(M_ZLIB);
+            b.extend_from_slice(&z);
+            b
+        } else {
+            data.to_vec()
+        };
+        encrypt_bytes(&mut payload, key);
+        let mut flags = ENC | FILE_SINGLE_UNIT;
+        if compressed {
+            flags |= FILE_COMPRESS;
+        }
+        return (payload, flags);
+    }
+
+    let nsec = fsize.div_ceil(sector_size) as usize;
+    let mut sectors: Vec<Vec<u8>> = Vec::with_capacity(nsec);
+    let mut compressed_any = false;
+    for chunk in data.chunks(sector_size as usize) {
+        let z = zlib(chunk);
+        if z.len() + 4 < chunk.len() {
+            compressed_any = true;
+            let mut s = Vec::with_capacity(z.len() + 1);
+            s.push(M_ZLIB);
+            s.extend_from_slice(&z);
+            sectors.push(s);
+        } else {
+            sectors.push(chunk.to_vec());
+        }
+    }
+    if !compressed_any {
+        // Plain stored sectors at fixed offsets, each with its own key.
+        let mut payload = Vec::with_capacity(data.len());
+        for (i, mut s) in sectors.into_iter().enumerate() {
+            encrypt_bytes(&mut s, key.wrapping_add(i as u32));
+            payload.extend_from_slice(&s);
+        }
+        return (payload, ENC);
+    }
+
+    // Compressed layout: dword-pad every sector (offsets include the
+    // padding), encrypt the offset table with key-1 and each sector with
+    // key+i.
+    for s in sectors.iter_mut() {
+        if s.len() % 4 != 0 {
+            s.resize(s.len() + 4 - s.len() % 4, 0);
+        }
+    }
+    let table_len = (nsec + 1) * 4;
+    let mut block = Vec::with_capacity(table_len + sectors.iter().map(|s| s.len()).sum::<usize>());
+    let mut acc = table_len as u32;
+    block.extend_from_slice(&acc.to_le_bytes());
+    for s in &sectors {
+        acc += s.len() as u32;
+        block.extend_from_slice(&acc.to_le_bytes());
+    }
+    encrypt_bytes(&mut block[..table_len], key.wrapping_sub(1));
+    for (i, s) in sectors.iter().enumerate() {
+        let mut sec = s.clone();
+        encrypt_bytes(&mut sec, key.wrapping_add(i as u32));
+        block.extend_from_slice(&sec);
+    }
+    (block, ENC | FILE_COMPRESS)
 }
 
 /// Serialize the archive header (v1/v2/v3; v4 is written as v3).

@@ -68,4 +68,4 @@ pub use compression::{decompress_imploded, decompress_masked};
 pub use repair::{diagnose, locate_header, repair, RepairIssue, RepairReport};
 
 /// Archive modification: import (add / replace) and delete files.
-pub use modify::{modify, Deletion, ModifyOutcome, ModifyReport};
+pub use modify::{modify, modify_with, Deletion, ModifyOptions, ModifyOutcome, ModifyReport};

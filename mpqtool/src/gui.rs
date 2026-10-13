@@ -165,9 +165,24 @@ struct PendingDel {
 struct ModifyUi {
     additions: Vec<PendingAdd>,
     deletions: Vec<PendingDel>,
+    /// Re-encrypt key-v2 files at their new offset (default);
+    /// unticking stores them unencrypted.
+    reencrypt_key_v2: bool,
     /// Bytes + report after 应用修改; further edits are frozen then.
     applied: Option<(Vec<u8>, mpq::ModifyReport)>,
     note: String,
+}
+
+impl Default for ModifyUi {
+    fn default() -> Self {
+        ModifyUi {
+            additions: Vec::new(),
+            deletions: Vec::new(),
+            reencrypt_key_v2: true,
+            applied: None,
+            note: String::new(),
+        }
+    }
 }
 
 struct RepairUi {
@@ -396,6 +411,50 @@ impl MpqApp {
             .is_some_and(|m| m.applied.is_some())
     }
 
+    /// Reload the open archive from disk (button 🔄 / F5 / menu), keeping
+    /// the navigation state — current folder, expanded tree nodes and the
+    /// filter. The selection is dropped (table indices may have shifted
+    /// under external modification) and pending 修改归档 changes are
+    /// discarded, since they were computed against the previous view.
+    fn refresh_archive(&mut self) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let cwd = std::mem::take(&mut self.cwd);
+        let expanded = std::mem::take(&mut self.expanded);
+        let filter = std::mem::take(&mut self.filter);
+        let dropped_pending = self.modify_ui.take().is_some_and(|m| {
+            !m.additions.is_empty() || !m.deletions.is_empty()
+        });
+
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                self.load_bytes(path, bytes);
+                self.cwd = cwd;
+                self.expanded = expanded;
+                self.filter = filter;
+                // The folder may be gone after the reload — fall back to
+                // the archive root.
+                if crate::tasks::node_at(&self.tree, &self.cwd).is_none() {
+                    self.cwd.clear();
+                }
+                self.preview = None;
+                self.logln("（已从磁盘刷新）");
+                if dropped_pending {
+                    self.logln("（刷新已清空未保存的「修改归档」待办）");
+                }
+            }
+            Err(e) => {
+                // Reading failed — restore the view, the old archive stays
+                // usable.
+                self.cwd = cwd;
+                self.expanded = expanded;
+                self.filter = filter;
+                self.logln(format!("刷新失败：{e}（当前仍显示已载入的内容）"));
+            }
+        }
+    }
+
     /// Queue files from disk for import (multi-select dialog); opens the
     /// 修改归档 window with the pending list.
     fn import_files(&mut self) {
@@ -405,15 +464,19 @@ impl MpqApp {
         else {
             return;
         };
+        self.queue_imports(paths);
+    }
 
-        let mut ui = self.modify_ui.take().unwrap_or(ModifyUi {
-            additions: Vec::new(),
-            deletions: Vec::new(),
-            applied: None,
-            note: String::new(),
-        });
+    /// Add the given files to the pending import list of the 修改归档
+    /// window (opening it if necessary). Files whose base name matches an
+    /// existing entry are marked as replacements.
+    fn queue_imports(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let mut ui = self.modify_ui.take().unwrap_or_default();
         if ui.applied.is_some() {
-            // Should not happen: the button is disabled while frozen.
+            self.logln("已有应用过的修改待保存或关闭，请先处理「修改归档」窗口。");
             self.modify_ui = Some(ui);
             return;
         }
@@ -487,12 +550,7 @@ impl MpqApp {
         let picked: Vec<(mpq::TableSource, usize)> =
             self.selected.iter().copied().collect();
 
-        let mut ui = self.modify_ui.take().unwrap_or(ModifyUi {
-            additions: Vec::new(),
-            deletions: Vec::new(),
-            applied: None,
-            note: String::new(),
-        });
+        let mut ui = self.modify_ui.take().unwrap_or_default();
         if ui.applied.is_some() {
             self.modify_ui = Some(ui);
             return;
@@ -540,9 +598,19 @@ impl MpqApp {
             .iter()
             .map(|a| (a.name.clone(), a.data.clone()))
             .collect();
-        match mpq::modify(&raw, &deletions, &additions) {
+        let options = mpq::ModifyOptions {
+            reencrypt_key_v2: ui.reencrypt_key_v2,
+        };
+        match mpq::modify_with(&raw, &deletions, &additions, &options) {
             Ok(outcome) => {
                 ui.note = summarize_modify(&outcome.report);
+                if !outcome.report.re_encoded.is_empty() {
+                    ui.note.push_str(if ui.reencrypt_key_v2 {
+                        "（key-v2 已按新偏移重新加密）"
+                    } else {
+                        "（key-v2 已存为未加密）"
+                    });
+                }
                 ui.applied = Some((outcome.bytes, outcome.report));
             }
             Err(e) => ui.note = format!("修改失败：{e}"),
@@ -635,6 +703,7 @@ enum MenuAction {
     Open,
     ExtractAll,
     Import,
+    Reload,
     Quit,
     Repair,
     Settings,
@@ -708,6 +777,9 @@ fn draw_tree_node(
 impl eframe::App for MpqApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_dropped_files(ui.ctx());
+        if ui.ctx().input(|i| i.key_pressed(egui::Key::F5)) {
+            self.refresh_archive();
+        }
         self.draw_menu(ui);
         self.draw_status(ui);
         self.draw_main(ui);
@@ -729,9 +801,20 @@ impl MpqApp {
     /// React to files dragged & dropped onto the window. The winit backend
     /// surfaces drop events for one frame, so a plain per-frame check is
     /// enough (re-dropping the same file later re-triggers it).
+    ///
+    /// With no archive open a drop opens it; with an archive open the
+    /// dropped files are queued for import into that archive.
     fn poll_dropped_files(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         let Some(first) = dropped.first() else { return };
+
+        if self.archive.is_some() {
+            let paths: Vec<PathBuf> = dropped.iter().map(|f| f.path().to_path_buf()).collect();
+            self.logln(format!("（通过拖拽导入 {} 个文件）", paths.len()));
+            self.queue_imports(paths);
+            return;
+        }
+
         let path = first.path().to_path_buf();
         match first.bytes() {
             Ok(bytes) => {
@@ -748,17 +831,22 @@ impl MpqApp {
         }
     }
 
-    /// Highlight the window while files are dragged over it.
+    /// Highlight the window while files are dragged over it, announcing
+    /// what a drop will do in the current state.
     fn draw_drop_overlay(&self, ctx: &egui::Context) {
-        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        let (hovering, count) =
+            ctx.input(|i| (!i.raw.hovered_files.is_empty(), i.raw.hovered_files.len()));
         if !hovering {
             return;
         }
-        let screen = ctx.viewport_rect();
-        let pos = screen.center() - egui::vec2(150.0, 26.0);
+        let label = if self.archive.is_some() {
+            format!("📥 松开鼠标以导入 {count} 个文件到当前归档")
+        } else {
+            "📂 松开鼠标以打开归档".to_string()
+        };
         egui::Area::new(egui::Id::new("drop_overlay"))
             .order(egui::Order::Foreground)
-            .fixed_pos(pos)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, -30.0])
             .interactable(false)
             .show(ctx, |ui| {
                 egui::Frame::default()
@@ -766,7 +854,7 @@ impl MpqApp {
                     .corner_radius(10.0)
                     .inner_margin(egui::Margin::symmetric(26, 14))
                     .show(ui, |ui| {
-                        ui.heading("📂 松开鼠标以打开归档");
+                        ui.heading(label);
                     });
             });
     }
@@ -793,6 +881,12 @@ impl MpqApp {
                         .clicked()
                     {
                         action = Some(MenuAction::Import);
+                    }
+                    if ui
+                        .add_enabled(self.path.is_some(), egui::Button::new("重新载入归档  F5"))
+                        .clicked()
+                    {
+                        action = Some(MenuAction::Reload);
                     }
                     if ui.button("退出").clicked() {
                         action = Some(MenuAction::Quit);
@@ -825,6 +919,7 @@ impl MpqApp {
             Some(MenuAction::Open) => self.open_dialog(),
             Some(MenuAction::ExtractAll) => self.extract_all(),
             Some(MenuAction::Import) => self.import_files(),
+            Some(MenuAction::Reload) => self.refresh_archive(),
             Some(MenuAction::Quit) => {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -961,6 +1056,7 @@ impl MpqApp {
         enum ToolAct {
             Extract,
             Delete,
+            Refresh,
             SelectAll,
             SelectNone,
         }
@@ -1044,6 +1140,14 @@ impl MpqApp {
             ui.add_space(4.0);
 
             ui.horizontal(|ui| {
+                if ui
+                    .button("🔄")
+                    .on_hover_text("重新从磁盘载入当前归档（F5）；外部修改或保存后可用来同步视图")
+                    .clicked()
+                {
+                    tool = Some(ToolAct::Refresh);
+                }
+                ui.separator();
                 if searching {
                     ui.strong(format!("搜索 “{}”：{} 个匹配", self.filter.trim(), rows.len()));
                 } else {
@@ -1217,6 +1321,7 @@ impl MpqApp {
         match tool {
             Some(ToolAct::Extract) => self.extract_selected(),
             Some(ToolAct::Delete) => self.delete_selected(),
+            Some(ToolAct::Refresh) => self.refresh_archive(),
             Some(ToolAct::SelectAll) => {
                 let all: Vec<FileEntry> = if searching {
                     crate::tasks::search_tree(&self.tree, &needle)
@@ -1400,6 +1505,7 @@ impl MpqApp {
         let mut action = None;
         let mut remove_add: Option<usize> = None;
         let mut remove_del: Option<usize> = None;
+        let mut set_reencrypt: Option<bool> = None;
 
         egui::Window::new("修改归档")
             .open(&mut open)
@@ -1454,6 +1560,20 @@ impl MpqApp {
                 });
                 ui.separator();
 
+                if !frozen {
+                    let mut re = m.reencrypt_key_v2;
+                    if ui
+                        .checkbox(&mut re, "key-v2 文件按新偏移重新加密")
+                        .on_hover_text(
+                            "key-v2 的密钥包含块偏移，修改后必须重算。勾选：用新偏移的密钥重新加密（保持加密状态）；\n取消：存为未加密（内容不变，任何工具都能读）",
+                        )
+                        .changed()
+                    {
+                        set_reencrypt = Some(re);
+                    }
+                    ui.add_space(4.0);
+                }
+
                 ui.horizontal(|ui| {
                     let can_apply = !frozen
                         && (!m.additions.is_empty() || !m.deletions.is_empty());
@@ -1500,6 +1620,13 @@ impl MpqApp {
             if let Some(m) = &mut self.modify_ui {
                 if m.applied.is_none() {
                     m.deletions.remove(i);
+                }
+            }
+        }
+        if let Some(re) = set_reencrypt {
+            if let Some(m) = &mut self.modify_ui {
+                if m.applied.is_none() {
+                    m.reencrypt_key_v2 = re;
                 }
             }
         }
