@@ -1,13 +1,12 @@
-//! mpqtool — inspect, extract and repair MPQ archives (CLI + GUI).
-
-mod gui;
-mod tasks;
+//! mpqtool — inspect, extract and repair MPQ archives (CLI).
+//! The graphical interface lives in the separate `mpqtool-gui` crate.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use mpq::{Archive, Error, FormatVersion};
+use mpqtool::tasks;
 
 #[derive(Parser)]
 #[command(
@@ -18,7 +17,7 @@ use mpq::{Archive, Error, FormatVersion};
 archives through their classic tables), imports and deletes files, and repairs \
 damaged headers. Non-essential data such as (listfile), \
 (attributes) or HET/BET tables may be missing — the archive still opens. \
-Run without arguments to launch the graphical interface."
+The graphical interface is the separate mpqtool-gui binary."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -109,21 +108,16 @@ enum Command {
         #[arg(long)]
         no_deep: bool,
     },
-    /// Launch the graphical interface.
-    Gui,
 }
 
 fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
-        // No subcommand: launch the GUI.
-        None => match gui::run() {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("error: {e}");
-                1
-            }
-        },
+        // No subcommand: summarize usage (the GUI is the mpqtool-gui binary).
+        None => {
+            Cli::command().print_help().unwrap_or(());
+            0
+        }
         Some(Command::Info { archive }) => cmd_info(&archive),
         Some(Command::List { archive, verbose }) => cmd_list(&archive, verbose),
         Some(Command::Extract {
@@ -152,13 +146,6 @@ fn main() {
             output,
             no_deep,
         }) => cmd_repair(&archive, dry_run, in_place, output, !no_deep),
-        Some(Command::Gui) => match gui::run() {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("error: {e}");
-                1
-            }
-        },
     };
     std::process::exit(code);
 }

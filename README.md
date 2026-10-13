@@ -43,10 +43,9 @@ for w in archive.warnings() {
 
 ## 用法（工具）
 
-直接运行 `mpqtool`（不带参数）即启动 **GUI**；子命令用于命令行模式：
+命令行工具 `mpqtool`；图形界面是独立的 `mpqtool-gui`（见下节）：
 
 ```
-mpqtool                              # 默认启动 GUI（等价于 mpqtool gui）
 mpqtool info   <archive>              # 头部与表概要
 mpqtool list   [-v] <archive>         # 列出文件（-v 显示标志/大小/来源）
 mpqtool cat    <archive> <name>       # 输出单个文件内容
@@ -58,6 +57,7 @@ mpqtool add    <archive> <files...>   # 导入文件（同名替换）
             --no-reencrypt-key2       # key-v2 文件存明文（默认重新加密）
 mpqtool delete <archive> <names...>   # 按名删除文件
         -o, --output <FILE>           # 写到别处（默认就地修改）
+mpqtool repair [options] <archive>    # 诊断 / 修复头部元数据
 ```
 
 示例：
@@ -132,10 +132,17 @@ $ mpqtool delete map.w3x oldfile.txt
 已写入 map.w3x（73888 字节）
 ```
 
-## GUI
+## GUI（mpqtool-gui）
 
-`mpqtool`（无参数，或显式 `mpqtool gui`）启动图形界面（egui，自动
-加载系统中文字体 + Segoe UI Emoji 作为图标回退，避免 ▸ ✕ 📁 等显示为方块）：
+图形界面基于 **Tauri 2**（Rust 后端 + WebView 前端，中文由系统字体直接
+渲染，无需字体补丁）：
+
+```
+cargo run -p mpqtool-gui        # 开发运行（前端为静态文件，无需 Node 构建）
+cargo build --release -p mpqtool-gui
+```
+
+功能与原 egui 版一致：
 
 - 打开 / 浏览归档：按钮选择或**直接把文件拖进窗口**（未打开归档时拖入
   即打开；已打开归档时拖入即加入导入队列），拖入时高亮提示并注明将执行
@@ -156,6 +163,12 @@ $ mpqtool delete map.w3x oldfile.txt
   （自动重载）或「在界面中打开结果」
 - 「工具 → 修复头信息」：问题列表 → 应用修复 → 保存修复副本
   或直接在界面中重新打开修复结果
+- 「设置 → 界面设置」调整全局字号（自动保存）
+
+前端（`gui/ui`）为无构建步骤的静态 HTML/CSS/JS，通过 Tauri IPC 调用
+`gui/src` 中的命令（打开/预览/提取/修复/修改）；`index.html?mock`
+可在浏览器中加载 `mock-tauri.js` 假后端做纯前端调试。打包安装包需
+`cargo tauri build`（tauri-cli v2）。
 
 ## 正确性验证
 
@@ -191,10 +204,16 @@ mpq/            读取/修改库（edition 2024, no unsafe）
   src/repair.rs       头部诊断/修复 + 表位置深度扫描
   src/modify.rs       导入/删除：块原样拷贝 + 容器重建
   src/archive.rs      Archive：打开/查找/读取 + 容错策略
-mpqtool/        CLI + GUI
-  src/main.rs         命令行入口（无参数默认启动 GUI）
-  src/gui.rs          egui 图形界面
-  src/tasks.rs        CLI/GUI 共享的提取等逻辑
+mpqtool/        CLI + 共享任务库（lib）
+  src/main.rs         命令行入口
+  src/lib.rs          lib 入口（暴露 tasks）
+  src/tasks.rs        CLI/GUI 共享的提取、目录树等逻辑
+gui/            Tauri 2 图形界面（mpqtool-gui）
+  src/main.rs         窗口与插件装配
+  src/state.rs        打开的归档状态与前端 DTO
+  src/commands.rs     IPC 命令（打开/预览/提取/修复/修改）
+  ui/                 前端（静态 HTML/CSS/JS，无构建步骤）
+  tauri.conf.json     Tauri 配置（窗口、图标、capabilities）
 docs/           格式依据备忘（源自 StormLib 源码验证）
 ```
 

@@ -1,0 +1,136 @@
+/* Development-only mock of the Tauri API so ui/index.html?mock renders in a
+ * plain browser. Loaded exclusively when the URL contains ?mock (see
+ * index.html); never bundled into the app. */
+
+'use strict';
+
+function entry(name, key, size, csize, flags, locale, source, mtime) {
+  const display = name || `<unnamed #${key.split(':')[1]}>`;
+  return {
+    name: name || null,
+    display,
+    size, csize, flags, locale, source, key, mtime,
+  };
+}
+
+function dir(name, files, dirs) {
+  return {
+    name,
+    files: files || [],
+    dirs: dirs || [],
+    file_count: (files || []).length + (dirs || []).reduce((n, d) => n + d.file_count, 0),
+    total_size: (files || []).reduce((n, f) => n + f.size, 0) + (dirs || []).reduce((n, d) => n + d.total_size, 0),
+    total_csize: (files || []).reduce((n, f) => n + f.csize, 0) + (dirs || []).reduce((n, d) => n + d.total_csize, 0),
+  };
+}
+
+const MOCK_TREE = dir('', [
+  entry('war3map.j', 'classic:0', 48213, 9120, 'EKC', 0, 'classic', '2023-01-01 08:00'),
+  entry('war3map.w3e', 'classic:1', 12045, 8990, 'EKC#', 0, 'classic', '2023-01-01 08:00'),
+], [
+  dir('(系统文件)', [
+    entry('(listfile)', 'classic:8', 210, 190, 'EC', 0, 'classic', null),
+    entry('(attributes)', 'classic:9', 96, 96, 'E1', 0, 'classic', null),
+  ]),
+  dir('(未命名)', [
+    entry(null, 'classic:10', 4096, 4100, 'K', 0, 'classic', null),
+  ]),
+  dir('Units', [], [
+    dir('Human', [
+      entry('Units\\Human\\Footman.def', 'classic:2', 640, 512, 'EC', 0, 'classic', '2022-11-30 19:20'),
+      entry('Units\\Human\\Knight.def', 'classic:3', 710, 560, 'EC', 0, 'classic', '2022-11-30 19:21'),
+    ]),
+    dir('Orc', [
+      entry('Units\\Orc\\Grunt.def', 'classic:4', 655, 520, 'EC', 0, 'classic', null),
+    ]),
+  ]),
+  dir('war3mapImported', [
+    entry('war3mapImported\\toast.blp', 'classic:5', 33792, 21000, 'EKC', 0, 'classic', '2024-06-15 12:30'),
+    entry('war3mapImported\\readme.txt', 'classic:6', 800, 400, 'E', 0, 'classic', '2024-06-15 12:31'),
+  ]),
+]);
+
+const MOCK_INFO = {
+  path: 'D:\\maps\\demo.w3x',
+  version: 1,
+  sector_size: 4096,
+  hash_table_size: 1024,
+  block_table_size: 11,
+  het_bet: false,
+  listfile_count: 9,
+  warnings: ['archive_size 0x2200 与实际 0x22ac 不符，已按实际值处理'],
+  tree: MOCK_TREE,
+  entry_count: 11,
+};
+
+const MOCK_TEXT = `function config takes nothing returns nothing\n    call SetMapName(\"TRIGSTR_1\")\nendfunction\n\n// 中文内容预览测试\n// war3map.j`;
+
+const MOCKS = {
+  open_archive: () => okOpen(),
+  reload_archive: () => okOpen(),
+  preview_file: ({ name }) => ({
+    text: `--- ${name} ---\n` + MOCK_TEXT,
+    size: name.length + MOCK_TEXT.length + 300000,
+    truncated: true,
+  }),
+  extract: ({ keys, dir }) => ({
+    ok: keys.length || 9,
+    failed: 0,
+    messages: [`${dir}\\war3map.j (48213)`, `${dir}\\war3map.w3e (12045)`],
+  }),
+  diagnose_archive: () => ({
+    issues: [
+      { field: 'hash_table_pos', problem: '哈希表位置 0x7f000000 越界', action: '扫描定位到 0x4c' },
+      { field: 'archive_size', problem: '归档大小 0x1000 与实际 0xac 不符', action: '改写为 0xac' },
+      { field: 'block_table', problem: '表内容校验失败', action: null },
+    ],
+  }),
+  apply_repair: () => ({ note: '已应用 2 项修复；1 项无法自动修复。' }),
+  save_repaired: ({ path }) => ({ note: `已保存 ${path}` }),
+  open_repaired: () => okOpen('D:\\maps\\demo.fixed.w3x'),
+  discard_repair: () => null,
+  stat_imports: ({ paths }) => paths.map((p) => {
+    const name = p.split(/[\\/]/).pop();
+    return { name, size: 12345, replaces: name === 'war3map.j', error: null };
+  }),
+  apply_modify: () => ({ note: '新增 1；替换 1；删除 1；自动移除 (attributes)；重新编码 1（key-v2 已按新偏移重新加密）。' }),
+  save_modified: ({ path }) => okOpen(path),
+  open_modified: () => {
+    const r = okOpen('D:\\maps\\demo.w3x');
+    r.note = '已载入修改结果（新增 1；替换 1；删除 1。）';
+    return r;
+  },
+  discard_modify: () => null,
+};
+
+function okOpen(path) {
+  const info = { ...MOCK_INFO, tree: MOCK_TREE, path: path || MOCK_INFO.path };
+  return { ok: true, note: null, info, error: null };
+}
+
+window.__TAURI__ = {
+  core: {
+    invoke: async (cmd, args) => {
+      await new Promise((r) => setTimeout(r, 60));
+      const fn = MOCKS[cmd];
+      if (!fn) throw new Error(`mock: unknown command ${cmd}`);
+      return fn(args || {});
+    },
+  },
+  dialog: {
+    open: async (opts) => {
+      if (opts && opts.directory) return 'D:\\out';
+      if (opts && opts.multiple) return ['D:\\import\\war3map.j', 'D:\\import\\newfile.txt'];
+      return 'D:\\maps\\demo.w3x';
+    },
+    save: async (opts) => `D:\\maps\\${(opts && opts.defaultPath) || 'out.w3x'}`,
+  },
+  webview: {
+    getCurrentWebview: () => ({
+      onDragDropEvent: async () => { /* browser test: no native drops */ },
+    }),
+  },
+  window: {
+    getCurrentWindow: () => ({ close: () => { window.close(); } }),
+  },
+};

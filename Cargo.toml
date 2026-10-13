@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["mpq", "mpqtool"]
+members = ["mpq", "mpqtool", "gui"]
 
 [workspace.package]
 edition = "2024"

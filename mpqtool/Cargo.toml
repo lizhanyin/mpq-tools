@@ -1,6 +1,6 @@
 [package]
 name = "mpqtool"
-description = "Inspect, extract and repair MPQ archives (CLI + GUI)"
+description = "Inspect, extract and repair MPQ archives (CLI)"
 edition.workspace = true
 rust-version.workspace = true
 version.workspace = true
@@ -9,9 +9,10 @@ license.workspace = true
 [dependencies]
 mpq = { path = "../mpq" }
 clap.workspace = true
-eframe = { version = "0.36", features = ["persistence"] }
-egui = "0.36"
-rfd = "0.17"
+
+[lib]
+name = "mpqtool"
+path = "src/lib.rs"
 
 [[bin]]
 name = "mpqtool"

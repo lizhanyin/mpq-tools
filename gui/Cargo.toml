@@ -1,0 +1,22 @@
+[package]
+name = "mpqtool-gui"
+description = "mpqtool graphical interface (Tauri 2)"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+mpq = { path = "../mpq" }
+mpqtool = { path = "../mpqtool" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "mpqtool-gui"
+path = "src/main.rs"

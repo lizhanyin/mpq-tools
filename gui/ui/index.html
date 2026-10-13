@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mpqtool — MPQ 归档浏览器</title>
+<link rel="stylesheet" href="app.css">
+<script>
+  // Browser-only mock of the Tauri API, used for UI development:
+  // open ui/index.html?mock over a static server. Never loaded in the app.
+  if (/[?&]mock\b/.test(location.search)) {
+    document.write('<script src="mock-tauri.js"><\/script>');
+  }
+</script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<div id="app">
+
+  <div id="menubar">
+    <div class="menu-root">
+      <button class="menu-title" data-menu="file">文件</button>
+      <div class="menu-dropdown" data-dropdown="file">
+        <button id="m-open">打开归档…</button>
+        <button id="m-extract-all">提取全部…</button>
+        <button id="m-import">导入文件到归档…</button>
+        <button id="m-reload">重新载入归档&ensp;F5</button>
+        <hr>
+        <button id="m-quit">退出</button>
+      </div>
+    </div>
+    <div class="menu-root">
+      <button class="menu-title" data-menu="tools">工具</button>
+      <div class="menu-dropdown" data-dropdown="tools">
+        <button id="m-repair">修复头信息…</button>
+      </div>
+    </div>
+    <div class="menu-root">
+      <button class="menu-title" data-menu="settings">设置</button>
+      <div class="menu-dropdown" data-dropdown="settings">
+        <button id="m-settings">界面设置…</button>
+      </div>
+    </div>
+    <div id="menu-path"></div>
+  </div>
+
+  <div id="statusbar"></div>
+
+  <div id="main">
+    <div id="welcome">
+      <h1>MPQ 归档浏览器</h1>
+      <button id="w-open" class="primary">打开归档…</button>
+      <p class="weak">或直接把 .mpq / .w3x / .sc2map 文件拖进窗口</p>
+    </div>
+    <div id="browser" hidden>
+      <div id="tree-panel">
+        <div id="tree-header"></div>
+        <div id="tree"></div>
+      </div>
+      <div id="tree-splitter"></div>
+      <div id="files-panel">
+        <div id="toolbar">
+          <button id="b-extract-sel">提取选中</button>
+          <button id="b-delete-sel" title="标记选中条目待删除，随后在「修改归档」窗口应用">删除选中</button>
+          <button id="b-select-all">全选</button>
+          <button id="b-select-none">全不选</button>
+          <span class="vsep"></span>
+          <label for="filter">过滤：</label>
+          <input id="filter" type="text" spellcheck="false">
+          <button id="b-clear-filter" title="清除过滤" hidden>✕</button>
+          <span id="sel-count"></span>
+        </div>
+        <div id="breadcrumb"></div>
+        <div id="table-scroll">
+          <table id="file-table">
+            <thead>
+              <tr>
+                <th class="col-check">✔</th>
+                <th class="col-name">名称</th>
+                <th class="col-num">大小</th>
+                <th class="col-num">压缩后</th>
+                <th class="col-flags">属性</th>
+                <th class="col-time">修改时间(UTC)</th>
+                <th class="col-num">地区</th>
+                <th class="col-src">来源</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+          <div id="table-note"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="log-panel">
+    <div id="log-header"><strong>日志</strong><button id="b-clear-log">清空</button></div>
+    <div id="log"></div>
+  </div>
+
+  <div id="drop-overlay" hidden></div>
+
+  <!-- Floating, non-modal preview window. -->
+  <div id="windows"></div>
+  <!-- Modal dialogs: 修复头信息 / 修改归档 / 设置. -->
+  <div id="modals"></div>
+
+</div>
+</body>
+</html>
