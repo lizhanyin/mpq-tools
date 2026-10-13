@@ -1,6 +1,6 @@
 # mpq — Mo'PaQ (MPQ) v3 协议库与工具
 
-Rust 实现的 MPQ 归档读取库（`mpq`）与命令行工具（`mpqtool`），按照
+Rust 实现的 MPQ 归档读取/修改库（`mpq`）与命令行工具（`mpqtool`），按照
 标准 **MPQ v3 协议**实现，同时兼容 v1/v2 头部（v4 头部可解析并经由
 经典表打开）。格式细节以 StormLib 源码为准逐一验证（见
 `docs/mpq-format-notes.md`）。
@@ -21,6 +21,8 @@ Rust 实现的 MPQ 归档读取库（`mpq`）与命令行工具（`mpqtool`）�
   - 缺 `(attributes)`、`(signature)`、HET/BET、hi-block 表 → 正常打开
   - 归档大小字段错误、表读取越界（补零）→ 仅告警
   - 只要 hash 表或 HET 之一可用 + block 表或 BET 之一可用即可打开
+- **修改归档**（导入/替换与删除，见下节）：保留文件块原样拷贝，
+  重建容器（hash/block 表、`(listfile)`、头部），自带结果校验
 
 ## 用法（库）
 
@@ -51,6 +53,10 @@ mpqtool cat    <archive> <name>       # 输出单个文件内容
 mpqtool extract [options] <archive> [files...]
         -o, --output <DIR>            # 输出目录（默认为归档名去扩展名）
             --all-entries             # 连未命名条目一起解出
+mpqtool add    <archive> <files...>   # 导入文件（同名替换）
+        -o, --output <FILE>           # 写到别处（默认就地修改）
+mpqtool delete <archive> <names...>   # 按名删除文件
+        -o, --output <FILE>           # 写到别处（默认就地修改）
 ```
 
 示例：
@@ -91,15 +97,58 @@ $ mpqtool repair --dry-run corrupt.w3x     # 仅诊断
 $ mpqtool repair corrupt.w3x               # 写出 corrupt.fixed.w3x
 ```
 
+## 导入 / 删除
+
+`mpq::modify`（CLI 的 `add` / `delete`，或 GUI 的「导入文件到归档…」
+「删除选中」）向归档导入文件（同名替换）并删除条目，返回完整的新
+文件字节与变更报告，写回前还会重新打开校验。策略：
+
+- **保留文件原样拷贝**：压缩方式、扇区 CRC、加密全部不变，只重建
+  容器（块表、哈希表、头部与 `(listfile)`）
+- 归档前的字节（`MPQ\x1B` 用户数据头、嵌入垃圾前缀）与归档之后的
+  追加数据原样保留，地图前后缀不丢
+- 无 listfile 的保护图：**原哈希表槽位布局保留**，无名单的条目
+  修改后仍可按名寻址；有名单时重建（可扩容的）哈希表
+- key-v2 加密（密钥依赖块偏移）自动按新偏移重新编码；
+  `(attributes)` / `(signature)` 因任何修改都会失效而自动移除
+  （与 StormLib 行为一致）
+- 纯 HET/BET 归档转为经典表：有名条目完整支持；无名条目的数据块
+  保留但失去按名寻址（原本也无名单来源）
+- v4 头部写回为 v3（v4 独有的 MD5 字段无法重算，经典表照常工作）
+
+```console
+$ mpqtool add map.w3x war3map.j newfile.txt
+导入 war3map.j（48213 字节）
+导入 newfile.txt（12 字节）
+替换 1：war3map.j
+新增 1：newfile.txt
+自动移除（修改后失效）：(attributes)
+已写入 map.w3x（74321 字节）
+
+$ mpqtool delete map.w3x oldfile.txt
+删除 1：oldfile.txt
+已写入 map.w3x（73888 字节）
+```
+
 ## GUI
 
 `mpqtool`（无参数，或显式 `mpqtool gui`）启动图形界面（egui，自动
-加载系统中文字体）：
+加载系统中文字体 + Segoe UI Emoji 作为图标回退，避免 ▸ ✕ 📁 等显示为方块）：
 
 - 打开 / 浏览归档：按钮选择或**直接把文件拖进窗口**（拖入时有高亮提示），
   状态栏显示版本、表、警告数
-- 文件列表：勾选、过滤、双击预览文本内容
-- 提取选中 / 提取全部（目录选择对话框，路径防逃逸）
+- **文件管理器式浏览**：左侧目录树 + 右侧文件列表。MPQ 本身没有目录，
+  树由 `(listfile)` 中的 `\` 路径合成（大小写不敏感合并文件夹）；
+  `(listfile)` 等内部文件归入「(系统文件)」，无名条目归入「(未命名)」
+- 面包屑导航 / 上一级 / 双击进入文件夹；文件列表含大小、压缩后、
+  属性（加密/压缩等）、**修改时间（取自 `(attributes)` 的 FILETIME）**、
+  地区、来源等列
+- 过滤框按全路径搜索，命中分支在树中自动展开，右侧切换为搜索结果视图
+- 勾选文件或**整棵文件夹**后「提取选中」/「提取全部」（目录选择对话框，
+  路径防逃逸）；双击文件预览文本内容
+- 「文件 → 导入文件到归档…」多选导入（同名自动替换），勾选后
+  「删除选中」（未命名条目也可删）；待办列表集中在「修改归档」窗口，
+  「应用修改」→「保存到文件…」（自动重载）或「在界面中打开结果」
 - 「工具 → 修复头信息」：问题列表 → 应用修复 → 保存修复副本
   或直接在界面中重新打开修复结果
 
@@ -112,17 +161,20 @@ $ mpqtool repair corrupt.w3x               # 写出 corrupt.fixed.w3x
 - 集成测试：测试内构建器从零合成 v1/v2/v3 归档（加密、压缩、单单元、
   key-v2、扇区 CRC、listfile、attributes、userdata 包装、嵌入扫描、
   纯 HET/BET 表），再经公开 API 读回校验
+- 修改测试：v1/v2/v3 与 userdata 包装下导入/替换/删除后读回一致；
+  无 listfile 时哈希槽位保留（按名寻址不丢）；key-v2 重新编码；
+  未命名条目按表键删除；空文件、不可压缩数据、保留前后缀
 - 修复测试：11 类损坏场景（表位置越界重定位、表项数截断、版本推断、
   头长度规整、v3 字段清零等）修复后归档可正常读取
 
 ```console
-$ cargo test        # 50 项测试
+$ cargo test        # 71 项测试
 ```
 
 ## 目录结构
 
 ```
-mpq/            读取库（edition 2024, no unsafe）
+mpq/            读取/修改库（edition 2024, no unsafe）
   src/crypt.rs        storm 加密、HashString、文件密钥
   src/jenkins.rs      lookup3 hashlittle2（HET/BET 名字哈希）
   src/header.rs       v1–v4 头部与 MPQ\x1B 用户数据头
@@ -131,6 +183,7 @@ mpq/            读取库（edition 2024, no unsafe）
   src/compression.rs  zlib/pkware/bzip2/lzma 解压调度
   src/pkware.rs       PKWARE DCL explode 移植
   src/repair.rs       头部诊断/修复 + 表位置深度扫描
+  src/modify.rs       导入/删除：块原样拷贝 + 容器重建
   src/archive.rs      Archive：打开/查找/读取 + 容错策略
 mpqtool/        CLI + GUI
   src/main.rs         命令行入口（无参数默认启动 GUI）

@@ -23,7 +23,7 @@ use crate::tables::{
 pub const SPECIAL_FILES: [&str; 4] = ["(listfile)", "(attributes)", "(signature)", "(userdata)"];
 
 /// Where a file entry's data came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TableSource {
     /// Classic block table (index into it stored in `block_index`).
     Classic,
@@ -561,6 +561,17 @@ impl<R: Read + Seek> Archive<R> {
     /// Parsed `(attributes)` if present and readable.
     pub fn attributes(&self) -> Option<&Attributes> {
         self.attributes.as_ref()
+    }
+
+    /// Decoded classic tables (crate-internal: used by the modifier to
+    /// preserve original hash-table slots, locales and unnamed blocks).
+    pub(crate) fn classic_tables(&self) -> Option<&ClassicTables> {
+        self.classic.as_ref()
+    }
+
+    /// Decoded BET table (crate-internal: used by the modifier).
+    pub(crate) fn bet_table(&self) -> Option<&BetTable> {
+        self.bet.as_ref()
     }
 
     /// Whether a HET/BET table pair is in use.

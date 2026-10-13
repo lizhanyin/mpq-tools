@@ -13,9 +13,10 @@ use mpq::{Archive, Error, FormatVersion};
 #[command(
     name = "mpqtool",
     version,
-    about = "Inspect, extract and repair Blizzard MPQ archives (v1–v4, v3 protocol focus)",
+    about = "Inspect, extract, modify and repair Blizzard MPQ archives (v1–v4, v3 protocol focus)",
     long_about = "Reads MPQ archives following the v3 protocol (also opens v1/v2/v4 \
-archives through their classic tables). Non-essential data such as (listfile), \
+archives through their classic tables), imports and deletes files, and repairs \
+damaged headers. Non-essential data such as (listfile), \
 (attributes) or HET/BET tables may be missing — the archive still opens. \
 Run without arguments to launch the graphical interface."
 )]
@@ -60,6 +61,29 @@ enum Command {
         /// File name inside the archive.
         name: String,
     },
+    /// Import files into the archive (stored under their file name;
+    /// an existing file of the same name is replaced).
+    Add {
+        /// Archive file.
+        archive: PathBuf,
+        /// Files to import.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Output file (default: modify the input in place).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Delete files from the archive by name.
+    Delete {
+        /// Archive file.
+        archive: PathBuf,
+        /// Names of files to delete (as shown by `mpqtool list`).
+        #[arg(required = true)]
+        names: Vec<String>,
+        /// Output file (default: modify the input in place).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Diagnose and repair damaged header metadata.
     Repair {
         /// Archive file.
@@ -101,6 +125,16 @@ fn main() {
             all_entries,
         }) => cmd_extract(&archive, &files, output, all_entries),
         Some(Command::Cat { archive, name }) => cmd_cat(&archive, &name),
+        Some(Command::Add {
+            archive,
+            files,
+            output,
+        }) => cmd_add(&archive, &files, output),
+        Some(Command::Delete {
+            archive,
+            names,
+            output,
+        }) => cmd_delete(&archive, &names, output),
         Some(Command::Repair {
             archive,
             dry_run,
@@ -350,6 +384,123 @@ fn print_issues(report: &mpq::RepairReport) {
             None => println!("[无法修复] {}: {}", issue.field, issue.problem),
         }
     }
+}
+
+// -- add / delete --------------------------------------------------------------
+
+/// Shared driver for the add / delete subcommands: read the archive, apply
+/// the modification (the library self-verifies the result), print the
+/// report and write the output.
+fn run_modify(
+    path: &Path,
+    deletions: Vec<mpq::Deletion>,
+    additions: Vec<(String, Vec<u8>)>,
+    output: Option<PathBuf>,
+) -> i32 {
+    // Reject deletions of names that do not exist (like `zip -d`).
+    for del in &deletions {
+        if let mpq::Deletion::ByName(name) = del {
+            match open_archive(path) {
+                Ok(a) => {
+                    if !a.has_file(name) {
+                        eprintln!("error: file not found: {name}");
+                        return 1;
+                    }
+                }
+                Err(e) => return fail(e),
+            }
+        }
+    }
+
+    let bytes = match tasks::read_file(path) {
+        Ok(b) => b,
+        Err(e) => return fail(Error::Io(e)),
+    };
+    let outcome = match mpq::modify(&bytes, &deletions, &additions) {
+        Ok(o) => o,
+        Err(e) => return fail(e),
+    };
+    print_modify_report(&outcome.report);
+
+    let out_path = output.unwrap_or_else(|| path.to_path_buf());
+    match std::fs::write(&out_path, &outcome.bytes) {
+        Ok(()) => {
+            println!(
+                "已写入 {}（{} 字节）",
+                out_path.display(),
+                outcome.bytes.len()
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("error: 无法写入 {}: {e}", out_path.display());
+            1
+        }
+    }
+}
+
+fn print_modify_report(report: &mpq::ModifyReport) {
+    if !report.added.is_empty() {
+        println!("新增 {}：{}", report.added.len(), report.added.join("、"));
+    }
+    if !report.replaced.is_empty() {
+        println!(
+            "替换 {}：{}",
+            report.replaced.len(),
+            report.replaced.join("、")
+        );
+    }
+    if !report.deleted.is_empty() {
+        println!(
+            "删除 {}：{}",
+            report.deleted.len(),
+            report.deleted.join("、")
+        );
+    }
+    if !report.dropped.is_empty() {
+        println!(
+            "自动移除（修改后失效）：{}",
+            report.dropped.join("、")
+        );
+    }
+    if !report.re_encoded.is_empty() {
+        println!(
+            "重新编码（key-v2 偏移变化）：{}",
+            report.re_encoded.join("、")
+        );
+    }
+}
+
+fn cmd_add(path: &Path, files: &[PathBuf], output: Option<PathBuf>) -> i32 {
+    let mut additions: Vec<(String, Vec<u8>)> = Vec::new();
+    for file in files {
+        let name = match file.file_name() {
+            Some(n) => n.to_string_lossy().to_string(),
+            None => {
+                eprintln!("error: 无法从路径取得文件名 {}", file.display());
+                return 1;
+            }
+        };
+        match tasks::read_file(file) {
+            Ok(data) => {
+                println!("导入 {}（{} 字节）", file.display(), data.len());
+                additions.push((name, data));
+            }
+            Err(e) => {
+                eprintln!("error: 读取失败 {}: {e}", file.display());
+                return 1;
+            }
+        }
+    }
+    run_modify(path, Vec::new(), additions, output)
+}
+
+fn cmd_delete(path: &Path, names: &[String], output: Option<PathBuf>) -> i32 {
+    let deletions: Vec<mpq::Deletion> = names
+        .iter()
+        .map(|n| mpq::Deletion::ByName(n.clone()))
+        .collect();
+    run_modify(path, deletions, Vec::new(), output)
 }
 
 fn fail(e: Error) -> i32 {

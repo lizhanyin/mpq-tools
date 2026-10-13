@@ -1,8 +1,9 @@
-//! # mpq — Mo'PaQ archive reading library
+//! # mpq — Mo'PaQ archive library
 //!
 //! Reads Blizzard MPQ archives up to and including the v3 protocol
 //! (v1/v2/v3 headers; v4 headers parse and open through their classic
-//! tables, with the v4-only MD5/HET extras ignored).
+//! tables, with the v4-only MD5/HET extras ignored), and modifies them
+//! (import / delete files, see [`modify`]).
 //!
 //! Features:
 //! * classic hash / block / hi-block tables (encrypted, possibly compressed)
@@ -12,6 +13,8 @@
 //!   zlib / PKWARE / bzip2 / LZMA decompression
 //! * `MPQ\x1B` user-data wrappers (Warcraft III / StarCraft II maps) and
 //!   embedded archive detection via 0x200-aligned scanning
+//! * modification: [`modify`] adds / replaces and deletes files while
+//!   copying every kept file's stored bytes verbatim
 //!
 //! The library is deliberately tolerant: anything non-essential (listfile,
 //! attributes, HET/BET, hi-block table, mismatched archive size) may be
@@ -36,6 +39,7 @@ mod error;
 mod header;
 mod hetbet;
 mod jenkins;
+mod modify;
 mod pkware;
 mod repair;
 mod tables;
@@ -62,3 +66,6 @@ pub use compression::{decompress_imploded, decompress_masked};
 
 /// Header diagnosis and repair.
 pub use repair::{diagnose, locate_header, repair, RepairIssue, RepairReport};
+
+/// Archive modification: import (add / replace) and delete files.
+pub use modify::{modify, Deletion, ModifyOutcome, ModifyReport};

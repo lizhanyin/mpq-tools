@@ -209,4 +209,29 @@ mod tests {
         assert_eq!(bt.len(), 2);
         assert_eq!(bt[0].flags, HASH_ENTRY_FREE);
     }
+
+    #[test]
+    fn hi_block_merges_into_48_bit_offsets() {
+        // >4 GB archives store the high 16 bits of each file offset in the
+        // hi-block table; entries without a hi word stay 32-bit.
+        let tables = ClassicTables {
+            block_table: vec![
+                BlockEntry { pos: 0x0000_1234, ..Default::default() },
+                BlockEntry { pos: 0xABCD_0001, ..Default::default() },
+            ],
+            hi_block: vec![0x0001, 0x0005],
+            ..Default::default()
+        };
+        // (0x1 << 32) | 0x1234
+        assert_eq!(tables.block_offset(0), 0x1_0000_1234);
+        // (0x5 << 32) | 0xABCD0001 — a genuine >4 GB file offset
+        assert_eq!(tables.block_offset(1), 0x0005_ABCD_0001);
+
+        // Missing hi words (table absent / shorter) fall back to plain 32-bit.
+        let no_hi = ClassicTables {
+            block_table: vec![BlockEntry { pos: 0x1000, ..Default::default() }],
+            ..Default::default()
+        };
+        assert_eq!(no_hi.block_offset(0), 0x1000);
+    }
 }
