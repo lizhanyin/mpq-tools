@@ -295,17 +295,64 @@ enum MenuAction {
 
 impl eframe::App for MpqApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_dropped_files(ui.ctx());
         self.draw_menu(ui);
         self.draw_status(ui);
         self.draw_main(ui);
         self.draw_log(ui);
         let ctx = ui.ctx().clone();
+        self.draw_drop_overlay(&ctx);
         self.draw_preview(&ctx);
         self.draw_repair(&ctx);
     }
 }
 
 impl MpqApp {
+    /// React to files dragged & dropped onto the window. The winit backend
+    /// surfaces drop events for one frame, so a plain per-frame check is
+    /// enough (re-dropping the same file later re-triggers it).
+    fn poll_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        let Some(first) = dropped.first() else { return };
+        let path = first.path().to_path_buf();
+        match first.bytes() {
+            Ok(bytes) => {
+                let extras = dropped.len().saturating_sub(1);
+                self.load_bytes(path, bytes);
+                self.logln("（通过拖拽打开）");
+                if extras > 0 {
+                    self.logln(format!(
+                        "（忽略了另外 {extras} 个拖入的文件，一次只能打开一个归档）"
+                    ));
+                }
+            }
+            Err(e) => self.logln(format!("读取拖入文件失败：{e}")),
+        }
+    }
+
+    /// Highlight the window while files are dragged over it.
+    fn draw_drop_overlay(&self, ctx: &egui::Context) {
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        if !hovering {
+            return;
+        }
+        let screen = ctx.viewport_rect();
+        let pos = screen.center() - egui::vec2(150.0, 26.0);
+        egui::Area::new(egui::Id::new("drop_overlay"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .interactable(false)
+            .show(ctx, |ui| {
+                egui::Frame::default()
+                    .fill(egui::Color32::from_rgba_unmultiplied(28, 96, 170, 235))
+                    .corner_radius(10.0)
+                    .inner_margin(egui::Margin::symmetric(26, 14))
+                    .show(ui, |ui| {
+                        ui.heading("📂 松开鼠标以打开归档");
+                    });
+            });
+    }
+
     fn draw_menu(&mut self, ui: &mut egui::Ui) {
         let mut action = None;
         egui::Panel::top("menu").show(ui, |ui| {
@@ -390,6 +437,8 @@ impl MpqApp {
                     if ui.button("打开归档…").clicked() {
                         self.open_dialog();
                     }
+                    ui.add_space(8.0);
+                    ui.weak("或直接把 .mpq / .w3x / .sc2map 文件拖进窗口");
                 });
                 return;
             }
