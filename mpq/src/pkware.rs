@@ -380,8 +380,10 @@ mod tests {
         assert!(explode(&[7, 4, 0, 0, 0], &mut out, 64).is_err()); // bad mode
     }
 
-    /// Vectors produced by compiling Blizzard's actual PKWARE DCL code
-    /// (StormLib pklib/implode.c). See tests/fixtures.
+    /// Vectors from tests/fixtures: `pk_text.orig` is the committed
+    /// original; the streams (and the `pk_rand`/`pk_runs` pairs) come from
+    /// the implode encoder ported in examples/gen_pk_fixtures.rs, which
+    /// regenerates them and round-trip-verifies each against this decoder.
     #[test]
     fn explodes_reference_vectors() {
         // Note: PKWARE ASCII mode (ctype 1) is never produced by MPQ
