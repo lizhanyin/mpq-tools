@@ -1,0 +1,13 @@
+[package]
+name = "mpq"
+description = "Mo'PaQ (MPQ) archive reading library, MPQ v1-v4 with focus on the v3 protocol"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+readme = "../README.md"
+
+[dependencies]
+flate2.workspace = true
+bzip2-rs.workspace = true
+lzma-rs.workspace = true

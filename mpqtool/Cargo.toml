@@ -1,0 +1,11 @@
+[package]
+name = "mpqtool"
+description = "Command line tool for inspecting and extracting MPQ archives"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+mpq = { path = "../mpq" }
+clap.workspace = true
