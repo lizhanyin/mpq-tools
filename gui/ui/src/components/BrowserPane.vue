@@ -6,7 +6,7 @@ import FileTable from './FileTable.vue'
 import {
   S, searching, searchResults, modifyFrozen,
   setFilter, reloadArchive, navigate,
-  extractSelected, deleteSelected, selectAll, selectNone,
+  extractSelected, deleteSelected,
 } from '../store'
 import { fmtBytes, nodeAt } from '../utils'
 
@@ -54,8 +54,6 @@ const matchCount = computed(() => searching.value ? searchResults.value.length :
         <n-button size="small" :disabled="selCount.size === 0 || modifyFrozen"
                   title="标记选中条目待删除，随后在「修改归档」窗口应用"
                   @click="deleteSelected">删除选中</n-button>
-        <n-button size="small" @click="selectAll">全选</n-button>
-        <n-button size="small" @click="selectNone">全不选</n-button>
         <span class="vsep"></span>
         <span class="filter-label">过滤：</span>
         <n-input :value="S.filter" size="small" clearable spellcheck="false"

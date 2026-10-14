@@ -4,16 +4,25 @@ import { NDataTable, NCheckbox } from 'naive-ui'
 import {
   S, rows, navigate, previewFile, log,
   toggleSelected, toggleDirSelected,
+  scopeSelection, toggleSelectAll,
   MAX_ROWS,
 } from '../store'
 import { fmtBytes, baseName, collectKeys } from '../utils'
 
 const columns = [
   {
-    title: '✔',
     key: 'check',
     width: 36,
     align: 'center',
+    // 表头：当前视图的全选 / 取消全选（带半选态）。
+    title: () => h(NCheckbox, {
+      size: 'small',
+      checked: scopeSelection.value.checked,
+      indeterminate: scopeSelection.value.indeterminate,
+      disabled: scopeSelection.value.disabled,
+      title: '全选 / 取消全选（当前视图）',
+      'onUpdate:checked': (v) => toggleSelectAll(v),
+    }),
     render(row) {
       if (row.type === 'dir') {
         const keys = collectKeys(row.node)
@@ -136,7 +145,6 @@ function rowProps(row) {
       size="small"
       striped
       flex-height
-      virtual-scroll
       :bordered="false"
       :single-line="false"
       :columns="columns"

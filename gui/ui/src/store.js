@@ -256,18 +256,36 @@ export function toggleDirSelected(node, on) {
 }
 
 export function selectAll() {
-  let all
-  if (searching.value) {
-    all = searchResults.value
-  } else {
-    const node = U.nodeAt(S.info.tree, S.cwd)
-    all = node ? U.collectFiles(node) : []
-  }
-  for (const f of all) S.selected.add(f.key)
+  for (const k of scopeKeys()) S.selected.add(k)
 }
 
 export function selectNone() {
   S.selected.clear()
+}
+
+/** 当前视图的选择范围（与旧「全选」一致）：搜索态=全部命中；目录态=当前文件夹递归。 */
+export function scopeKeys() {
+  if (searching.value) return searchResults.value.map((f) => f.key)
+  if (!S.info) return []
+  const node = U.nodeAt(S.info.tree, S.cwd)
+  return node ? U.collectKeys(node) : []
+}
+
+/** 表头全选复选框的状态。 */
+export const scopeSelection = computed(() => {
+  const keys = scopeKeys()
+  if (keys.length === 0) return { checked: false, indeterminate: false, disabled: true }
+  const sel = keys.reduce((n, k) => n + (S.selected.has(k) ? 1 : 0), 0)
+  return {
+    checked: sel === keys.length,
+    indeterminate: sel > 0 && sel < keys.length,
+    disabled: false,
+  }
+})
+
+export function toggleSelectAll(on) {
+  if (on) selectAll()
+  else selectNone()
 }
 
 // ---------------------------------------------------------------------------
