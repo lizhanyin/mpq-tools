@@ -350,13 +350,46 @@ body {
   text-align: center;
 }
 
-.modify-scroll {
-  max-height: 280px;
-  overflow: auto;
+/* 左右两栏面板（修改归档：左=待导入，右=待删除） */
+.modify-columns {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+.modify-col {
+  flex: 1 1 0;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fafbfd;
   display: flex;
   flex-direction: column;
-  gap: 8px;
 }
+.modify-col-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.modify-col-head .section-count { margin-left: auto; }
+.modify-col-body {
+  /* 固定约 6 行的高度（行 ~26px × 6 + 行距 3×5 + 内边距 12），超出滚动 */
+  height: 195px;
+  overflow: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.col-empty {
+  color: var(--text-weak);
+  font-size: 0.92em;
+  text-align: center;
+  padding: 14px 8px;
+}
+
 .pending-list { display: flex; flex-direction: column; gap: 3px; }
 .pending-row {
   display: flex;
@@ -364,6 +397,7 @@ body {
   gap: 8px;
   padding: 2px 6px 2px 4px;
   border-radius: 6px;
+  flex-wrap: wrap;
 }
 .pending-row:hover { background: #f2f5f9; }
 .pending-row .name { font-family: var(--mono); font-size: 0.92em; word-break: break-all; }
