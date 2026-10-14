@@ -1,0 +1,346 @@
+/* mpqtool-gui 全局样式 — 根字号由「界面设置」控制（localStorage 持久化，
+ * store.setFontSize 同时同步 Naive UI 的 themeOverrides）。 */
+:root {
+  --bg: #f3f5f8;
+  --panel: #ffffff;
+  --border: #d9dee6;
+  --border-strong: #c4ccd8;
+  --text: #1c2733;
+  --text-weak: #707c8a;
+  --accent: #2f6fe0;
+  --accent-soft: #e8f0fe;
+  --danger: #b23c3c;
+  --warn: #c08a00;
+  --ok: #2e7d32;
+  --mono: ui-monospace, Consolas, "Cascadia Mono", "Courier New", monospace;
+  --sans: system-ui, "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html { font-size: 13px; height: 100%; }
+
+body {
+  margin: 0;
+  height: 100%;
+  font-size: 1rem;
+  font-family: var(--sans);
+  color: var(--text);
+  background: var(--bg);
+  overflow: hidden;
+  user-select: none;
+}
+
+/* 挂载点 → n-config-provider 根 div → 布局根：三级都要 100% 高，
+ * 否则中间层会把 flex 高度链打断。 */
+#app,
+#app > div {
+  height: 100%;
+}
+
+.app-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.weak { color: var(--text-weak); }
+.mono { font-family: var(--mono); }
+
+/* -- menu bar ---------------------------------------------------------------- */
+
+.menubar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 0 6px;
+  height: 30px;
+  flex: none;
+  position: relative;
+  z-index: 60;
+}
+
+.menu-path {
+  margin-left: auto;
+  color: var(--text-weak);
+  font-size: 0.92em;
+  padding: 0 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 45%;
+}
+
+/* -- status bar -------------------------------------------------------------- */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 3px 12px;
+  height: 28px;
+  font-size: 0.92em;
+  color: var(--text-weak);
+  white-space: nowrap;
+  overflow: hidden;
+  flex: none;
+}
+.statusbar .sep { color: var(--border-strong); }
+.statusbar .strong { color: var(--text); }
+
+/* -- main area --------------------------------------------------------------- */
+
+.main { flex: 1; min-height: 0; position: relative; }
+
+.welcome {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+.welcome h1 { font-size: 1.6em; font-weight: 600; margin: 0; }
+
+.browser { display: flex; height: 100%; min-width: 0; }
+
+.tree-panel {
+  width: 230px;
+  min-width: 150px;
+  max-width: 60vw;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  min-height: 0;
+}
+.tree-header {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  flex: none;
+}
+.tree-body { flex: 1; min-height: 0; padding: 4px 0; }
+.tree-body .n-tree { height: 100%; }
+
+.tree-splitter {
+  width: 4px;
+  cursor: col-resize;
+  flex: none;
+  background: transparent;
+  margin-left: -2px;
+  z-index: 5;
+}
+.tree-splitter:hover, .tree-splitter.dragging { background: var(--accent); }
+
+.files-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  flex: none;
+  flex-wrap: wrap;
+}
+.toolbar .vsep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+  margin: 0 4px;
+}
+.toolbar .filter-label { color: var(--text-weak); }
+.toolbar .sel-count { margin-left: auto; color: var(--text-weak); font-size: 0.92em; }
+.toolbar .n-input { width: 180px; }
+
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 10px 6px;
+  flex-wrap: wrap;
+  flex: none;
+  min-height: 28px;
+}
+.breadcrumb .sep { color: var(--border-strong); }
+.breadcrumb .crumb-seg { font-family: var(--mono); font-size: 0.92em; }
+.breadcrumb .searching { font-weight: 600; }
+.breadcrumb .weak { font-size: 0.92em; }
+
+.table-scroll {
+  flex: 1;
+  min-height: 0;
+  margin: 0 10px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.table-scroll .n-data-table {
+  flex: 1;
+  min-height: 0;
+}
+.table-note { color: var(--text-weak); font-size: 0.92em; padding: 0 2px; }
+
+/* 文件表单元格内容（等宽、右对齐由列 align 控制） */
+.cname { font-family: var(--mono); }
+.cdir { font-family: var(--mono); }
+.unnamed { color: var(--warn); }
+
+/* -- log panel --------------------------------------------------------------- */
+
+.log-panel {
+  flex: none;
+  height: 132px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  min-height: 0;
+}
+.log-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 10px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.log-body {
+  flex: 1;
+  overflow: auto;
+  font-family: var(--mono);
+  font-size: 0.9em;
+  padding: 4px 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+
+/* -- drop overlay ------------------------------------------------------------ */
+
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: rgba(47, 111, 224, 0.08);
+  border: 3px dashed var(--accent);
+}
+.drop-overlay .banner {
+  background: rgba(28, 96, 170, 0.92);
+  color: #fff;
+  font-size: 1.25em;
+  font-weight: 600;
+  border-radius: 10px;
+  padding: 14px 26px;
+}
+
+/* -- floating preview window --------------------------------------------------- */
+
+.fwindow {
+  position: fixed;
+  width: 640px;
+  height: 480px;
+  min-width: 320px;
+  min-height: 200px;
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 10px 36px rgba(15, 25, 45, 0.28);
+  display: flex;
+  flex-direction: column;
+  z-index: 200;
+}
+.fwindow .fwin-title {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: move;
+  font-weight: 600;
+  gap: 8px;
+  flex: none;
+}
+.fwindow .fwin-title .spacer { margin-left: auto; }
+.fwindow .fwin-body {
+  flex: 1;
+  overflow: auto;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+.fwindow pre {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.9em;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: text;
+}
+
+/* -- modal internals (Naive n-modal 卡片内部的结构) ----------------------------- */
+
+.modal-src { font-size: 0.95em; }
+.modal-sep { border: none; border-top: 1px solid var(--border); margin: 2px 0; }
+
+.issue-scroll { max-height: 260px; overflow: auto; display: flex; flex-direction: column; gap: 4px; }
+.issue { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.issue .field { font-family: var(--mono); font-size: 0.92em; }
+.issue .desc { color: var(--text-weak); font-size: 0.95em; }
+
+.modify-scroll {
+  max-height: 280px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pending-list { display: flex; flex-direction: column; gap: 3px; }
+.pending-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.pending-row:hover { background: #f2f5f9; }
+.pending-row .name { font-family: var(--mono); font-size: 0.92em; word-break: break-all; }
+.pending-row .meta { color: var(--text-weak); font-size: 0.88em; white-space: nowrap; }
+.pending-row .remove { margin-left: auto; flex: none; }
+
+.section-label { font-weight: 600; margin-top: 4px; }
+.hint-text { color: var(--text-weak); font-size: 0.92em; }
+.modal-note { color: var(--text); word-break: break-all; }
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* -- settings ------------------------------------------------------------------ */
+
+.preset-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.settings-preview {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}

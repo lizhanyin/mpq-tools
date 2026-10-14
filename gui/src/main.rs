@@ -1,7 +1,8 @@
 //! mpqtool-gui — Tauri 2 graphical interface for mpqtool.
 //!
-//! The frontend (gui/ui) is static HTML/JS with no build step; this crate
-//! hosts the mpq-powered commands it invokes.
+//! The frontend (gui/ui) is a Vue 3 + Naive UI app built with Vite
+//! (`npm run build` → ui/dist); this crate hosts the mpq-powered
+//! commands it invokes.
 
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]

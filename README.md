@@ -134,11 +134,14 @@ $ mpqtool delete map.w3x oldfile.txt
 
 ## GUI（mpqtool-gui）
 
-图形界面基于 **Tauri 2**（Rust 后端 + WebView 前端，中文由系统字体直接
-渲染，无需字体补丁）：
+图形界面基于 **Tauri 2**（Rust 后端 + Vue 3 / Naive UI 前端，中文由
+系统字体直接渲染，无需字体补丁）：
 
 ```
-cargo run -p mpqtool-gui        # 开发运行（前端为静态文件，无需 Node 构建）
+npm --prefix gui/ui install     # 首次：安装前端依赖
+npm --prefix gui/ui run build   # 构建前端到 gui/ui/dist（改动后重跑；
+                                 #      开发可改用 run watch 自动重建）
+cargo run -p mpqtool-gui        # 开发运行
 cargo build --release -p mpqtool-gui
 ```
 
@@ -165,9 +168,10 @@ cargo build --release -p mpqtool-gui
   或直接在界面中重新打开修复结果
 - 「设置 → 界面设置」调整全局字号（自动保存）
 
-前端（`gui/ui`）为无构建步骤的静态 HTML/CSS/JS，通过 Tauri IPC 调用
-`gui/src` 中的命令（打开/预览/提取/修复/修改）；`index.html?mock`
-可在浏览器中加载 `mock-tauri.js` 假后端做纯前端调试。打包安装包需
+前端（`gui/ui`）为 Vite 构建的 **Vue 3 + Naive UI** 单页应用，通过
+Tauri IPC 调用 `gui/src` 中的命令（打开/预览/提取/修复/修改）；
+`npm --prefix gui/ui run dev` 后访问
+`http://localhost:5173/?mock` 可加载假后端做纯前端调试。打包安装包需
 `cargo tauri build`（tauri-cli v2）。
 
 ## 正确性验证

@@ -1,0 +1,72 @@
+<script setup>
+import { computed, ref } from 'vue'
+import { NDropdown, NButton } from 'naive-ui'
+import {
+  S, modifyFrozen,
+  openArchiveDialog, extractAll, importFilesDialog, reloadArchive,
+  startRepair,
+} from '../store'
+import * as ipc from '../ipc'
+
+const hasArchive = computed(() => !!S.info)
+const hasPath = computed(() => !!S.openPath)
+
+// 显式受控 show：select 后立即收起，避免气泡在模态框打开时残留。
+const fileShow = ref(false)
+const toolsShow = ref(false)
+const settingsShow = ref(false)
+
+const fileOptions = computed(() => [
+  { label: '打开归档…', key: 'open' },
+  { label: '提取全部…', key: 'extract-all', disabled: !hasArchive.value },
+  { label: '导入文件到归档…', key: 'import', disabled: !hasArchive.value || modifyFrozen.value },
+  { label: '重新载入归档\u2003F5', key: 'reload', disabled: !hasPath.value },
+  { type: 'divider', key: 'd1' },
+  { label: '退出', key: 'quit' },
+])
+
+const toolsOptions = computed(() => [
+  { label: '修复头信息…', key: 'repair', disabled: !hasPath.value },
+])
+
+const settingsOptions = [
+  { label: '界面设置…', key: 'settings' },
+]
+
+function onFileSelect(key) {
+  fileShow.value = false
+  if (key === 'open') openArchiveDialog()
+  else if (key === 'extract-all') extractAll()
+  else if (key === 'import') importFilesDialog()
+  else if (key === 'reload') reloadArchive()
+  else if (key === 'quit') ipc.closeWindow()
+}
+
+function onToolsSelect(key) {
+  toolsShow.value = false
+  if (key === 'repair') startRepair()
+}
+
+function onSettingsSelect(key) {
+  settingsShow.value = false
+  if (key === 'settings') S.settingsOpen = true
+}
+</script>
+
+<template>
+  <div class="menubar">
+    <n-dropdown trigger="click" placement="bottom-start"
+                v-model:show="fileShow" :options="fileOptions" @select="onFileSelect">
+      <n-button quaternary size="tiny">文件</n-button>
+    </n-dropdown>
+    <n-dropdown trigger="click" placement="bottom-start"
+                v-model:show="toolsShow" :options="toolsOptions" @select="onToolsSelect">
+      <n-button quaternary size="tiny">工具</n-button>
+    </n-dropdown>
+    <n-dropdown trigger="click" placement="bottom-start"
+                v-model:show="settingsShow" :options="settingsOptions" @select="onSettingsSelect">
+      <n-button quaternary size="tiny">设置</n-button>
+    </n-dropdown>
+    <div class="menu-path">{{ S.openPath || '未打开归档' }}</div>
+  </div>
+</template>
