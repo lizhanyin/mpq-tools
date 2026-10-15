@@ -12,8 +12,9 @@ pklib/explode.c、jenkins/lookup3.c）。
   hash_table_pos u32, block_table_pos u32, hash_table_size u32, block_table_size u32
 - v2 头 0x2C：+ hi_block_table_pos u64, hash_table_pos_hi u16, block_table_pos_hi u16（表位置相对归档起点，48位）
 - v3 头 0x44：+ archive_size64 u64, bet_table_pos64 u64, het_table_pos64 u64（均为相对归档起点）
-- v4 头 0xD0：+ hash/block/hiblock/het/bet_table_size64（5×u64）, raw_chunk_size u32,
-  MD5_BlockTable/HashTable/HiBlockTable/BetTable/HetTable/MpqHeader（6×16B）
+- v4 头 0xD0：+ hash/block/hiblock/het/bet_table_size64（5×u64 @ 0x44–0x6C，**存储态**表大小）,
+  raw_chunk_size u32 @ 0x6C, MD5_BlockTable @ 0x70 / MD5_HashTable @ 0x80 / MD5_HiBlockTable @ 0x90 /
+  MD5_BetTable @ 0xA0 / MD5_HetTable @ 0xB0 / MD5_MpqHeader @ 0xC0（6×16B；注意 BET 在 HET 之前）
 - v3 无表大小字段：按顺序 HET→BET→hash→block→hi-block 递减排列，从 archive_size64 逐级倒推
   （size = 上一边界 - pos，MaxOffset 依次更新）；v2 hash 表大小 = block_pos - hash_pos
 - header_size 允许小于标准（v3 允许 = 0x2C 之类），缺失字段按 0 处理
@@ -92,3 +93,26 @@ CRC32 u32 × n，FILETIME u64 × n，MD5 16B × n，patch bit × n
 ## (listfile)
 
 文件名以 0x0D 0x0A / ';' 分隔；(listfile) 本身通常压缩存储。
+
+## v4 校验（MD5，源自 StormLib SBaseFileTable.cpp / SFileOpenArchive.cpp 逐一验证）
+
+- **表 MD5 覆盖存储态字节**：hash/block 表 MD5 对**加密（若压缩则压缩后）**
+  的磁盘字节、按 `*_table_size64`（或推导的存储大小）精确长度计算——
+  即 StormLib `SaveMpqTable` 先 `EncryptMpqBlock` 再 `CalculateDataBlockHash`，
+  加载侧 `LoadMpqTable` 在解密**前**对刚读入的原始字节校验（不匹配 →
+  ERROR_FILE_CORRUPT，表作废）。全零 MD5 表示"未填写"，跳过（IsValidMD5）
+- **HET/BET MD5**：覆盖**整个存储态表**（含 12 字节明文 ExtHdr），
+  `SaveExtTable` 在（可选）压缩+加密后对存储总长计算；master 分支加载侧
+  已不再校验（旧版曾校验失败即弃表）
+- **MD5_MpqHeader**：对头部 `0x00..0xC0`（signature 到 MD5_HetTable）计算；
+  打开时非零且失配 → ERROR_FAKE_MPQ_HEADER（StormLib 硬拒绝，SC2 尤其
+  依赖）；保存时最后写入。修复头部任何字段都会使其失效，需重算
+- **hi-block 表**：StormLib 保存时**不**回填其 MD5（保持 0）；
+  `SFileVerifyRawData(SFILE_VERIFY_HIBLOCK_TABLE)` 可按需校验存储态字节
+- **raw_chunk_size**：非零时每个文件的**存储态数据**（csize 字节）按
+  chunk 分块，`ceil(csize/chunk)` 个 MD5 组成的数组**紧跟在存储数据之后**
+  （不占 csize、不加密），见 `WriteMemDataMD5`/`AllocateMd5Buffer`；
+  写入侧空间分配把数组长度计入 FreeSpacePos
+- 本库取舍：以上校验失败一律**降为告警**（容错打开哲学），写回 v4 时
+  重算 hash/block 表 MD5 与头部 MD5（HET/BET/hi-block 不写出、MD5 置零，
+  raw_chunk_size 清零不携带文件级分块 MD5）

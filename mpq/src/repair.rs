@@ -15,10 +15,11 @@
 //! are rewritten, in place, on a buffer the caller controls.
 
 use crate::crypt::{decrypt_bytes, KEY_BLOCK_TABLE, KEY_HASH_TABLE};
+use crate::digest;
 use crate::error::{Error, Result};
 use crate::header::{
-    MpqHeader, UserDataHeader, HEADER_SIZE_V1, HEADER_SIZE_V2, HEADER_SIZE_V3, HEADER_SIZE_V4,
-    MPQ_MAGIC, USERDATA_MAGIC,
+    MpqHeader, UserDataHeader, HEADER_MD5_SPAN, HEADER_SIZE_V1, HEADER_SIZE_V2, HEADER_SIZE_V3,
+    HEADER_SIZE_V4, MPQ_MAGIC, USERDATA_MAGIC,
 };
 use crate::tables::{BlockEntry, HashEntry, FILE_EXISTS};
 
@@ -622,6 +623,41 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
             offset: base + 0x08,
             bytes: (expect32 as u32).to_le_bytes().to_vec(),
         });
+    }
+
+    // --- v4 header MD5 --------------------------------------------------------
+    // The v4 header carries its own MD5 over bytes 0x00..0xC0, so any header
+    // repair above invalidates it (StormLib refuses to open such archives).
+    // Recompute it against the header *after* all pending patches.
+    if version == 3 && base + HEADER_SIZE_V4 as usize <= n {
+        let mut window = data[base..base + HEADER_SIZE_V4 as usize].to_vec();
+        let mut header_patched = false;
+        for p in &patches {
+            let rel = p.offset.wrapping_sub(base);
+            if rel < HEADER_MD5_SPAN {
+                let end = rel + p.bytes.len();
+                if end <= window.len() {
+                    window[rel..end].copy_from_slice(&p.bytes);
+                    header_patched = true;
+                }
+            }
+        }
+        let expected = digest::md5_digest(&window[..HEADER_MD5_SPAN]);
+        let current: [u8; 16] = window[HEADER_MD5_SPAN..HEADER_MD5_SPAN + 16]
+            .try_into()
+            .expect("16 bytes");
+        if current != expected && (digest::md5_present(&current) || header_patched) {
+            let why = if digest::md5_present(&current) {
+                "头部 MD5 与头部内容不符（或头部字段已修复）"
+            } else {
+                "头部字段已修复，原头部 MD5 缺失"
+            };
+            issues.push(RepairIssue::fixed("MD5_MpqHeader", why, "按修复后的头部重算"));
+            patches.push(Patch {
+                offset: base + HEADER_MD5_SPAN,
+                bytes: expected.to_vec(),
+            });
+        }
     }
 
     // --- apply ----------------------------------------------------------------

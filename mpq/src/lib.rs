@@ -1,13 +1,18 @@
 //! # mpq — Mo'PaQ archive library
 //!
-//! Reads Blizzard MPQ archives up to and including the v3 protocol
-//! (v1/v2/v3 headers; v4 headers parse and open through their classic
-//! tables, with the v4-only MD5/HET extras ignored), and modifies them
-//! (import / delete files, see [`modify`]).
+//! Reads Blizzard MPQ archives following the v3 protocol (v1/v2/v3 headers)
+//! plus full v4 support: v4 headers parse with all their fields, the six v4
+//! MD5 checksums (five tables + the header itself) and the per-file
+//! raw-chunk MD5s are verified on read (mismatches warn, they never block
+//! opening), and v4 containers can be written back — [`modify`] preserves
+//! the v4 version and recomputes every MD5, and [`create`] / [`convert`]
+//! accept v4 targets. New empty archives can be created at a chosen version
+//! ([`create`]) and existing archives converted between v1–v4 ([`convert`]).
 //!
 //! Features:
 //! * classic hash / block / hi-block tables (encrypted, possibly compressed)
-//! * HET + BET tables of v3 archives
+//! * HET + BET tables of v3/v4 archives
+//! * v4 MD5 verification (tables, header, raw file chunks)
 //! * `(listfile)`, `(attributes)` — both optional
 //! * sector and single-unit files, encryption incl. key-v2,
 //!   zlib / PKWARE / bzip2 / LZMA decompression
@@ -34,7 +39,9 @@
 mod archive;
 mod attrs;
 mod compression;
+mod create;
 mod crypt;
+mod digest;
 mod error;
 mod header;
 mod hetbet;
@@ -67,5 +74,11 @@ pub use compression::{decompress_imploded, decompress_masked};
 /// Header diagnosis and repair.
 pub use repair::{diagnose, locate_header, repair, RepairIssue, RepairReport};
 
-/// Archive modification: import (add / replace) and delete files.
-pub use modify::{modify, modify_with, Deletion, ModifyOptions, ModifyOutcome, ModifyReport};
+/// Archive modification: import (add / replace) and delete files, plus
+/// container version conversion.
+pub use modify::{
+    convert, modify, modify_with, Deletion, ModifyOptions, ModifyOutcome, ModifyReport,
+};
+
+/// Creation of new, empty archives.
+pub use create::{create, CreateOptions};

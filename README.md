@@ -1,17 +1,21 @@
-# mpq — Mo'PaQ (MPQ) v3 协议库与工具
+# mpq — Mo'PaQ (MPQ) v3/v4 协议库与工具
 
 Rust 实现的 MPQ 归档读取/修改库（`mpq`）与命令行工具（`mpqtool`），按照
-标准 **MPQ v3 协议**实现，同时兼容 v1/v2 头部（v4 头部可解析并经由
-经典表打开）。格式细节以 StormLib 源码为准逐一验证（见
-`docs/mpq-format-notes.md`）。
+标准 **MPQ v3 协议**实现并**完整支持 v4**（头部全字段解析、六处 MD5
+校验、v4 容器写回），兼容 v1/v2 头部。格式细节以 StormLib 源码为准
+逐一验证（见 `docs/mpq-format-notes.md`）。
 
 ## 特性
 
-- **头部**：v1 (0x20) / v2 (0x2C) / v3 (0x44) / v4 (0xD0) 解析；
+- **头部**：v1 (0x20) / v2 (0x2C) / v3 (0x44) / v4 (0xD0) 全字段解析；
   `MPQ\x1B` 用户数据头（War3/SC2 地图前置）；嵌入归档 0x200 对齐扫描
 - **经典表**：hash / block / hi-block 表（storm 加密，可压缩存储）
 - **v3 扩展表**：HET + BET（Jenkins lookup3 名字哈希、位打包记录、
   表体加密，支持压缩存储）
+- **v4 校验**：hash / block / hi-block / HET / BET 表 MD5（按**存储态**
+  字节）+ 头部自身 MD5（前 0xC0 字节）+ 每文件 raw chunk MD5
+  （`raw_chunk_size` 非零时，数组紧跟存储数据、不计入 csize）；
+  校验失败一律**仅告警**，不阻断打开（StormLib 对头部 MD5 是硬失败）
 - **文件读取**：扇区布局与单单元、zlib / PKWARE implode / bzip2 /
   LZMA 解压、storm 加密（含 key-v2 `(key+offset)^size`）、扇区 CRC
   （校验失败仅告警）
@@ -85,6 +89,8 @@ out/war3map.j (48213)
   StormLib 的畸形归档恢复路径）
 - 保护工具虚增的表项数（哈希表截断后按 2 的幂对齐）
 - v2/v3 的 hi-block / HET / BET 位置越界清零
+- v4 头部字段修复后**按最终头部重算 `MD5_MpqHeader`**（头部 MD5 覆盖
+  前 0xC0 字节，任何字段改动都会使其失效，且 StormLib 对失配是硬拒绝）
 
 修复只改写头部字段，绝不触碰文件数据或表内容；无法自动修复的问题会
 明确列出。库接口：`mpq::diagnose(&[u8])`（只读诊断）与
@@ -114,9 +120,11 @@ $ mpqtool repair corrupt.w3x               # 写出 corrupt.fixed.w3x
   保持）；`--no-reencrypt-key2` / GUI 勾选项可改为存明文；
   `(attributes)` / `(signature)` 因任何修改都会失效而自动移除
   （与 StormLib 行为一致）
-- 纯 HET/BET 归档转为经典表：有名条目完整支持；无名条目的数据块
-  保留但失去按名寻址（原本也无名单来源）
-- v4 头部写回为 v3（v4 独有的 MD5 字段无法重算，经典表照常工作）
+- 纯 HET/BET 归档转为经典表：有名条目完整支持；无名单来源时拒绝
+  转换并说明原因（避免无名条目失联）
+- v4 归档写回仍为 v4：按新表重算 hash/block 表 MD5 与头部 MD5
+  （`raw_chunk_size` 清零，文件级分块 MD5 数组不随原样拷贝保留）；
+  也可经 `convert` 在 v1–v4 间显式互转
 
 ```console
 $ mpqtool add map.w3x war3map.j newfile.txt
@@ -180,10 +188,14 @@ Tauri IPC 调用 `gui/src` 中的命令（打开/预览/提取/修复/修改）�
 - Jenkins 哈希：与编译后的原版 lookup3.c 输出比对（7 组参考向量）
 - PKWARE explode：与编译后的原版 explode.c 逐字节一致；测试向量由
   Blizzard 实际使用的 implode 压缩器生成（`tests/fixtures/pk_*.bin`）
-- 集成测试：测试内构建器从零合成 v1/v2/v3 归档（加密、压缩、单单元、
+- 集成测试：测试内构建器从零合成 v1/v2/v3/v4 归档（加密、压缩、单单元、
   key-v2、扇区 CRC、listfile、attributes、userdata 包装、嵌入扫描、
   纯 HET/BET 表），再经公开 API 读回校验
-- 修改测试：v1/v2/v3 与 userdata 包装下导入/替换/删除后读回一致；
+- v4 测试：MD5 覆盖范围与 StormLib `LoadMpqTable`/`SaveMpqTable` 语义
+  一致（存储态字节）；头部/各表/分块 MD5 损坏时打开与读取不受影响、
+  仅产生告警；修改/新建/转换保持 v4 且重算后的校验和全部通过验证；
+  修复 v4 头部后 `MD5_MpqHeader` 重算
+- 修改测试：v1/v2/v3/v4 与 userdata 包装下导入/替换/删除后读回一致；
   无 listfile 时哈希槽位保留（按名寻址不丢）；key-v2 按新偏移重新加密
   （含多扇区混合压缩/不可压缩数据）及明文选项；未命名条目按表键删除；
   空文件、不可压缩数据、保留前后缀
@@ -191,7 +203,7 @@ Tauri IPC 调用 `gui/src` 中的命令（打开/预览/提取/修复/修改）�
   头长度规整、v3 字段清零等）修复后归档可正常读取
 
 ```console
-$ cargo test        # 73 项测试
+$ cargo test        # 94 项测试
 ```
 
 ## 目录结构
@@ -200,14 +212,16 @@ $ cargo test        # 73 项测试
 mpq/            读取/修改库（edition 2024, no unsafe）
   src/crypt.rs        storm 加密、HashString、文件密钥
   src/jenkins.rs      lookup3 hashlittle2（HET/BET 名字哈希）
+  src/digest.rs       MD5（v4 表/头部/分块校验与写回）
   src/header.rs       v1–v4 头部与 MPQ\x1B 用户数据头
   src/tables.rs       经典 hash/block/hi-block 表
   src/hetbet.rs       HET/BET 扩展表
   src/compression.rs  zlib/pkware/bzip2/lzma 解压调度
   src/pkware.rs       PKWARE DCL explode 移植
-  src/repair.rs       头部诊断/修复 + 表位置深度扫描
-  src/modify.rs       导入/删除：块原样拷贝 + 容器重建
-  src/archive.rs      Archive：打开/查找/读取 + 容错策略
+  src/repair.rs       头部诊断/修复 + 表位置深度扫描（v4 修复后重算头部 MD5）
+  src/modify.rs       导入/删除：块原样拷贝 + 容器重建（v4 保持版本并重算 MD5）
+  src/create.rs       新建空归档（v1–v4）与版本转换辅助
+  src/archive.rs      Archive：打开/查找/读取 + 容错与校验策略
 mpqtool/        CLI + 共享任务库（lib）
   src/main.rs         命令行入口
   src/lib.rs          lib 入口（暴露 tasks）
@@ -229,6 +243,6 @@ docs/           格式依据备忘（源自 StormLib 源码验证）
 
 ## 依赖
 
-- 库：`flate2`（zlib，miniz_oxide 后端）、`bzip2-rs`、`lzma-rs`
-  （全部纯 Rust），`no unsafe`
+- 库：`flate2`（zlib，miniz_oxide 后端）、`bzip2-rs`、`lzma-rs`、
+  `md-5`（RustCrypto，v4 校验）（全部纯 Rust），`no unsafe`
 - 工具：`clap`（CLI）、`eframe/egui`（GUI）、`rfd`（文件对话框）

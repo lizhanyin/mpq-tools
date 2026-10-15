@@ -26,6 +26,8 @@ export const S = reactive({
   preview: null,         // { name, text } — 浮动预览窗
   repair: null,          // { issues, applied, note }
   modify: null,          // { additions, deletions, reencrypt, applied, note }
+  create: null,          // { version, hashSize, note } — 新建归档弹窗
+  convert: null,         // { target, applied, note } — 版本转换弹窗
   settingsOpen: false,
   logs: [],
   fontSize: FONT_DEFAULT,
@@ -410,6 +412,98 @@ export async function openModified() {
 export function closeModify() {
   S.modify = null
   ipc.invoke('discard_modify').catch(() => {})
+}
+
+// ---------------------------------------------------------------------------
+// 新建归档（「新建归档」窗口）
+
+function defaultCreate() {
+  return { version: 1, hashSize: 1024, note: '' }
+}
+
+export function startCreate() {
+  S.create = defaultCreate()
+}
+
+export async function createArchive() {
+  const c = S.create
+  const out = await ipc.dialogSave({
+    title: '新建 MPQ 归档',
+    defaultPath: '新建归档.mpq',
+    filters: ARCHIVE_FILTERS,
+  })
+  if (!out) return
+  try {
+    const res = await ipc.invoke('create_archive', {
+      path: out,
+      version: c.version,
+      hash_table_size: c.hashSize,
+    })
+    S.create = null
+    applyOpenResult(res)
+  } catch (e) {
+    c.note = String(e) // 创建失败：… / 保存失败：…
+  }
+}
+
+export function closeCreate() {
+  S.create = null
+}
+
+// ---------------------------------------------------------------------------
+// 版本转换（「版本转换」窗口）
+
+function defaultConvertTarget(from) {
+  return from === 4 ? 3 : 4
+}
+
+export function startConvert() {
+  if (!S.info) { log('请先打开一个可解析的归档。'); return }
+  S.convert = { target: defaultConvertTarget(S.info.version), applied: null, note: '' }
+}
+
+export async function applyConvert() {
+  const c = S.convert
+  try {
+    const r = await ipc.invoke('apply_convert', { target: c.target })
+    c.note = r.note
+    c.applied = r.applied ? r.note : null
+  } catch (e) {
+    c.note = `转换失败：${e}`
+  }
+}
+
+export async function saveConverted() {
+  const base = basenameOf(S.openPath || '')
+  const m = base.match(/^(.*?)(\.[^.]*)?$/)
+  const suggested = `${m[1]}.v${S.convert.target}${m[2] || '.mpq'}`
+  const out = await ipc.dialogSave({ title: '保存转换后的归档', defaultPath: suggested })
+  if (!out) return
+  try {
+    const res = await ipc.invoke('save_converted', { path: out })
+    log(`转换结果已保存到 ${out}`)
+    S.convert = null
+    ipc.invoke('discard_convert').catch(() => {})
+    applyOpenResult(res)
+  } catch (e) {
+    S.convert.note = String(e) // 保存失败：…
+  }
+}
+
+export async function openConverted() {
+  try {
+    const res = await ipc.invoke('open_converted')
+    S.convert = null
+    ipc.invoke('discard_convert').catch(() => {})
+    applyOpenResult(res)
+  } catch (e) {
+    log(String(e))
+  }
+}
+
+export function closeConvert() {
+  S.convert = null
+  ipc.invoke('discard_convert').catch(() => {})
 }
 
 // ---------------------------------------------------------------------------

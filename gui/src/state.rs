@@ -25,6 +25,8 @@ pub struct GuiState {
     pub repair_fixed: Option<Vec<u8>>,
     /// Result bytes + one-line summary of the last applied 修改归档 run.
     pub modify_applied: Option<(Vec<u8>, String)>,
+    /// Result bytes + one-line summary of the last applied 版本转换 run.
+    pub convert_applied: Option<(Vec<u8>, String)>,
 }
 
 impl Default for GuiState {
@@ -36,6 +38,7 @@ impl Default for GuiState {
             entries: Vec::new(),
             repair_fixed: None,
             modify_applied: None,
+            convert_applied: None,
         }
     }
 }

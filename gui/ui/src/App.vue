@@ -9,6 +9,8 @@ import LogPanel from './components/LogPanel.vue'
 import PreviewWindow from './components/PreviewWindow.vue'
 import RepairModal from './components/RepairModal.vue'
 import ModifyModal from './components/ModifyModal.vue'
+import NewArchiveModal from './components/NewArchiveModal.vue'
+import ConvertModal from './components/ConvertModal.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import { S, reloadArchive, handleDrop } from './store'
 import * as ipc from './ipc'
@@ -84,6 +86,8 @@ onUnmounted(() => {
       <PreviewWindow v-if="S.preview" />
       <RepairModal />
       <ModifyModal />
+      <NewArchiveModal />
+      <ConvertModal />
       <SettingsModal />
 
       <div v-if="S.dropping" class="drop-overlay">

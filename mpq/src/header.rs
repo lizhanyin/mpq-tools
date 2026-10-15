@@ -13,6 +13,10 @@ pub const HEADER_SIZE_V2: u32 = 0x2C;
 pub const HEADER_SIZE_V3: u32 = 0x44;
 pub const HEADER_SIZE_V4: u32 = 0xD0;
 
+/// Bytes covered by the v4 header's own MD5 (`MD5_MpqHeader` @ 0xC0):
+/// everything from the signature up to and including `MD5_HetTable`.
+pub const HEADER_MD5_SPAN: usize = 0xC0;
+
 /// Maximum bytes we ever need to look at a header candidate.
 pub const MAX_HEADER_READ: u64 = HEADER_SIZE_V4 as u64;
 
@@ -111,6 +115,20 @@ pub struct MpqHeader {
     pub hi_block_table_size64: u64,
     pub het_table_size64: u64,
     pub bet_table_size64: u64,
+    /// v4: size of raw data chunks covered by each per-file MD5 (0 = none).
+    pub raw_chunk_size: u32,
+    /// v4 @ 0x70: MD5 of the block table as stored (encrypted/compressed).
+    pub md5_block_table: [u8; 16],
+    /// v4 @ 0x80: MD5 of the hash table as stored.
+    pub md5_hash_table: [u8; 16],
+    /// v4 @ 0x90: MD5 of the hi-block table as stored.
+    pub md5_hi_block_table: [u8; 16],
+    /// v4 @ 0xA0: MD5 of the BET table as stored.
+    pub md5_bet_table: [u8; 16],
+    /// v4 @ 0xB0: MD5 of the HET table as stored.
+    pub md5_het_table: [u8; 16],
+    /// v4 @ 0xC0: MD5 of the header itself, covering bytes `0x00..0xC0`.
+    pub md5_header: [u8; 16],
 }
 
 impl MpqHeader {
@@ -162,6 +180,13 @@ impl MpqHeader {
             h.hi_block_table_size64 = le_u64(buf, 0x54);
             h.het_table_size64 = le_u64(buf, 0x5C);
             h.bet_table_size64 = le_u64(buf, 0x64);
+            h.raw_chunk_size = le_u32(buf, 0x6C);
+            h.md5_block_table.copy_from_slice(&buf[0x70..0x80]);
+            h.md5_hash_table.copy_from_slice(&buf[0x80..0x90]);
+            h.md5_hi_block_table.copy_from_slice(&buf[0x90..0xA0]);
+            h.md5_bet_table.copy_from_slice(&buf[0xA0..0xB0]);
+            h.md5_het_table.copy_from_slice(&buf[0xB0..0xC0]);
+            h.md5_header.copy_from_slice(&buf[0xC0..0xD0]);
         }
 
         Ok((h, version))

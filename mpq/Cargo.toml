@@ -11,3 +11,4 @@ readme = "../README.md"
 flate2.workspace = true
 bzip2-rs.workspace = true
 lzma-rs.workspace = true
+md-5.workspace = true

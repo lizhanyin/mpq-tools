@@ -29,9 +29,12 @@
 //!   their decoded content — by default re-encrypted with the key derived
 //!   at their *new* offset ([`ModifyOptions::reencrypt_key_v2`]); disabling
 //!   that option stores them compressed but unencrypted.
-//! * v4 headers are written back as v3 headers — the v4-only MD5 fields
-//!   cannot be recomputed, and v4 archives open fine through classic
-//!   tables.
+//! * v4 headers stay v4: the rebuilt classic hash/block tables and the
+//!   header get fresh v4 MD5 checksums (over the stored, encrypted bytes —
+//!   exactly what StormLib's `SaveMpqTable` computes); `raw_chunk_size` is
+//!   zeroed because the per-file chunk MD5 arrays are not carried over.
+//!   With [`ModifyOptions::target_version`] (see [`convert`]) the container
+//!   is rewritten as the requested version instead, v4 included.
 //! * Bytes in front of the archive (the `MPQ\x1B` user-data wrapper of
 //!   Warcraft III / StarCraft II maps, or garbage before an embedded
 //!   archive) and bytes behind it are preserved.
@@ -44,8 +47,12 @@ use crate::crypt::{
     encrypt_bytes, file_key, hash_bytes, hash_string, normalize_name, KEY_BLOCK_TABLE,
     KEY_HASH_TABLE, HASH_NAME_A, HASH_NAME_B, HASH_TABLE_INDEX,
 };
+use crate::digest;
 use crate::error::{Error, Result};
-use crate::header::{FormatVersion, HEADER_SIZE_V1, HEADER_SIZE_V2, HEADER_SIZE_V3, MPQ_MAGIC};
+use crate::header::{
+    FormatVersion, HEADER_MD5_SPAN, HEADER_SIZE_V1, HEADER_SIZE_V2, HEADER_SIZE_V3, HEADER_SIZE_V4,
+    MPQ_MAGIC,
+};
 use crate::tables::{
     HashEntry, FILE_COMPRESS, FILE_ENCRYPTED, FILE_EXISTS, FILE_KEY_V2, FILE_SINGLE_UNIT,
     HASH_ENTRY_DELETED, HASH_ENTRY_FREE,
@@ -77,12 +84,16 @@ pub struct ModifyOptions {
     /// compressed but unencrypted. Ordinary (name-keyed) encrypted files
     /// are always copied encrypted, regardless of this option.
     pub reencrypt_key_v2: bool,
+    /// Rewrite the container as this header version (v1–v4). `None` keeps
+    /// the source version. Targeting the source's own version is a no-op.
+    pub target_version: Option<FormatVersion>,
 }
 
 impl Default for ModifyOptions {
     fn default() -> Self {
         ModifyOptions {
             reencrypt_key_v2: true,
+            target_version: None,
         }
     }
 }
@@ -170,6 +181,31 @@ pub fn modify(
     modify_with(data, deletions, additions, &ModifyOptions::default())
 }
 
+/// Convert an archive's container to another header version (v1–v4).
+///
+/// This is [`modify_with`] with no import/delete list and an explicit
+/// [`ModifyOptions::target_version`]: every file's stored bytes are copied
+/// verbatim into a freshly written container of the target version, so the
+/// conversion succeeds whenever the source opens. Cases that cannot be
+/// converted fail with the reason in the error:
+///
+/// * the source does not parse at all (try [`crate::repair`] first)
+/// * a layout that no longer fits 32-bit offsets (> 4 GB)
+///
+/// Converting to the source's own version is a no-op that returns the input
+/// unchanged. Consequences of the rewrite are the modifier's: HET/BET tables
+/// are replaced by classic tables, `(attributes)`/`(signature)` are dropped
+/// (see `report`), key-v2 files are re-encoded at their new offsets, and
+/// bytes in front of / behind the archive are preserved. A v4 target gets a
+/// fully checksummed v4 header (table MD5s + header MD5).
+pub fn convert(data: &[u8], target: FormatVersion) -> Result<ModifyOutcome> {
+    let options = ModifyOptions {
+        target_version: Some(target),
+        ..ModifyOptions::default()
+    };
+    modify_with(data, &[], &[], &options)
+}
+
 /// [`modify`] with explicit [`ModifyOptions`].
 pub fn modify_with(
     data: &[u8],
@@ -177,19 +213,21 @@ pub fn modify_with(
     additions: &[(String, Vec<u8>)],
     options: &ModifyOptions,
 ) -> Result<ModifyOutcome> {
-    if deletions.is_empty() && additions.is_empty() {
+    let archive = Archive::new(std::io::Cursor::new(data))?;
+    let base = archive.archive_offset() as usize;
+    let sector_size = archive.sector_size();
+    let source_version = archive.version();
+    let version = options.target_version.unwrap_or(source_version);
+    // Rewriting to the source's own version would only shuffle bytes.
+    let converting = options.target_version.is_some_and(|t| t != source_version);
+    let sector_shift = archive.header().block_size;
+
+    if !converting && deletions.is_empty() && additions.is_empty() {
         return Ok(ModifyOutcome {
             bytes: data.to_vec(),
             report: ModifyReport::default(),
         });
     }
-
-    let archive = Archive::new(std::io::Cursor::new(data))?;
-    let base = archive.archive_offset() as usize;
-    let sector_size = archive.sector_size();
-    // v4 headers cannot be rewritten faithfully (MD5 fields) — downgrade.
-    let version = archive.version().min(FormatVersion::V3);
-    let sector_shift = archive.header().block_size;
 
     // --- normalize additions (a later duplicate supersedes earlier) -------
     let mut adds: Vec<(String, Vec<u8>)> = Vec::new();
@@ -455,7 +493,51 @@ pub fn modify_with(
         });
     }
 
+    // A conversion must not silently orphan files: a BET-sourced entry whose
+    // name cannot be recovered (pure HET/BET archive without a listfile)
+    // would keep its bytes but lose name addressing in the rebuilt classic
+    // tables. A plain modify tolerates that; an explicit version conversion
+    // refuses with the reason instead.
+    if converting {
+        let orphaned = blocks
+            .iter()
+            .filter(|b| b.name.is_none() && b.hashes.is_empty() && !b.classic_remap)
+            .count();
+        if orphaned > 0 {
+            return Err(Error::InvalidData(format!(
+                "无法转换：源归档使用 HET/BET 表且缺少 (listfile)，{orphaned} 个文件的名字\
+                 无法恢复，转为经典表后将无法按名访问（数据仍在但无法寻址）。\
+                 可先「提取全部」再新建目标版本的归档重新导入。"
+            )));
+        }
+    }
+
     if blocks.is_empty() {
+        // A zero-file source cannot even carry a rebuilt listfile. When only
+        // the container version changes, emit an empty target-version
+        // archive instead of failing.
+        if converting && adds.is_empty() {
+            let hash_count =
+                crate::create::normalize_hash_size(archive.header().hash_table_size.max(4));
+            let inner = crate::create::empty_archive(version, hash_count, sector_shift);
+            let mut out = Vec::with_capacity(base + inner.len());
+            out.extend_from_slice(&data[..base]);
+            out.extend_from_slice(&inner);
+            // Bytes behind the original archive are preserved, like below.
+            let old_end =
+                base + archive.header().archive_size((data.len() - base) as u64) as usize;
+            if old_end < data.len() {
+                out.extend_from_slice(&data[old_end..]);
+            }
+            let check = Archive::new(std::io::Cursor::new(&out))?;
+            if check.version() != version {
+                return Err(Error::InvalidData("转换校验失败：版本不一致".to_string()));
+            }
+            return Ok(ModifyOutcome {
+                bytes: out,
+                report,
+            });
+        }
         return Err(Error::InvalidData(
             "修改后归档不包含任何文件；至少需要保留一个条目".to_string(),
         ));
@@ -465,7 +547,8 @@ pub fn modify_with(
     let header_size = match version {
         FormatVersion::V1 => HEADER_SIZE_V1 as u64,
         FormatVersion::V2 => HEADER_SIZE_V2 as u64,
-        FormatVersion::V3 | FormatVersion::V4 => HEADER_SIZE_V3 as u64,
+        FormatVersion::V3 => HEADER_SIZE_V3 as u64,
+        FormatVersion::V4 => HEADER_SIZE_V4 as u64,
     };
     struct Placed {
         pos: u64,
@@ -574,7 +657,7 @@ pub fn modify_with(
     }
 
     // --- assemble -------------------------------------------------------------------
-    let header = write_header(
+    let mut header = write_header(
         version,
         sector_shift,
         hash_pos as u32,
@@ -583,6 +666,9 @@ pub fn modify_with(
         placed.len() as u32,
         cursor,
     );
+    if version == FormatVersion::V4 {
+        finish_v4_header(&mut header, &hash_buf, &block_buf);
+    }
 
     let mut out = Vec::with_capacity(base + cursor as usize);
     out.extend_from_slice(&data[..base]);
@@ -604,6 +690,13 @@ pub fn modify_with(
 
     // --- self-check: the result must open and serve the additions ---------------
     let check = Archive::new(std::io::Cursor::new(&out))?;
+    if let Some(t) = options.target_version {
+        if check.version() != t {
+            return Err(Error::InvalidData(
+                "转换校验失败：写出的版本与目标不一致".to_string(),
+            ));
+        }
+    }
     for (name, bytes) in &adds {
         let read = check.read_file(name)?;
         if &read != bytes {
@@ -862,9 +955,10 @@ fn encode_fresh_reencrypted(
     (block, ENC | FILE_COMPRESS)
 }
 
-/// Serialize the archive header (v1/v2/v3; v4 is written as v3).
+/// Serialize the archive header (v1–v4; v4 fields beyond v3 are zero and
+/// filled in by [`finish_v4_header`]).
 #[allow(clippy::too_many_arguments)]
-fn write_header(
+pub(crate) fn write_header(
     version: FormatVersion,
     sector_shift: u16,
     hash_pos: u32,
@@ -876,7 +970,8 @@ fn write_header(
     let (header_size, raw_version) = match version {
         FormatVersion::V1 => (HEADER_SIZE_V1, 0u16),
         FormatVersion::V2 => (HEADER_SIZE_V2, 1),
-        FormatVersion::V3 | FormatVersion::V4 => (HEADER_SIZE_V3, 2),
+        FormatVersion::V3 => (HEADER_SIZE_V3, 2),
+        FormatVersion::V4 => (HEADER_SIZE_V4, 3),
     };
     let mut h = Vec::with_capacity(header_size as usize);
     h.extend_from_slice(&MPQ_MAGIC.to_le_bytes());
@@ -898,6 +993,28 @@ fn write_header(
         h.extend_from_slice(&0u64.to_le_bytes()); // BET pos
         h.extend_from_slice(&0u64.to_le_bytes()); // HET pos
     }
+    // The v4-only fields (table size64s, raw chunk size, MD5s) start zeroed;
+    // finish_v4_header fills the checksums afterwards.
+    h.resize(header_size as usize, 0);
     debug_assert_eq!(h.len(), header_size as usize);
     h
+}
+
+/// Fill the v4-only header fields: explicit stored table sizes, table MD5s
+/// over the *stored* (encrypted — here always uncompressed) bytes, and the
+/// header's own MD5 over bytes `0x00..0xC0`, mirroring StormLib's
+/// `SaveMPQTables`. HET/BET/hi-block are absent (zero), and no per-file
+/// chunk MD5s are written, so `raw_chunk_size` stays 0.
+pub(crate) fn finish_v4_header(header: &mut [u8], hash_buf: &[u8], block_buf: &[u8]) {
+    debug_assert_eq!(header.len(), HEADER_SIZE_V4 as usize);
+    let h: &mut [u8] = header;
+    h[0x44..0x4C].copy_from_slice(&(hash_buf.len() as u64).to_le_bytes());
+    h[0x4C..0x54].copy_from_slice(&(block_buf.len() as u64).to_le_bytes());
+    // 0x54 hi-block, 0x5C HET, 0x64 BET table size64 stay 0, as does
+    // raw_chunk_size at 0x6C.
+    h[0x70..0x80].copy_from_slice(&digest::md5_digest(block_buf)); // MD5_BlockTable
+    h[0x80..0x90].copy_from_slice(&digest::md5_digest(hash_buf)); // MD5_HashTable
+    // MD5_HiBlockTable/BetTable/HetTable (0x90..0xC0) stay 0: no such tables.
+    let header_md5 = digest::md5_digest(&h[..HEADER_MD5_SPAN]);
+    h[HEADER_MD5_SPAN..0xD0].copy_from_slice(&header_md5);
 }

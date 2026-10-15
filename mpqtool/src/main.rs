@@ -12,12 +12,13 @@ use mpqtool::tasks;
 #[command(
     name = "mpqtool",
     version,
-    about = "Inspect, extract, modify and repair Blizzard MPQ archives (v1–v4, v3 protocol focus)",
-    long_about = "Reads MPQ archives following the v3 protocol (also opens v1/v2/v4 \
-archives through their classic tables), imports and deletes files, and repairs \
-damaged headers. Non-essential data such as (listfile), \
-(attributes) or HET/BET tables may be missing — the archive still opens. \
-The graphical interface is the separate mpqtool-gui binary."
+    about = "Inspect, extract, modify, convert and repair Blizzard MPQ archives (v1–v4)",
+    long_about = "Reads MPQ archives following the v3 protocol, with full v4 support \
+(header fields, MD5 checksum verification for tables, header and raw data \
+chunks, and v4 write-back). Imports and deletes files, converts between \
+container versions, and repairs damaged headers. Non-essential data such as \
+(listfile), (attributes) or HET/BET tables may be missing — the archive \
+still opens. The graphical interface is the separate mpqtool-gui binary."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -175,7 +176,7 @@ fn cmd_info(path: &Path) -> i32 {
             FormatVersion::V1 => "classic",
             FormatVersion::V2 => "Burning Crusade",
             FormatVersion::V3 => "Cataclysm, HET/BET capable",
-            FormatVersion::V4 => "v4 header, v3 tables",
+            FormatVersion::V4 => "Cataclysm+, MD5-checksummed header/tables",
         }
     );
     println!("Archive offset: {:#x}", archive.archive_offset());
@@ -416,6 +417,7 @@ fn run_modify(
     };
     let options = mpq::ModifyOptions {
         reencrypt_key_v2: reencrypt_key2,
+        ..Default::default()
     };
     let outcome = match mpq::modify_with(&bytes, &deletions, &additions, &options) {
         Ok(o) => o,

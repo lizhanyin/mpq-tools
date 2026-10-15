@@ -100,6 +100,32 @@ const MOCKS = {
     return r
   },
   discard_modify: () => null,
+  create_archive: ({ path, version }) => {
+    const info = {
+      ...MOCK_INFO,
+      path,
+      version,
+      hash_table_size: 1024,
+      block_table_size: 1,
+      het_bet: false,
+      listfile_count: 0,
+      warnings: ['no (listfile); file names unknown'],
+      tree: dir('', []),
+      entry_count: 0,
+    }
+    return { ok: true, note: '（新建空归档，用「文件 → 导入文件到归档…」添加内容）', info, error: null }
+  },
+  apply_convert: ({ target }) => ({
+    note: `已从 v${MOCK_INFO.version} 转换为 v${target}（11 个条目）；自动移除 (attributes)。`,
+    applied: target !== MOCK_INFO.version,
+  }),
+  save_converted: ({ path }) => okOpen(path),
+  open_converted: () => {
+    const r = okOpen('D:\\maps\\demo.w3x')
+    r.note = '已载入转换结果（已从 v1 转换为 v3（11 个条目）。）'
+    return r
+  },
+  discard_convert: () => null,
 }
 
 function okOpen(path) {

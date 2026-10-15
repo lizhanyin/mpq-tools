@@ -20,6 +20,13 @@ fn lock<'a>(state: &'a St<'a>) -> MutexGuard<'a, GuiState> {
     state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Map a display version number (1–4) from the frontend to FormatVersion.
+fn format_version(n: u32) -> Result<mpq::FormatVersion, String> {
+    n.checked_sub(1)
+        .and_then(|raw| mpq::FormatVersion::from_raw(raw as u16).ok())
+        .ok_or_else(|| format!("未知版本 v{n}"))
+}
+
 // -- open / reload --------------------------------------------------------------
 
 #[tauri::command]
@@ -291,6 +298,7 @@ pub fn apply_modify(
 
     let options = ModifyOptions {
         reencrypt_key_v2: reencrypt,
+        ..Default::default()
     };
     let outcome =
         mpq::modify_with(&s.raw, &dels, &adds, &options).map_err(|e| format!("修改失败：{e}"))?;
@@ -364,4 +372,126 @@ fn summarize_modify(report: &mpq::ModifyReport) -> String {
     } else {
         parts.join("；") + "。"
     }
+}
+
+// -- create / convert ------------------------------------------------------------
+
+/// Create a new, empty archive at `path` with the chosen header version
+/// (v1–v4) and hash table size, then load it into the UI.
+#[tauri::command]
+pub fn create_archive(
+    path: String,
+    version: u32,
+    hash_table_size: u32,
+    state: St,
+) -> Result<OpenResult, String> {
+    let version = format_version(version)?;
+    let options = mpq::CreateOptions {
+        version,
+        hash_table_size,
+        ..Default::default()
+    };
+    let bytes = mpq::create(&options).map_err(|e| format!("创建失败：{e}"))?;
+    std::fs::write(&path, &bytes).map_err(|e| format!("保存失败：{e}"))?;
+    let mut s = lock(&state);
+    let mut result = s.load(PathBuf::from(&path), bytes);
+    if result.ok {
+        result.note = Some("（新建空归档，用「文件 → 导入文件到归档…」添加内容）".to_string());
+    }
+    Ok(result)
+}
+
+/// Result of a 版本转换 apply: `applied` is false when there is nothing
+/// to save (same-version request).
+#[derive(Serialize)]
+pub struct ConvertDto {
+    pub note: String,
+    pub applied: bool,
+}
+
+/// Convert the loaded archive's container to another header version; the
+/// result is kept in state until saved / opened / discarded. Cases that
+/// cannot be converted come back as errors carrying the reason.
+#[tauri::command]
+pub fn apply_convert(target: u32, state: St) -> Result<ConvertDto, String> {
+    let mut s = lock(&state);
+    if s.raw.is_empty() {
+        return Err("请先打开一个归档。".to_string());
+    }
+    let target = format_version(target)?;
+
+    let source = mpq::Archive::new(std::io::Cursor::new(&s.raw))
+        .map_err(|e| format!("归档解析失败：{e}（可先尝试「工具 → 修复头信息」）"))?;
+    let from = source.version();
+    if from == target {
+        return Ok(ConvertDto {
+            note: "当前已是该版本，无需转换。".to_string(),
+            applied: false,
+        });
+    }
+    let het_bet = source.uses_het_bet();
+    let entry_count = source.entries().len();
+    drop(source);
+
+    let outcome = mpq::convert(&s.raw, target).map_err(|e| format!("转换失败：{e}"))?;
+    let mut parts = vec![format!(
+        "已从 v{} 转换为 v{}（{} 个条目）",
+        from.as_u32(),
+        target.as_u32(),
+        entry_count
+    )];
+    if het_bet {
+        parts.push("HET/BET 表已改为经典表（文件内容不变）".to_string());
+    }
+    if !outcome.report.dropped.is_empty() {
+        parts.push(format!(
+            "自动移除 {}",
+            outcome
+                .report
+                .dropped
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("、")
+        ));
+    }
+    if !outcome.report.re_encoded.is_empty() {
+        parts.push(format!(
+            "{} 个 key-v2 文件按新偏移重新加密",
+            outcome.report.re_encoded.len()
+        ));
+    }
+    let note = parts.join("；") + "。";
+    s.convert_applied = Some((outcome.bytes, note.clone()));
+    Ok(ConvertDto {
+        note,
+        applied: true,
+    })
+}
+
+/// Write the applied conversion and reload the archive from the written
+/// file.
+#[tauri::command]
+pub fn save_converted(path: String, state: St) -> Result<OpenResult, String> {
+    let mut s = lock(&state);
+    let (bytes, _) = s.convert_applied.clone().ok_or("请先应用转换。")?;
+    std::fs::write(&path, &bytes).map_err(|e| format!("保存失败：{e}"))?;
+    Ok(s.load(PathBuf::from(&path), bytes))
+}
+
+/// Load the converted bytes into the UI without writing them to disk.
+#[tauri::command]
+pub fn open_converted(state: St) -> Result<OpenResult, String> {
+    let mut s = lock(&state);
+    let (bytes, note) = s.convert_applied.clone().ok_or("请先应用转换。")?;
+    let path = s.path.clone().unwrap_or_else(|| PathBuf::from("converted.mpq"));
+    let mut result = s.load(path, bytes);
+    result.note = Some(format!("已载入转换结果（{note}）"));
+    Ok(result)
+}
+
+/// Drop the pending conversion result (window closed).
+#[tauri::command]
+pub fn discard_convert(state: St) {
+    lock(&state).convert_applied = None;
 }

@@ -1,15 +1,23 @@
 //! Test-only MPQ archive builder.
 //!
 //! Produces byte-exact archives for the classic tables (hash/block/
-//! hi-block) across header versions v1–v3, with zlib compression, storm
+//! hi-block) across header versions v1–v4, with zlib compression, storm
 //! encryption, key-v2, single-unit files, sector CRCs, `(listfile)`,
-//! `(attributes)` and the `MPQ\x1B` user-data wrapper.
+//! `(attributes)`, the `MPQ\x1B` user-data wrapper, the v4 MD5 checksum
+//! fields (tables + header) and optional per-file raw-chunk MD5s.
 
 #![allow(dead_code)]
 
 use std::io::Write as _;
 
+use md5::{Digest as _, Md5};
 use mpq::{encrypt_bytes, file_key, hash_string, HASH_NAME_A, HASH_NAME_B, HASH_TABLE_INDEX};
+
+pub fn md5_of(data: &[u8]) -> [u8; 16] {
+    let mut hasher = Md5::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
 
 pub const KEY_HASH_TABLE: u32 = 0xC3AF_3770;
 pub const KEY_BLOCK_TABLE: u32 = 0xEC83_B3A3;
@@ -81,7 +89,7 @@ impl FileSpec {
 
 #[derive(Default, Clone)]
 pub struct ArchiveSpec {
-    /// 0 = v1, 1 = v2, 2 = v3.
+    /// 0 = v1, 1 = v2, 2 = v3, 3 = v4.
     pub version: u16,
     /// Sector size exponent (sector = 512 << shift).
     pub sector_shift: u16,
@@ -96,6 +104,9 @@ pub struct ArchiveSpec {
     pub prefix_garbage: usize,
     /// Write 0 into the archive size field (tolerance test).
     pub zero_archive_size: bool,
+    /// v4: chunk size for per-file raw-data MD5s written behind every
+    /// block (0 = none).
+    pub raw_chunk_size: u32,
     pub files: Vec<FileSpec>,
 }
 
@@ -166,14 +177,27 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
     let header_size: u32 = match spec.version {
         0 => 0x20,
         1 => 0x2C,
-        _ => 0x44,
+        2 => 0x44,
+        _ => 0xD0, // v4
+    };
+    // v4 raw-chunk MD5s: ceil(stored / chunk) digests behind every block,
+    // not counted in the block table's csize (StormLib WriteMemDataMD5).
+    let chunk_overhead = |stored: usize| {
+        if spec.raw_chunk_size > 0 {
+            stored.div_ceil(spec.raw_chunk_size as usize) * 16
+        } else {
+            0
+        }
     };
 
     // Sizes never depend on the key (encryption preserves length), so a
     // measuring pass with a dummy position yields exact lengths.
     let measured: Vec<usize> = files
         .iter()
-        .map(|f| encode_file(f, 0, sector_size).0.len())
+        .map(|f| {
+            let stored = encode_file(f, 0, sector_size).0.len();
+            stored + chunk_overhead(stored)
+        })
         .collect();
 
     // Assign block positions (needed for key-v2 derivation); pad each
@@ -193,7 +217,7 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
         let pos = block_positions[i];
         let (data, csize, fsize, mut flags) =
             encode_file(f, pos, sector_size);
-        debug_assert_eq!(data.len(), measured[i]);
+        debug_assert_eq!(data.len() + chunk_overhead(data.len()), measured[i]);
         flags |= FILE_EXISTS;
         if f.compress && f.imploded.is_none() {
             flags |= FILE_COMPRESS;
@@ -290,6 +314,30 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
         put_u64(&mut header, 0); // bet table pos
         put_u64(&mut header, 0); // het table pos
     }
+    if spec.version >= 3 {
+        // v4-only: explicit stored table sizes + MD5s over the stored
+        // (encrypted) bytes, then the header's own MD5 over 0x00..0xC0.
+        put_u64(&mut header, hash_table.len() as u64); // hash size64
+        put_u64(&mut header, block_table.len() as u64); // block size64
+        put_u64(
+            &mut header,
+            hi_pos.map(|_| blocks.len() as u64 * 2).unwrap_or(0),
+        );
+        put_u64(&mut header, 0); // het size64
+        put_u64(&mut header, 0); // bet size64
+        put_u32(&mut header, spec.raw_chunk_size);
+        header.extend_from_slice(&md5_of(&block_table)); // 0x70 MD5_BlockTable
+        header.extend_from_slice(&md5_of(&hash_table)); // 0x80 MD5_HashTable
+        let hi_bytes = vec![0u8; blocks.len() * 2]; // hi words are all zero
+        if hi_pos.is_some() {
+            header.extend_from_slice(&md5_of(&hi_bytes)); // 0x90 MD5_HiBlock
+        } else {
+            header.extend_from_slice(&[0u8; 16]);
+        }
+        header.extend_from_slice(&[0u8; 16]); // 0xA0 MD5_BetTable
+        header.extend_from_slice(&[0u8; 16]); // 0xB0 MD5_HetTable
+        header.extend_from_slice(&md5_of(&header[..0xC0])); // 0xC0 header MD5
+    }
     debug_assert_eq!(header.len(), header_size as usize);
 
     let mut out = Vec::new();
@@ -312,6 +360,14 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
     out.extend_from_slice(&header);
     for (i, data) in block_data.iter().enumerate() {
         out.extend_from_slice(data);
+        if spec.raw_chunk_size > 0 {
+            // Per-chunk MD5s directly behind the stored data (not part of
+            // csize), then the usual dword alignment padding.
+            let chunk = spec.raw_chunk_size as usize;
+            for c in data.chunks(chunk) {
+                out.extend_from_slice(&md5_of(c));
+            }
+        }
         let pad = (4 - measured[i] % 4) % 4;
         out.extend(std::iter::repeat_n(0, pad));
     }
@@ -480,8 +536,26 @@ fn set_bits(buf: &mut [u8], offset: usize, bits: usize, value: u64) {
 /// Build a v3 archive whose only name index is HET and whose only file
 /// table is BET (classic hash/block tables declared empty).
 pub fn build_hetbet(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    build_hetbet_version(files, 2)
+}
+
+/// Same, with a v4 header (explicit HET/BET stored sizes + MD5s).
+pub fn build_hetbet_v4(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    build_hetbet_version(files, 3)
+}
+
+/// [`build_hetbet`] plus a `(listfile)` entry naming the files — real v3
+/// archives carry one, so the names survive a classic-table rewrite.
+pub fn build_hetbet_with_listfile(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut all: Vec<(String, Vec<u8>)> = files.to_vec();
+    let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
+    all.push(("(listfile)".to_string(), names.join("\r\n").into_bytes()));
+    build_hetbet(&all)
+}
+
+pub fn build_hetbet_version(files: &[(String, Vec<u8>)], version: u16) -> Vec<u8> {
     let sector_size = 4096u32;
-    let header_size: u64 = 0x44;
+    let header_size: u64 = if version >= 3 { 0xD0 } else { 0x44 };
 
     // Encode all file blocks (uncompressed, stored sectors).
     let mut cursor = header_size;
@@ -613,9 +687,9 @@ pub fn build_hetbet(files: &[(String, Vec<u8>)]) -> Vec<u8> {
 
     let mut out = Vec::new();
     out.extend_from_slice(b"MPQ\x1a");
-    put_u32(&mut out, 0x44);
+    put_u32(&mut out, header_size as u32);
     put_u32(&mut out, archive_size as u32);
-    put_u16(&mut out, 2); // v3
+    put_u16(&mut out, version);
     put_u16(&mut out, 3); // 4096 sectors
     put_u32(&mut out, 0); // hash table pos
     put_u32(&mut out, 0); // block table pos
@@ -627,7 +701,22 @@ pub fn build_hetbet(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     put_u64(&mut out, archive_size); // archive size 64
     put_u64(&mut out, bet_pos); // bet pos
     put_u64(&mut out, het_pos); // het pos
-    debug_assert_eq!(out.len(), 0x44);
+    if version >= 3 {
+        // v4-only: stored sizes + MD5s for the (only) tables present.
+        put_u64(&mut out, 0); // hash size64
+        put_u64(&mut out, 0); // block size64
+        put_u64(&mut out, 0); // hi-block size64
+        put_u64(&mut out, het.len() as u64); // het size64
+        put_u64(&mut out, bet.len() as u64); // bet size64
+        put_u32(&mut out, 0); // raw chunk size
+        out.extend_from_slice(&[0u8; 16]); // MD5_BlockTable
+        out.extend_from_slice(&[0u8; 16]); // MD5_HashTable
+        out.extend_from_slice(&[0u8; 16]); // MD5_HiBlockTable
+        out.extend_from_slice(&md5_of(&bet)); // MD5_BetTable
+        out.extend_from_slice(&md5_of(&het)); // MD5_HetTable
+        out.extend_from_slice(&md5_of(&out[..0xC0])); // header MD5
+    }
+    debug_assert_eq!(out.len(), header_size as usize);
     for (_, data, _, _, _) in &blocks {
         out.extend_from_slice(data);
         let pad = (4 - data.len() % 4) % 4;

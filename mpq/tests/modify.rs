@@ -30,6 +30,7 @@ fn spec(version: u16) -> ArchiveSpec {
         userdata: false,
         prefix_garbage: 0,
         zero_archive_size: false,
+        raw_chunk_size: 0,
         files: vec![
             FileSpec::text("readme.txt", "keep me\n"),
             FileSpec::text("data\\table.txt", "1,2,3\n4,5,6\n").compress(),
@@ -232,6 +233,7 @@ fn key_v2_files_are_re_encrypted_at_new_offset() {
         userdata: false,
         prefix_garbage: 0,
         zero_archive_size: false,
+        raw_chunk_size: 0,
         files: vec![
             FileSpec::text("filler.txt", "filler").compress(),
             FileSpec::text("fixed.bin", "key-v2 payload").encrypt().fix_key().compress(),
@@ -262,6 +264,7 @@ fn key_v2_plaintext_option() {
         userdata: false,
         prefix_garbage: 0,
         zero_archive_size: false,
+        raw_chunk_size: 0,
         files: vec![
             FileSpec::text("filler.txt", "filler").compress(),
             FileSpec::text("fixed.bin", "key-v2 payload").encrypt().fix_key().compress(),
@@ -274,6 +277,7 @@ fn key_v2_plaintext_option() {
         &[("appended.bin".into(), b"tail".to_vec())],
         &mpq::ModifyOptions {
             reencrypt_key_v2: false,
+            ..Default::default()
         },
     )
     .expect("modify");
@@ -307,6 +311,7 @@ fn key_v2_multisector_re_encryption() {
         userdata: false,
         prefix_garbage: 0,
         zero_archive_size: false,
+        raw_chunk_size: 0,
         files: vec![
             FileSpec::bytes("filler.bin", b"filler".to_vec()),
             FileSpec::bytes("big_fixed.bin", content.clone())

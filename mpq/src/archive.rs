@@ -8,8 +8,12 @@ use std::ops::DerefMut;
 use crate::attrs::Attributes;
 use crate::compression;
 use crate::crypt;
+use crate::digest;
 use crate::error::{Error, Result};
-use crate::header::{FormatVersion, MpqHeader, UserDataHeader, MAX_HEADER_READ, MPQ_MAGIC, USERDATA_MAGIC};
+use crate::header::{
+    FormatVersion, MpqHeader, UserDataHeader, HEADER_MD5_SPAN, MAX_HEADER_READ, MPQ_MAGIC,
+    USERDATA_MAGIC,
+};
 use crate::hetbet::{load_ext_table, BetTable, HetTable, BET_SIGNATURE, HET_SIGNATURE};
 use crate::jenkins;
 use crate::crypt::{KEY_BLOCK_TABLE, KEY_HASH_TABLE};
@@ -231,6 +235,19 @@ impl<R: Read + Seek> Archive<R> {
         let base = self.base;
         let archive_end = base + header.archive_size(file_len - base.min(file_len));
 
+        // v4: the header carries its own MD5 over bytes 0x00..0xC0.
+        // StormLib refuses to open on mismatch; we only warn (the repair
+        // path can rewrite header fields, which invalidates it by design).
+        if self.version == FormatVersion::V4
+            && digest::md5_present(&header.md5_header)
+            && base + HEADER_MD5_SPAN as u64 <= file_len
+        {
+            let raw = self.read_at_plain(base, HEADER_MD5_SPAN).unwrap_or_default();
+            if digest::md5_digest(&raw) != header.md5_header {
+                self.warn("v4 header MD5 mismatch (bytes 0x00-0xC0)");
+            }
+        }
+
         // Work out how many bytes each classic table occupies on disk.
         let (hash_stored, block_stored) = self.stored_table_sizes(archive_end);
 
@@ -249,7 +266,15 @@ impl<R: Read + Seek> Archive<R> {
             );
             match loaded {
                 Ok(buf) => match parse_hash_table(&buf) {
-                    Ok(t) => classic.hash_table = t,
+                    Ok(t) => {
+                        classic.hash_table = t;
+                        self.verify_stored_md5(
+                            "hash table",
+                            base + header.hash_table_pos,
+                            hash_stored.unwrap_or(table_size as u64),
+                            &header.md5_hash_table,
+                        );
+                    }
                     Err(e) => self.warn(format!("hash table unusable: {e}")),
                 },
                 Err(e) => self.warn(format!("hash table unreadable: {e}")),
@@ -268,7 +293,15 @@ impl<R: Read + Seek> Archive<R> {
             );
             match loaded {
                 Ok(buf) => match parse_block_table(&buf) {
-                    Ok(t) => classic.block_table = t,
+                    Ok(t) => {
+                        classic.block_table = t;
+                        self.verify_stored_md5(
+                            "block table",
+                            base + header.block_table_pos,
+                            block_stored.unwrap_or(table_size as u64),
+                            &header.md5_block_table,
+                        );
+                    }
                     Err(e) => self.warn(format!("block table unusable: {e}")),
                 },
                 Err(e) => self.warn(format!("block table unreadable: {e}")),
@@ -279,6 +312,12 @@ impl<R: Read + Seek> Archive<R> {
             let count = classic.block_table.len();
             match self.read_at_plain(base + header.hi_block_table_pos, count * 2) {
                 Ok(buf) => {
+                    self.verify_stored_md5(
+                        "hi-block table",
+                        base + header.hi_block_table_pos,
+                        (count * 2) as u64,
+                        &header.md5_hi_block_table,
+                    );
                     classic.hi_block = buf
                         .chunks_exact(2)
                         .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -309,7 +348,15 @@ impl<R: Read + Seek> Archive<R> {
                 );
                 match loaded {
                     Ok(buf) => match HetTable::parse(&buf) {
-                        Ok(t) => self.het = Some(t),
+                        Ok(t) => {
+                            self.verify_stored_md5(
+                                "HET table",
+                                base + header.het_table_pos,
+                                size,
+                                &header.md5_het_table,
+                            );
+                            self.het = Some(t);
+                        }
                         Err(e) => self.warn(format!("HET table unusable: {e}")),
                     },
                     Err(e) => self.warn(format!("HET table unreadable: {e}")),
@@ -326,7 +373,15 @@ impl<R: Read + Seek> Archive<R> {
                 );
                 match loaded {
                     Ok(buf) => match BetTable::parse(&buf) {
-                        Ok(t) => self.bet = Some(t),
+                        Ok(t) => {
+                            self.verify_stored_md5(
+                                "BET table",
+                                base + header.bet_table_pos,
+                                size,
+                                &header.md5_bet_table,
+                            );
+                            self.bet = Some(t);
+                        }
                         Err(e) => self.warn(format!("BET table unusable: {e}")),
                     },
                     Err(e) => self.warn(format!("BET table unreadable: {e}")),
@@ -473,6 +528,25 @@ impl<R: Read + Seek> Archive<R> {
         read_exact_or_eof(&mut reader.deref_mut(), &mut buf[..available])?;
         drop(reader);
         Ok(buf)
+    }
+
+    /// Verify a v4 table MD5 against the **stored** bytes (the encrypted /
+    /// possibly compressed form as it lies in the file), exactly like
+    /// StormLib's `LoadMpqTable` / `SaveMpqTable`. A mismatch only warns —
+    /// the table itself may still decode fine (tolerant-open philosophy).
+    /// Absent (all-zero) MD5s and cut reads are skipped.
+    fn verify_stored_md5(&mut self, what: &str, offset: u64, stored: u64, expected: &[u8; 16]) {
+        if self.version != FormatVersion::V4 || !digest::md5_present(expected) || stored == 0 {
+            return;
+        }
+        if offset >= self.file_len || self.file_len - offset < stored {
+            return;
+        }
+        if let Ok(raw) = self.read_at_plain(offset, stored as usize) {
+            if digest::md5_digest(&raw) != *expected {
+                self.warn(format!("{what}: v4 table MD5 mismatch"));
+            }
+        }
     }
 
     /// Load `(listfile)` and `(attributes)` — both entirely optional.
@@ -745,6 +819,8 @@ impl<R: Read + Seek> Archive<R> {
             ));
         }
 
+        self.verify_chunk_md5s(entry);
+
         let key = if entry.is_encrypted() {
             match &entry.name {
                 Some(name) => crypt::file_key(
@@ -871,6 +947,45 @@ impl<R: Read + Seek> Archive<R> {
 
         out.truncate(entry.size as usize);
         Ok(out)
+    }
+
+    /// v4 raw-chunk checksums: when the header sets `raw_chunk_size`, every
+    /// file's stored (raw) data is followed by `ceil(csize / chunk)` MD5s,
+    /// one per chunk of the *stored* bytes (not counted in `csize` — the
+    /// same layout StormLib's `WriteMemDataMD5` writes). Mismatches are
+    /// read-warnings, like sector CRCs. Arrays that run past EOF are
+    /// skipped rather than verified against zero fill.
+    fn verify_chunk_md5s(&self, entry: &FileEntry) {
+        let chunk = self.header.raw_chunk_size;
+        if self.version != FormatVersion::V4
+            || chunk == 0
+            || entry.compressed_size == 0
+            || self.read_warnings.borrow().len() >= 64
+        {
+            return;
+        }
+        let start = self.base + entry.offset;
+        let raw_len = entry.compressed_size as u64;
+        let count = raw_len.div_ceil(chunk as u64) as usize;
+        let md5_array = raw_len as usize + count * 16;
+        if start + md5_array as u64 > self.file_len {
+            return;
+        }
+        let Ok(all) = self.read_at_plain(start, md5_array) else {
+            return;
+        };
+        let name = entry.display_name();
+        for i in 0..count {
+            let data = &all[i * chunk as usize..((i + 1) * chunk as usize).min(raw_len as usize)];
+            let expected: [u8; 16] = all[raw_len as usize + i * 16..raw_len as usize + (i + 1) * 16]
+                .try_into()
+                .expect("slice of 16");
+            if digest::md5_digest(data) != expected {
+                self.read_warnings
+                    .borrow_mut()
+                    .push_back(format!("{name}: raw chunk {i} MD5 mismatch"));
+            }
+        }
     }
 
     /// Recover the underlying reader (position unspecified).

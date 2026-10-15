@@ -4,7 +4,7 @@ import { NDropdown, NButton } from 'naive-ui'
 import {
   S, modifyFrozen,
   openArchiveDialog, extractAll, importFilesDialog, reloadArchive,
-  startRepair,
+  startRepair, startCreate, startConvert,
 } from '../store'
 import * as ipc from '../ipc'
 
@@ -17,6 +17,7 @@ const toolsShow = ref(false)
 const settingsShow = ref(false)
 
 const fileOptions = computed(() => [
+  { label: '新建归档…', key: 'create' },
   { label: '打开归档…', key: 'open' },
   { label: '提取全部…', key: 'extract-all', disabled: !hasArchive.value },
   { label: '导入文件到归档…', key: 'import', disabled: !hasArchive.value || modifyFrozen.value },
@@ -27,6 +28,7 @@ const fileOptions = computed(() => [
 
 const toolsOptions = computed(() => [
   { label: '修复头信息…', key: 'repair', disabled: !hasPath.value },
+  { label: '版本转换…', key: 'convert', disabled: !hasArchive.value },
 ])
 
 const settingsOptions = [
@@ -35,7 +37,8 @@ const settingsOptions = [
 
 function onFileSelect(key) {
   fileShow.value = false
-  if (key === 'open') openArchiveDialog()
+  if (key === 'create') startCreate()
+  else if (key === 'open') openArchiveDialog()
   else if (key === 'extract-all') extractAll()
   else if (key === 'import') importFilesDialog()
   else if (key === 'reload') reloadArchive()
@@ -45,6 +48,7 @@ function onFileSelect(key) {
 function onToolsSelect(key) {
   toolsShow.value = false
   if (key === 'repair') startRepair()
+  else if (key === 'convert') startConvert()
 }
 
 function onSettingsSelect(key) {

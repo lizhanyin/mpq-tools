@@ -31,6 +31,11 @@ fn main() {
             commands::save_modified,
             commands::open_modified,
             commands::discard_modify,
+            commands::create_archive,
+            commands::apply_convert,
+            commands::save_converted,
+            commands::open_converted,
+            commands::discard_convert,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
