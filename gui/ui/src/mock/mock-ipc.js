@@ -60,6 +60,8 @@ const MOCK_INFO = {
   warnings: ['archive_size 0x2200 与实际 0x22ac 不符，已按实际值处理'],
   tree: MOCK_TREE,
   entry_count: 11,
+  protected: false,
+  locked: false,
 }
 
 const MOCK_TEXT = `function config takes nothing returns nothing\n    call SetMapName("TRIGSTR_1")\nendfunction\n\n// 中文内容预览测试\n// war3map.j`
@@ -67,6 +69,15 @@ const MOCK_TEXT = `function config takes nothing returns nothing\n    call SetMa
 const MOCKS = {
   open_archive: () => okOpen(),
   reload_archive: () => okOpen(),
+  unlock_archive: ({ password }) => {
+    if (password === 'wrong') throw new Error('密码错误。')
+    return { note: '已解锁：可以读取、提取和修改加密文件。' }
+  },
+  apply_password_op: ({ op }) => ({
+    note: op === 'set'
+      ? '已启用密码保护（9 个文件已按扇区密封，容器转为 v4）。注意：第三方 MPQ 工具将无法打开该文件。'
+      : op === 'change' ? '已更换密码（仅重新包装主密钥，数据未重写）。' : '已解除密码保护（9 个文件已解密）。',
+  }),
   preview_file: ({ name }) => ({
     text: `--- ${name} ---\n` + MOCK_TEXT,
     size: name.length + MOCK_TEXT.length + 300000,
@@ -136,9 +147,13 @@ function okOpen(path) {
 export function invoke(cmd, args) {
   return new Promise((resolve, reject) => {
     setTimeout(() => {
-      const fn = MOCKS[cmd]
-      if (!fn) reject(new Error(`mock: unknown command ${cmd}`))
-      else resolve(fn(args || {}))
+      try {
+        const fn = MOCKS[cmd]
+        if (!fn) reject(new Error(`mock: unknown command ${cmd}`))
+        else resolve(fn(args || {}))
+      } catch (e) {
+        reject(e) // mock 里 throw 的语义与 Tauri 的 Err → reject 一致
+      }
     }, 60)
   })
 }

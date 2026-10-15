@@ -1,9 +1,8 @@
-//! Jenkins `lookup3` `hashlittle2` — the 64-bit name hash used by the
-//! HET and BET tables of MPQ v3+ archives.
+//! Jenkins `lookup3` `hashlittle2` —— MPQ v3+ 归档的 HET 与 BET 表
+//! 所使用的 64 位名称哈希。
 //!
-//! Port of Bob Jenkins' public-domain `lookup3.c`. Only the portable
-//! byte-at-a-time path is needed: all paths in the original produce
-//! identical results.
+//! 移植自 Bob Jenkins 的公有领域代码 `lookup3.c`。这里只需要可移植的
+//! 逐字节路径：原实现中所有路径产生的结果完全相同。
 
 use crate::crypt::lower_byte;
 
@@ -52,13 +51,13 @@ fn final_mix(a: &mut u32, b: &mut u32, c: &mut u32) {
     *c = c.wrapping_sub(rot(*b, 24));
 }
 
-/// `hashlittle2(key, len, pc, pb)`; returns `(c, b)` final values.
+/// `hashlittle2(key, len, pc, pb)`；返回最终值 `(c, b)`。
 fn hashlittle2(key: &[u8], pc: u32, pb: u32) -> (u32, u32) {
     let mut a: u32;
     let mut b: u32;
     let mut c: u32;
 
-    // a = b = c = 0xdeadbeef + length + pc; c += pb
+    // a = b = c = 0xdeadbeef + 长度 + pc; c += pb
     let init = 0xdead_beef_u32.wrapping_add(key.len() as u32).wrapping_add(pc);
     a = init;
     b = init;
@@ -76,7 +75,7 @@ fn hashlittle2(key: &[u8], pc: u32, pb: u32) -> (u32, u32) {
         k = &k[12..];
     }
 
-    // Last (possibly partial) block, all cases fall through.
+    // 最后一个（可能不完整的）块，各种情况依次向下执行。
     let n = k.len();
     if n == 0 {
         return (c, b);
@@ -114,19 +113,19 @@ fn hashlittle2(key: &[u8], pc: u32, pb: u32) -> (u32, u32) {
     if n >= 2 {
         a = a.wrapping_add((k[1] as u32) << 8);
     }
-    // n >= 1 always here
+    // 走到这里必然有 n >= 1
     a = a.wrapping_add(k[0] as u32);
 
     final_mix(&mut a, &mut b, &mut c);
     (c, b)
 }
 
-/// 64-bit file name hash used by HET/BET tables.
+/// HET/BET 表使用的 64 位文件名哈希。
 ///
-/// The name is normalized with the storm lowercase table
-/// (ASCII upper → lower, `/` → `\`), then hashed with
-/// `hashlittle2` seeded with `pc = 2`, `pb = 1`.
-/// Result: `(b << 32) | c`.
+/// 文件名先经 storm 小写表归一化
+/// （ASCII 大写转小写、`/` 转 `\`），再以 `pc = 2`、`pb = 1`
+/// 为种子用 `hashlittle2` 计算哈希。
+/// 结果：`(b << 32) | c`。
 pub fn file_name_hash(name: &str) -> u64 {
     let normalized: Vec<u8> = name.bytes().map(lower_byte).collect();
     let (c, b) = hashlittle2(&normalized, 2, 1);
@@ -137,9 +136,9 @@ pub fn file_name_hash(name: &str) -> u64 {
 mod tests {
     use super::*;
 
-    // Reference values produced by compiling Bob Jenkins' original
-    // lookup3.c and driving hashlittle2 exactly like StormLib's
-    // HashStringJenkins (lowercase table, pc=2, pb=1).
+    // 参考值的产生方式：编译 Bob Jenkins 的原始 lookup3.c，并以与
+    // StormLib 的 HashStringJenkins 完全一致的方式驱动 hashlittle2
+    // （小写表，pc=2，pb=1）。
     #[test]
     fn jenkins_reference_values() {
         assert_eq!(file_name_hash("(listfile)"), 0x3bc43bb0b2f3866a);

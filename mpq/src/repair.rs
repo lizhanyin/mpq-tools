@@ -1,18 +1,18 @@
-//! MPQ header diagnosis and repair.
+//! MPQ 头部诊断与修复。
 //!
-//! Repairs the *container* metadata of an archive whose header fields were
-//! damaged — by truncated downloads, map protector tools or buggy writers:
+//! 修复头部字段受损归档的*容器*元数据 —— 损坏可能来自下载被截断、
+//! 地图保护器工具或有缺陷的写入器：
 //!
-//! * invalid `format_version` / `header_size` / sector exponent
-//! * wrong `archive_size` / `archive_size64`
-//! * hash / block table positions beyond EOF or pointing at the wrong
-//!   place (found again by an encrypted-content scan, like StormLib's
-//!   "malformed archive" recovery)
-//! * oversized `hash_table_size` / `block_table_size` (protector abuse)
-//! * v2/v3 fields (hi-block, HET, BET positions) beyond EOF
+//! * 非法的 `format_version` / `header_size` / sector 指数
+//! * 错误的 `archive_size` / `archive_size64`
+//! * hash table / block table 位置越出 EOF，或指向了错误的地方
+//!   （通过加密内容扫描重新定位，类似 StormLib 的
+//!   "malformed archive" 恢复）
+//! * 过大的 `hash_table_size` / `block_table_size`（保护器滥用）
+//! * v2/v3 字段（hi-block、HET、BET 位置）越出 EOF
 //!
-//! Repair never touches file data or table contents — only header fields
-//! are rewritten, in place, on a buffer the caller controls.
+//! 修复绝不触碰文件数据或表内容 —— 只在调用方控制的缓冲区上
+//! 原地重写头部字段。
 
 use crate::crypt::{decrypt_bytes, KEY_BLOCK_TABLE, KEY_HASH_TABLE};
 use crate::digest;
@@ -23,8 +23,7 @@ use crate::header::{
 };
 use crate::tables::{BlockEntry, HashEntry, FILE_EXISTS};
 
-/// One detected problem. `action` is `None` when the issue cannot be
-/// repaired automatically.
+/// 检测到的一个问题。当问题无法自动修复时，`action` 为 `None`。
 #[derive(Debug, Clone)]
 pub struct RepairIssue {
     pub field: String,
@@ -49,25 +48,25 @@ impl RepairIssue {
     }
 }
 
-/// Outcome of a [`repair`] run.
+/// 一次 [`repair`] 运行的结果。
 #[derive(Debug, Clone)]
 pub struct RepairReport {
-    /// Offset of the repaired MPQ header inside the buffer.
+    /// 修复后的 MPQ 头部在缓冲区中的偏移。
     pub base: u64,
     pub issues: Vec<RepairIssue>,
-    /// Whether any byte was actually rewritten.
+    /// 是否确实重写过任何字节。
     pub changed: bool,
 }
 
 impl RepairReport {
-    /// Issues that could not be fixed automatically.
+    /// 未能自动修复的问题。
     pub fn unfixed(&self) -> Vec<&RepairIssue> {
         self.issues.iter().filter(|i| i.action.is_none()).collect()
     }
 }
 
 // ---------------------------------------------------------------------------
-// byte helpers
+// 字节读取辅助函数
 
 fn rd16(d: &[u8], off: usize) -> u16 {
     if off + 2 > d.len() {
@@ -89,8 +88,8 @@ fn rd64(d: &[u8], off: usize) -> u64 {
     b.copy_from_slice(&d[off..off + 8]);
     u64::from_le_bytes(b)
 }
-/// Locate the MPQ header inside raw bytes: offset 0, behind a `MPQ\x1B`
-/// user-data header, or by 0x200-aligned scan (up to 128 MB).
+/// 在原始字节中定位 MPQ 头部：偏移 0 处、位于 `MPQ\x1B`
+/// user-data 头部之后，或通过 0x200 对齐扫描找到（最多 128 MB）。
 pub fn locate_header(data: &[u8]) -> Option<u64> {
     let n = data.len();
     if n < HEADER_SIZE_V1 as usize {
@@ -143,11 +142,11 @@ pub fn locate_header(data: &[u8]) -> Option<u64> {
 }
 
 // ---------------------------------------------------------------------------
-// table scoring / discovery
+// 表评分 / 探测定位
 
-/// Decrypt a probe of `entries` hash-table entries at absolute `abs` and
-/// score how plausible the result is (free-entry pattern or a consistent
-/// occupied entry). Returns a 0..=1 score.
+/// 解密位于绝对地址 `abs` 处、共 `entries` 项的 hash table 探测数据，
+/// 并为结果的可信度打分（空闲项模式或一致的占用项）。
+/// 返回 0..=1 之间的分数。
 fn score_hash_table(data: &[u8], abs: usize, entries: usize, block_bound: u32) -> f32 {
     let probe = entries.clamp(1, 16);
     let len = probe * 16;
@@ -182,7 +181,7 @@ fn score_hash_table(data: &[u8], abs: usize, entries: usize, block_bound: u32) -
     plausible as f32 / probe as f32
 }
 
-/// Same idea for the block table.
+/// block table 同理。
 fn score_block_table(data: &[u8], abs: usize, entries: usize, span: u64) -> f32 {
     let probe = entries.clamp(1, 16);
     let len = probe * 16;
@@ -212,15 +211,15 @@ fn score_block_table(data: &[u8], abs: usize, entries: usize, span: u64) -> f32 
     plausible as f32 / probe as f32
 }
 
-/// Scan the buffer (ascending from the end of the header, 4-byte aligned)
-/// for a table that decrypts into a plausible hash/block table.
+/// 从头部末尾开始、按 4 字节对齐升序扫描缓冲区，
+/// 寻找能解密成可信 hash table / block table 的表。
 fn find_table<F>(data: &[u8], from: usize, entries: usize, score: F) -> Option<usize>
 where
     F: Fn(&[u8], usize, usize) -> f32,
 {
     if data.len() > 0x0800_0000 {
-        // Keep the scan bounded for huge files: tables sit near the end of
-        // healthy archives, so scan the last 32 MB as well as the head.
+        // 对超大文件限制扫描范围：健康归档的表位于靠近末尾处，
+        // 因此除头部附近外，也扫描最后 32 MB。
         let regions = [
             (from, (from + 0x0200_0000).min(data.len())),
             (data.len().saturating_sub(0x0200_0000).max(from), data.len()),
@@ -251,15 +250,15 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// analyze / repair
+// 分析 / 修复
 
 struct Patch {
     offset: usize,
     bytes: Vec<u8>,
 }
 
-/// Analyze the buffer and return every issue found; when `apply` is set
-/// the fixes are also written into `data`.
+/// 分析缓冲区并返回发现的全部问题；当 `apply` 置位时，
+/// 修复内容也会写入 `data`。
 fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
     let base = locate_header(data).ok_or(Error::NotAnArchive)? as usize;
     let n = data.len();
@@ -269,7 +268,7 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
 
     let mut issues: Vec<RepairIssue> = Vec::new();
     let mut patches: Vec<Patch> = Vec::new();
-    let h = HEADER_SIZE_V1 as usize; // usable header bytes at `base`
+    let h = HEADER_SIZE_V1 as usize; // `base` 处可用的头部字节数
 
     let mut version = rd16(data, base + 0x0C);
     let mut header_size = rd32(data, base + 0x04) as usize;
@@ -308,7 +307,7 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         });
         header_size = HEADER_SIZE_V1 as usize;
     } else if version == 1 && header_size != HEADER_SIZE_V2 as usize {
-        // StormLib downgrades v2 headers with a wrong size to v1.
+        // StormLib 会把长度错误的 v2 头部降级为 v1。
         issues.push(RepairIssue::fixed(
             "header_size/format_version",
             format!("v2 头部长度应为 0x2C，实际 {header_size:#x}"),
@@ -338,7 +337,7 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
     }
     let header_limit = base + header_size.max(h);
 
-    // --- sector exponent ----------------------------------------------------
+    // --- 扇区指数（sector exponent）------------------------------------------
     let block_size = rd16(data, base + 0x0E);
     if block_size > 0x10 {
         issues.push(RepairIssue::fixed(
@@ -352,7 +351,7 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         });
     }
 
-    // --- hash / block tables -------------------------------------------------
+    // --- hash table / block table ---------------------------------------------
     let mut hash_pos = rd32(data, base + 0x10) as u64;
     let mut hash_hi = if version >= 1 { rd16(data, base + 0x28) as u64 } else { 0 };
     let hash_entries = rd32(data, base + 0x18) as usize;
@@ -364,7 +363,7 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
     let block_bound = block_entries.saturating_mul(4).max(0x100) as u32;
     let span = (n - base) as u64;
 
-    // Hash table.
+    // hash table 部分。
     if hash_entries > 0 {
         let abs = base as u64 + (hash_pos | (hash_hi << 32));
         let mut fixed_abs: Option<u64> = None;
@@ -404,8 +403,8 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
                 )),
             }
         } else if deep {
-            // Position in range but may still be wrong (protector maps):
-            // verify decryptability, relocate when implausible.
+            // 位置在范围内但仍可能错误（保护器地图）：
+            // 校验可解密性，不可信时重新定位。
             let score = score_hash_table(data, abs as usize, hash_entries, block_bound);
             if score < 0.5 {
                 if let Some(hit) =
@@ -436,15 +435,15 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
             }
         }
 
-        // Entry count must fit into the file.
+        // 表项数必须能容纳进文件。
         let abs = base as u64 + (hash_pos | (hash_hi << 32));
         if (abs as usize) < n {
             let end = abs as usize + hash_entries * 16;
             if end > n {
-                // Hash table sizes must be powers of two (the reader probes
-                // with modulo), so snap the trimmed count down to one.
+                // hash table 的大小必须是 2 的幂（读取时按模探测），
+                // 因此把截断后的数量向下取到 2 的幂。
                 let mut trimmed = (n - abs as usize) / 16;
-                // largest power of two <= trimmed (stable-friendly form)
+                // 不超过 trimmed 的最大 2 的幂（兼容 stable 的写法）
                 while trimmed > 1 && !trimmed.is_power_of_two() {
                     trimmed &= trimmed - 1;
                 }
@@ -468,7 +467,7 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         }
     }
 
-    // Block table.
+    // block table 部分。
     if block_entries > 0 {
         let abs = base as u64 + (block_pos | (block_hi << 32));
         let mut fixed_abs: Option<u64> = None;
@@ -563,7 +562,7 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         }
     }
 
-    // --- v2 fields -----------------------------------------------------------
+    // --- v2 字段 -----------------------------------------------------------
     if version >= 1 && header_limit >= base + 0x2C {
         let hi_pos = rd64(data, base + 0x20);
         if hi_pos != 0 && base as u64 + hi_pos >= n as u64 {
@@ -579,7 +578,7 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         }
     }
 
-    // --- v3 fields -----------------------------------------------------------
+    // --- v3 字段 -----------------------------------------------------------
     if version >= 2 && header_limit >= base + 0x44 {
         let bet = rd64(data, base + 0x34);
         let het = rd64(data, base + 0x3C);
@@ -610,7 +609,7 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         }
     }
 
-    // --- archive size (v1 32-bit field, always) -------------------------------
+    // --- 归档大小（v1 的 32 位字段，始终检查）---------------------------------
     let size32 = rd32(data, base + 0x08) as u64;
     let expect32 = span.min(u32::MAX as u64);
     if size32 != expect32 {
@@ -625,10 +624,10 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         });
     }
 
-    // --- v4 header MD5 --------------------------------------------------------
-    // The v4 header carries its own MD5 over bytes 0x00..0xC0, so any header
-    // repair above invalidates it (StormLib refuses to open such archives).
-    // Recompute it against the header *after* all pending patches.
+    // --- v4 头部 MD5 -----------------------------------------------------------
+    // v4 头部对自身 0x00..0xC0 字节附带 MD5，因此上面的任何头部修复
+    // 都会使该 MD5 失效（StormLib 会拒绝打开这类归档）。
+    // 在应用全部待处理补丁*之后*，针对修复后的头部重新计算该 MD5。
     if version == 3 && base + HEADER_SIZE_V4 as usize <= n {
         let mut window = data[base..base + HEADER_SIZE_V4 as usize].to_vec();
         let mut header_patched = false;
@@ -660,7 +659,7 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
         }
     }
 
-    // --- apply ----------------------------------------------------------------
+    // --- 应用补丁 ---------------------------------------------------------------
     let changed = !patches.is_empty();
     if apply {
         for p in patches {
@@ -678,14 +677,14 @@ fn run(data: &mut [u8], apply: bool, deep: bool) -> Result<RepairReport> {
     })
 }
 
-/// Diagnose the buffer without modifying it (repair dry-run).
+/// 诊断缓冲区而不做修改（repair 的预演）。
 pub fn diagnose(data: &[u8]) -> Result<RepairReport> {
     let mut copy = data.to_vec();
     run(&mut copy, false, true)
 }
 
-/// Repair the buffer in place. `deep` enables the encrypted-content scan
-/// that relocates hash/block tables whose declared positions are wrong.
+/// 原地修复缓冲区。`deep` 会启用加密内容扫描，
+/// 重新定位声明位置错误的 hash table / block table。
 pub fn repair(data: &mut [u8], deep: bool) -> Result<RepairReport> {
     run(data, true, deep)
 }
@@ -697,26 +696,26 @@ mod tests {
     #[test]
     fn locator_finds_plain_userdata_and_scanned() {
         let mut buf = vec![0u8; 0x600];
-        // plain at 0
+        // 普通头部位于偏移 0 处
         buf[0..4].copy_from_slice(&MPQ_MAGIC.to_le_bytes());
         assert_eq!(locate_header(&buf), Some(0));
 
-        // userdata at 0 pointing to 0x200
+        // 位于 0 处的 userdata 头部，指向 0x200
         let mut buf = vec![0xEEu8; 0x400];
         buf[0..4].copy_from_slice(&USERDATA_MAGIC.to_le_bytes());
-        buf[4..8].copy_from_slice(&0x100u32.to_le_bytes()); // data size
-        buf[8..12].copy_from_slice(&0x200u32.to_le_bytes()); // header offs
+        buf[4..8].copy_from_slice(&0x100u32.to_le_bytes()); // 数据大小
+        buf[8..12].copy_from_slice(&0x200u32.to_le_bytes()); // 头部偏移
         buf[12..16].copy_from_slice(&0x10u32.to_le_bytes());
         buf[0x200..0x204].copy_from_slice(&MPQ_MAGIC.to_le_bytes());
         buf[0x204..0x208].copy_from_slice(&0x20u32.to_le_bytes());
         assert_eq!(locate_header(&buf), Some(0x200));
 
-        // embedded (scan): garbage prefix, minimal but valid header fields
+        // 内嵌（扫描）：前缀是垃圾数据，头部字段最少但有效
         let mut buf = vec![0x11u8; 0x400];
         buf[0x200..0x204].copy_from_slice(&MPQ_MAGIC.to_le_bytes());
-        buf[0x204..0x208].copy_from_slice(&0x20u32.to_le_bytes()); // header size
-        buf[0x20C..0x20E].copy_from_slice(&0u16.to_le_bytes()); // version 1
-        buf[0x20E..0x210].copy_from_slice(&3u16.to_le_bytes()); // sector exp
+        buf[0x204..0x208].copy_from_slice(&0x20u32.to_le_bytes()); // 头部长度
+        buf[0x20C..0x20E].copy_from_slice(&0u16.to_le_bytes()); // 版本 1
+        buf[0x20E..0x210].copy_from_slice(&3u16.to_le_bytes()); // 扇区指数
         assert_eq!(locate_header(&buf), Some(0x200));
     }
 }

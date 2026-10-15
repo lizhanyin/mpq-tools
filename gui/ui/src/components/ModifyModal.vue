@@ -4,9 +4,14 @@ import { NModal, NButton, NTag, NCheckbox, NTooltip } from 'naive-ui'
 import { S, confirmModify, closeModify } from '../store'
 import { fmtBytes } from '../utils'
 
-const empty = computed(() =>
-  (S.modify?.additions.length ?? 0) === 0 && (S.modify?.deletions.length ?? 0) === 0)
+const adds = computed(() => S.modify?.additions.length ?? 0)
+const dels = computed(() => S.modify?.deletions.length ?? 0)
+const empty = computed(() => adds.value === 0 && dels.value === 0)
 const busy = computed(() => !!S.modify?.busy)
+// 常态（先排队一类再打开弹窗）只显示有待办的一列；
+// 两类都有（弹窗开着时拖入文件）才同时显示两列。
+const showImports = computed(() => adds.value > 0 || dels.value === 0)
+const showDeletes = computed(() => dels.value > 0)
 </script>
 
 <template>
@@ -14,7 +19,7 @@ const busy = computed(() => !!S.modify?.busy)
     :show="!!S.modify"
     preset="card"
     title="修改归档"
-    :style="{ width: '640px', maxWidth: '94vw', borderRadius: '12px' }"
+    :style="{ width: showImports && showDeletes ? '640px' : '480px', maxWidth: '94vw', borderRadius: '12px' }"
     :mask-closable="false"
     :bordered="false"
     @update:show="(v) => { if (!v && !busy) closeModify() }"
@@ -26,9 +31,9 @@ const busy = computed(() => !!S.modify?.busy)
           <span class="meta-value">{{ S.openPath || '（未保存）' }}</span>
         </div>
 
-        <!-- 左：待导入 / 右：待删除，各自独立滚动 -->
+        <!-- 单列时自动占满整行 -->
         <div class="modify-columns">
-          <div class="modify-col">
+          <div v-if="showImports" class="modify-col">
             <div class="modify-col-head">
               <span class="section-title">待导入</span>
               <span class="section-count">{{ fmtBytes(S.modify.additions.length) }} 项</span>
@@ -52,7 +57,7 @@ const busy = computed(() => !!S.modify?.busy)
             </div>
           </div>
 
-          <div class="modify-col">
+          <div v-if="showDeletes" class="modify-col">
             <div class="modify-col-head">
               <span class="section-title">待删除</span>
               <span class="section-count">{{ fmtBytes(S.modify.deletions.length) }} 项</span>
@@ -87,6 +92,17 @@ const busy = computed(() => !!S.modify?.busy)
             取消：存为未加密（内容不变，任何工具都能读）
           </n-tooltip>
         </n-checkbox>
+
+        <n-checkbox v-model:checked="S.modify.saveAs" size="small" :disabled="busy">
+          另存为
+          <n-tooltip trigger="hover" placement="top" :style="{ maxWidth: '320px' }">
+            <template #trigger>
+              <span class="info-mark">ⓘ</span>
+            </template>
+            勾选：确认时选择新的保存位置，原文件保持不变；<br />
+            不勾：修改直接写回当前打开的文件
+          </n-tooltip>
+        </n-checkbox>
       </div>
     </template>
 
@@ -95,7 +111,7 @@ const busy = computed(() => !!S.modify?.busy)
         <div class="grow"></div>
         <n-button size="small" quaternary :disabled="busy" @click="closeModify">取消</n-button>
         <n-button size="small" type="primary" :disabled="empty" :loading="busy"
-                  title="选择保存位置（默认覆盖原文件），应用修改并自动重新载入"
+                  title="应用修改并自动重新载入；勾选「另存为」后改为选择保存位置"
                   @click="confirmModify">确认</n-button>
       </div>
     </template>

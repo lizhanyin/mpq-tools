@@ -2,9 +2,7 @@
 import { computed, ref } from 'vue'
 import { NDropdown, NButton } from 'naive-ui'
 import {
-  S,
-  openArchiveDialog, extractAll, importFilesDialog, reloadArchive,
-  startRepair, startCreate, startConvert,
+  S, openArchiveDialog, extractAll, importFilesDialog, reloadArchive, startRepair, startCreate, startConvert, startUnlock, startPwOp, protectedArchive, lockedArchive,
 } from '../store'
 import * as ipc from '../ipc'
 
@@ -29,6 +27,15 @@ const fileOptions = computed(() => [
 const toolsOptions = computed(() => [
   { label: '修复头信息…', key: 'repair', disabled: !hasPath.value },
   { label: '版本转换…', key: 'convert', disabled: !hasArchive.value },
+  { type: 'divider', key: 'd2' },
+  { label: '设置密码…', key: 'pw-set', disabled: !hasArchive.value || protectedArchive.value },
+  { label: '修改密码…', key: 'pw-change', disabled: !protectedArchive.value },
+  { label: '解除密码保护…', key: 'pw-remove', disabled: !protectedArchive.value },
+  {
+    label: lockedArchive.value ? '输入密码解锁…' : '密码已解锁',
+    key: 'pw-unlock',
+    disabled: !lockedArchive.value,
+  },
 ])
 
 const settingsOptions = [
@@ -49,6 +56,10 @@ function onToolsSelect(key) {
   toolsShow.value = false
   if (key === 'repair') startRepair()
   else if (key === 'convert') startConvert()
+  else if (key === 'pw-set') startPwOp('set')
+  else if (key === 'pw-change') startPwOp('change')
+  else if (key === 'pw-remove') startPwOp('remove')
+  else if (key === 'pw-unlock') startUnlock()
 }
 
 function onSettingsSelect(key) {

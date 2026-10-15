@@ -1,4 +1,3 @@
-//! mpqtool — shared helpers for the CLI and the GUI (see `gui/` for the
-//! Tauri graphical interface).
+//! mpqtool — CLI 与 GUI 共用的辅助函数（Tauri 图形界面见 `gui/`）。
 
 pub mod tasks;

@@ -1,25 +1,23 @@
-//! Regenerates the PKWARE DCL test vectors under `tests/fixtures`.
+//! 重新生成 `tests/fixtures` 目录下的 PKWARE DCL 测试向量。
 //!
-//! Run with `cargo run -p mpq --example gen_pk_fixtures`. Every generated
-//! `.bin` is immediately verified by exploding it back through the crate's
-//! decoder (`mpq::decompress_imploded`); the tool refuses to write files
-//! that do not round-trip.
+//! 运行方式：`cargo run -p mpq --example gen_pk_fixtures`。每个生成的
+//! `.bin` 都会立即用 crate 的解码器（`mpq::decompress_imploded`）
+//! explode 解压回来加以验证；无法往返（round-trip）的数据一律拒绝
+//! 写入。
 //!
-//! The encoder is a port of the PKWARE Data Compression Library "implode"
-//! side (the compressor counterpart of StormLib's `pklib/explode.c`),
-//! reusing the same fixed length/distance tables the decoder uses:
-//! greedy LZSS matching, binary mode, 4 KB dictionary:
+//! 编码器移植自 PKWARE Data Compression Library 的 "implode" 一侧
+//! （即 StormLib `pklib/explode.c` 所对应的压缩器），复用与解码器
+//! 相同的固定长度/距离表：贪婪 LZSS 匹配、二进制模式、4 KB 字典：
 //!
-//! * header `[ctype=0, dsize_bits=6]`, then an LSB-first bit stream;
-//! * literal `0` + 8 payload bits;
-//! * match `1` + canonical length code (`LEN_CODE`/`LEN_BITS`, then
-//!   `EX_LEN_BITS` extra bits of `len - 2 - LEN_BASE`) + canonical
-//!   distance code (`DIST_CODE`/`DIST_BITS`, then the low
-//!   `dsize_bits` bits of `dist - 1`);
-//! * end marker: the length-code value 517 (`lc=15`, extra `0xFF`);
-//! * distances never reach before the start of the output and never
-//!   exceed the 4 KB dictionary; lengths are capped at 518 so they can
-//!   never collide with the end marker (code 517).
+//! * 头部 `[ctype=0, dsize_bits=6]`，随后是 LSB 在前的位流；
+//! * 字面量：`0` + 8 个数据位；
+//! * 匹配：`1` + 规范长度码（`LEN_CODE`/`LEN_BITS`，随后是
+//!   `len - 2 - LEN_BASE` 的 `EX_LEN_BITS` 个额外位）+ 规范距离码
+//!   （`DIST_CODE`/`DIST_BITS`，随后是 `dist - 1` 的低
+//!   `dsize_bits` 位）；
+//! * 结束标记：长度码值 517（`lc=15`，额外位 `0xFF`）；
+//! * 距离绝不回退到输出起点之前，也绝不会超出 4 KB 字典；长度上限
+//!   为 518，因此永远不会与结束标记（码 517）冲突。
 
 #![allow(dead_code)]
 
@@ -27,14 +25,14 @@ use std::path::PathBuf;
 
 include!("../src/pkware_tables.rs");
 
-const DSIZE_BITS: u32 = 6; // 4 KB dictionary
+const DSIZE_BITS: u32 = 6; // 4 KB 字典
 const DSIZE_MASK: u32 = (1 << DSIZE_BITS) - 1;
-const WINDOW: usize = 1 << (DSIZE_BITS + 6); // 64 dist codes × 2^6 = 4096
-const MAX_MATCH: usize = 518; // length code 516; 517 is the end marker
+const WINDOW: usize = 1 << (DSIZE_BITS + 6); // 64 个距离码 × 2^6 = 4096
+const MAX_MATCH: usize = 518; // 长度码 516；517 是结束标记
 const MIN_MATCH: usize = 3;
 
 // ---------------------------------------------------------------------------
-// LSB-first bit writer (the decoder primes itself on byte 2 of the stream)
+// LSB 在前的位写入器（解码器以流的第 2 个字节预填位缓冲）
 
 struct BitWriter {
     out: Vec<u8>,
@@ -45,7 +43,7 @@ struct BitWriter {
 impl BitWriter {
     fn new() -> Self {
         BitWriter {
-            out: vec![0, DSIZE_BITS as u8], // ctype = binary, dict size
+            out: vec![0, DSIZE_BITS as u8], // ctype = 二进制，字典大小
             buff: 0,
             cnt: 0,
         }
@@ -60,7 +58,7 @@ impl BitWriter {
         }
     }
     fn finish(mut self) -> Vec<u8> {
-        // End of stream: match flag + length code 15 (7 zero bits) + 0xFF.
+        // 流结束：匹配标志 + 长度码 15（7 个零位）+ 0xFF。
         self.put(1, 1);
         self.put(LEN_CODE[15] as u32, LEN_BITS[15] as u32);
         self.put(0xFF, EX_LEN_BITS[15] as u32);
@@ -72,9 +70,9 @@ impl BitWriter {
 }
 
 // ---------------------------------------------------------------------------
-// Impplode encoder
+// Implode 编码器
 
-/// (length code index, extra bits value) for a match of `len` bytes.
+/// 匹配 `len` 字节对应的（长度码索引，额外位值）。
 fn length_code(len: usize) -> (usize, u32) {
     let code = (len - 2) as u16;
     for lc in (0..16).rev() {
@@ -105,7 +103,7 @@ fn put_literal(w: &mut BitWriter, byte: u8) {
     w.put(byte as u32, 8);
 }
 
-/// Greedy LZSS front end over a 3-byte hash chain.
+/// 基于 3 字节哈希链的贪婪 LZSS 前端。
 struct Matcher<'a> {
     data: &'a [u8],
     head: Vec<i32>,
@@ -139,13 +137,13 @@ impl<'a> Matcher<'a> {
         self.head[h] = pos as i32;
     }
 
-    /// Longest match for `pos` within the dictionary window.
+    /// 在字典窗口内寻找 `pos` 处的最长匹配。
     fn find(&self, pos: usize) -> Option<(usize, usize)> {
         let data = self.data;
         if pos + MIN_MATCH > data.len() {
             return None;
         }
-        let window = WINDOW.min(pos); // never reach before the output start
+        let window = WINDOW.min(pos); // 绝不回退到输出起点之前
         let mut best: Option<(usize, usize)> = None;
         let mut cand = self.head[self.hash3(pos)];
         while cand >= 0 {
@@ -192,9 +190,9 @@ fn implode(data: &[u8]) -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Fixture inputs
+// 测试向量输入
 
-/// Deterministic pseudo-random bytes (incompressible; exercises literals).
+/// 确定性的伪随机字节（不可压缩；用于覆盖字面量编码路径）。
 fn rand_orig() -> Vec<u8> {
     let mut state = 0x9E37_79B9_7F4A_7C15u64;
     let mut out = Vec::with_capacity(300);
@@ -207,16 +205,16 @@ fn rand_orig() -> Vec<u8> {
     out
 }
 
-/// Run-heavy data past 0x2000 bytes (exercises long matches, far distances
-/// and the decoder's ring-buffer flushes).
+/// 超过 0x2000 字节的长行程数据（用于覆盖长匹配、远距离
+/// 以及解码器的环形缓冲刷新）。
 fn runs_orig() -> Vec<u8> {
     let mut data = Vec::new();
-    data.extend(std::iter::repeat_n(0x5A, 700)); // single run > MAX_MATCH
+    data.extend(std::iter::repeat_n(0x5A, 700)); // 单个行程 > MAX_MATCH
     data.extend(std::iter::repeat_n(0x00, 600));
     for i in 0..180 {
         data.extend_from_slice(format!("run pattern iteration {i:03}: ABRACADABRA--").as_bytes());
     }
-    // A far-distance copy of earlier content (distance ~3.5 KB).
+    // 对先前内容的一次远距离复制（距离约 3.5 KB）。
     let far_source = 700 + 600;
     let far_len = 500;
     let far_copy = data[far_source..far_source + far_len].to_vec();
@@ -232,7 +230,7 @@ fn fixtures_dir() -> PathBuf {
 fn emit(dir: &PathBuf, name: &str, orig: &[u8]) {
     let stream = implode(orig);
 
-    // Verify through the crate's decoder before touching the fixtures.
+    // 写入测试向量之前，先通过 crate 的解码器验证。
     let decoded = mpq::decompress_imploded(&stream, orig.len())
         .unwrap_or_else(|e| panic!("{name}: generated stream failed to explode: {e}"));
     assert_eq!(
@@ -241,7 +239,7 @@ fn emit(dir: &PathBuf, name: &str, orig: &[u8]) {
         "{name}: explode(implode(x)) != x — encoder bug"
     );
 
-    let bin_name = name; // "pk_text" etc.
+    let bin_name = name; // "pk_text" 等
     std::fs::write(dir.join(format!("{bin_name}.bin")), &stream).unwrap();
     std::fs::write(dir.join(format!("{bin_name}.orig")), orig).unwrap();
     println!(
@@ -256,7 +254,7 @@ fn main() {
     let dir = fixtures_dir();
     std::fs::create_dir_all(&dir).unwrap();
 
-    // pk_text.orig is the committed original; only the stream is generated.
+    // pk_text.orig 是已提交的原始文件；只有压缩流是生成的。
     let text = std::fs::read(dir.join("pk_text.orig"))
         .expect("pk_text.orig must exist (it is committed)");
     {

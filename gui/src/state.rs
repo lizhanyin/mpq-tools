@@ -1,4 +1,4 @@
-//! The archive held open by the GUI plus the DTOs sent to the frontend.
+//! GUI 保持打开的归档，以及发送给前端的各个 DTO。
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -8,43 +8,32 @@ use mpq::{Archive, FileEntry, TableSource};
 use mpqtool::tasks::{self, TreeNode};
 use serde::Serialize;
 
-/// Everything the backend keeps about the loaded archive. The frontend
-/// mirrors the derived parts (tree, warnings, header summary) it received
-/// in the last [`OpenResult`].
+/// 后端为已载入归档保存的全部信息。前端镜像最近一次
+/// [`OpenResult`] 中收到的派生部分（目录树、警告、头信息摘要）。
+#[derive(Default)]
 pub struct GuiState {
-    /// Path of the file the current bytes came from.
+    /// 当前字节来源文件的路径。
     pub path: Option<PathBuf>,
-    /// Raw bytes as loaded from disk — the input for repair / modify.
+    /// 从磁盘载入的原始字节——修复 / 修改的输入。
     pub raw: Vec<u8>,
-    /// Parsed view. `None` after a failed open, but `path`/`raw` stay set
-    /// so the repair flow can offer itself (mirrors the egui behaviour).
+    /// 解析后的视图。打开失败时为 `None`，但 `path`/`raw` 仍会保留，
+    /// 以便顺势提供修复流程（与 egui 行为一致）。
     pub archive: Option<Archive<Cursor<Vec<u8>>>>,
-    /// Flat entry list backing the tree (used for key lookups).
+    /// 支撑目录树的扁平条目列表（用于 key 查找）。
     pub entries: Vec<FileEntry>,
-    /// Result bytes of the last applied 修复头信息 run.
+    /// 受密码保护的归档解锁成功后的主密钥（自定义 AEAD 扩展）；
+    /// 会回填给修改 / 转换使用。
+    pub master_key: Option<[u8; 32]>,
+    /// 最近一次应用「修复头信息」后的结果字节。
     pub repair_fixed: Option<Vec<u8>>,
-    /// Result bytes + one-line summary of the last applied 修改归档 run.
+    /// 最近一次应用「修改归档」后的结果字节 + 单行摘要。
     pub modify_applied: Option<(Vec<u8>, String)>,
-    /// Result bytes + one-line summary of the last applied 版本转换 run.
+    /// 最近一次应用「版本转换」后的结果字节 + 单行摘要。
     pub convert_applied: Option<(Vec<u8>, String)>,
 }
 
-impl Default for GuiState {
-    fn default() -> Self {
-        Self {
-            path: None,
-            raw: Vec::new(),
-            archive: None,
-            entries: Vec::new(),
-            repair_fixed: None,
-            modify_applied: None,
-            convert_applied: None,
-        }
-    }
-}
-
-/// Selection key of an entry, stable across navigation and immune to
-/// duplicate display names: `<source>:<block_index>`.
+/// 条目的选择键，跨导航保持稳定，且不受重名显示名的影响：
+/// `<source>:<block_index>`。
 pub fn key_of(source: TableSource, index: usize) -> String {
     format!("{}:{index}", source_str(source))
 }
@@ -56,7 +45,7 @@ pub fn source_str(source: TableSource) -> &'static str {
     }
 }
 
-/// Parse a key produced by [`key_of`].
+/// 解析由 [`key_of`] 生成的键。
 pub fn parse_key(key: &str) -> Option<(TableSource, usize)> {
     let (src, idx) = key.split_once(':')?;
     let source = match src {
@@ -69,19 +58,19 @@ pub fn parse_key(key: &str) -> Option<(TableSource, usize)> {
 
 #[derive(Serialize)]
 pub struct EntryDto {
-    /// Full in-archive path (`None` for unnamed entries).
+    /// 归档内的完整路径（未命名条目为 `None`）。
     pub name: Option<String>,
-    /// Name shown in listings (`<unnamed #i>` when unnamed).
+    /// 列表中显示的名称（未命名时为 `<unnamed #i>`）。
     pub display: String,
     pub size: u32,
     pub csize: u32,
-    /// Short flag string: E=exists K=encrypted C=compressed 1=single unit
-    /// #=sector CRC P=patch.
+    /// 标志简写串：E=存在 K=已加密 C=已压缩 1=单一单元
+    /// #=扇区 CRC P=补丁。
     pub flags: String,
     pub locale: u16,
     pub source: String,
     pub key: String,
-    /// `YYYY-MM-DD HH:MM` (UTC) from `(attributes)`, if present.
+    /// `(attributes)` 提供的 `YYYY-MM-DD HH:MM`（UTC）时间（若有）。
     pub mtime: Option<String>,
 }
 
@@ -90,7 +79,7 @@ pub struct TreeNodeDto {
     pub name: String,
     pub dirs: Vec<TreeNodeDto>,
     pub files: Vec<EntryDto>,
-    /// Number of files in this folder and everything below it.
+    /// 此文件夹及其全部子级中的文件数。
     pub file_count: usize,
     pub total_size: u64,
     pub total_csize: u64,
@@ -107,15 +96,19 @@ pub struct ArchiveInfoDto {
     pub listfile_count: usize,
     pub warnings: Vec<String>,
     pub tree: TreeNodeDto,
-    /// Total entries (named + unnamed).
+    /// 条目总数（具名 + 未命名）。
     pub entry_count: usize,
+    /// 归档带有 `(password)` 保管库（自定义 AEAD 扩展）。
+    pub protected: bool,
+    /// 已受保护且尚未解锁（决定是否弹出密码输入框）。
+    pub locked: bool,
 }
 
-/// Result of open / reload / open-modified / open-repaired.
+/// open / reload / open-modified / open-repaired 操作的结果。
 #[derive(Serialize)]
 pub struct OpenResult {
     pub ok: bool,
-    /// Optional extra log line (e.g. 已载入修改结果（…）).
+    /// 可选的附加日志行（如 已载入修改结果（…））。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -153,12 +146,28 @@ fn tree_dto(node: &TreeNode, times: &HashMap<usize, u64>) -> TreeNodeDto {
 }
 
 impl GuiState {
-    /// Replace the loaded archive with `bytes` from `path`, mirroring the
-    /// egui `load_bytes` behaviour: a parse failure still records path and
-    /// raw bytes so the repair flow can be offered right away.
+    /// 用来自 `path` 的 `bytes` 替换已载入的归档，与 egui 的
+    /// `load_bytes` 行为一致：解析失败时仍会记录路径和原始字节，
+    /// 以便立即提供修复流程。
+    ///
+    /// 受密码保护的归档初始处于锁定状态；如果手头有此前解锁得到的
+    /// 主密钥，会重新校验一次，因此重载（或载入刚保存的修改结果）
+    /// 之后归档仍保持解锁。
     pub fn load(&mut self, path: PathBuf, bytes: Vec<u8>) -> OpenResult {
         match Archive::new(Cursor::new(bytes.clone())) {
-            Ok(archive) => {
+            Ok(mut archive) => {
+                let protected = archive.is_password_protected();
+                if protected {
+                    if let Some(master) = self.master_key {
+                        // 密钥已失效（归档不同 / 密码已更改）时
+                        // 归档只会保持锁定状态。
+                        let _ = archive.unlock_with_master_key(&master);
+                    }
+                } else {
+                    self.master_key = None;
+                }
+                let locked = protected && !archive.is_unlocked();
+
                 let entries = archive.entries();
                 let tree = tasks::build_tree(&entries);
                 let times = tasks::file_time_map(&archive);
@@ -174,6 +183,8 @@ impl GuiState {
                     warnings: archive.warnings().to_vec(),
                     tree: tree_dto(&tree, &times),
                     entry_count: entries.len(),
+                    protected,
+                    locked,
                 };
                 self.entries = entries;
                 self.archive = Some(archive);
@@ -189,6 +200,7 @@ impl GuiState {
             Err(e) => {
                 self.archive = None;
                 self.entries.clear();
+                self.master_key = None;
                 self.path = Some(path);
                 self.raw = bytes;
                 OpenResult {

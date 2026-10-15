@@ -1,4 +1,4 @@
-//! The [`Archive`] type: opening MPQ archives, finding and reading files.
+//! [`Archive`] 类型：打开 MPQ 归档，查找并读取文件。
 
 use std::collections::VecDeque;
 use std::cell::RefCell;
@@ -17,33 +17,40 @@ use crate::header::{
 use crate::hetbet::{load_ext_table, BetTable, HetTable, BET_SIGNATURE, HET_SIGNATURE};
 use crate::jenkins;
 use crate::crypt::{KEY_BLOCK_TABLE, KEY_HASH_TABLE};
+use crate::passcrypt::{self, TAG_LEN};
 use crate::tables::{
     load_mpq_table, parse_block_table, parse_hash_table, ClassicTables, FILE_COMPRESS,
     FILE_COMPRESS_MASK, FILE_DELETE_MARKER, FILE_ENCRYPTED, FILE_EXISTS, FILE_IMPLODE,
-    FILE_KEY_V2, FILE_SECTOR_CRC, FILE_SINGLE_UNIT,
+    FILE_KEY_V2, FILE_PASSWORD_AEAD, FILE_SECTOR_CRC, FILE_SINGLE_UNIT,
 };
 
-/// Names of internal files that may or may not be present (all optional).
-pub const SPECIAL_FILES: [&str; 4] = ["(listfile)", "(attributes)", "(signature)", "(userdata)"];
+/// 可能存在也可能不存在的内部文件名（均为可选）。
+pub const SPECIAL_FILES: [&str; 5] = [
+    "(listfile)",
+    "(attributes)",
+    "(signature)",
+    "(userdata)",
+    "(password)",
+];
 
-/// Where a file entry's data came from.
+/// 文件条目的数据来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TableSource {
-    /// Classic block table (index into it stored in `block_index`).
+    /// 经典 block table（对应索引存于 `block_index`）。
     Classic,
-    /// BET table (index into it stored in `block_index`).
+    /// BET 表（对应索引存于 `block_index`）。
     Bet,
 }
 
-/// A file inside the archive, unified across classic and BET tables.
+/// 归档内的一个文件，统一表示经典表与 BET 表两种来源。
 #[derive(Debug, Clone)]
 pub struct FileEntry {
-    /// Name if known (from `(listfile)` or a probed internal name).
+    /// 名字（已知时），来自 `(listfile)` 或探测出的内部文件名。
     pub name: Option<String>,
     pub locale: u16,
-    /// Index into the source table.
+    /// 在源表中的索引。
     pub block_index: usize,
-    /// Data offset relative to the archive start.
+    /// 相对归档起始处的数据偏移。
     pub offset: u64,
     pub compressed_size: u32,
     pub size: u32,
@@ -64,10 +71,15 @@ impl FileEntry {
     pub fn is_encrypted(&self) -> bool {
         self.flags & FILE_ENCRYPTED != 0
     }
+    /// 密码 AEAD 扩展：sector 以归档主密钥派生的 ChaCha20-Poly1305
+    /// 封装（而非 storm 加密）。
+    pub fn is_password_aead(&self) -> bool {
+        self.flags & FILE_PASSWORD_AEAD != 0
+    }
     pub fn is_compressed(&self) -> bool {
         self.flags & FILE_COMPRESS_MASK != 0
     }
-    /// Name for display; `<unnamed #index>` when unknown.
+    /// 用于显示的名字；未知时为 `<unnamed #index>`。
     pub fn display_name(&self) -> String {
         match &self.name {
             Some(n) => n.clone(),
@@ -76,10 +88,10 @@ impl FileEntry {
     }
 }
 
-/// An opened MPQ archive.
+/// 一个已打开的 MPQ 归档。
 pub struct Archive<R: Read + Seek> {
     reader: RefCell<R>,
-    /// Offset of the MPQ header inside the containing file.
+    /// MPQ 头在所在文件中的偏移。
     base: u64,
     file_len: u64,
     header: MpqHeader,
@@ -91,12 +103,15 @@ pub struct Archive<R: Read + Seek> {
     names: Vec<String>,
     attributes: Option<Attributes>,
     warnings: Vec<String>,
-    /// Non-fatal issues hit while reading file data (bounded ring).
+    /// 读取文件数据时遇到的非致命问题（有界环形缓冲）。
     read_warnings: RefCell<VecDeque<String>>,
+    /// 受密码保护归档（自定义 AEAD 扩展）的已解封主密钥；
+    /// 锁定时为 `None`。
+    master_key: Option<[u8; 32]>,
 }
 
 impl Archive<std::fs::File> {
-    /// Open an archive from a file path.
+    /// 从文件路径打开归档。
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let file = std::fs::File::open(path.as_ref())?;
         Archive::new(file)
@@ -104,9 +119,9 @@ impl Archive<std::fs::File> {
 }
 
 impl<R: Read + Seek> Archive<R> {
-    /// Open an archive from any reader. The MPQ header is searched at the
-    /// start of the stream, behind a `MPQ\x1B` user-data header, or by
-    /// scanning (up to 128 MB, 0x200-aligned) for embedded archives.
+    /// 从任意 reader 打开归档。MPQ 头的查找位置：流的开头、
+    /// `MPQ\x1B` user-data 头之后，或通过扫描（最多 128 MB，
+    /// 按 0x200 对齐）寻找内嵌归档。
     pub fn new(mut reader: R) -> Result<Self> {
         let file_len = reader.seek(SeekFrom::End(0))?;
 
@@ -131,6 +146,7 @@ impl<R: Read + Seek> Archive<R> {
             attributes: None,
             warnings: Vec::new(),
             read_warnings: RefCell::new(VecDeque::new()),
+            master_key: None,
         };
         archive.sector_size = archive.header.sector_size();
         archive.load_tables()?;
@@ -138,9 +154,9 @@ impl<R: Read + Seek> Archive<R> {
         Ok(archive)
     }
 
-    // -- opening helpers ---------------------------------------------------
+    // -- 打开辅助函数 ---------------------------------------------------
 
-    /// Find the byte offset of the MPQ header within the stream.
+    /// 在流中查找 MPQ 头所在的字节偏移。
     fn locate_header(reader: &mut R, file_len: u64) -> Result<u64> {
         if file_len < 0x20 {
             return Err(Error::NotAnArchive);
@@ -154,13 +170,13 @@ impl<R: Read + Seek> Archive<R> {
         };
         let magic_of = |buf: &[u8]| u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
 
-        // 1. Plain archive at offset 0.
+        // 1. 偏移 0 处的普通归档。
         read_at(reader, 0, &mut probe)?;
         if magic_of(&probe) == MPQ_MAGIC {
             return Ok(0);
         }
 
-        // 2. User data header at offset 0 pointing at the real header.
+        // 2. 偏移 0 处的 user data 头，指向真正的头。
         if let Some(ud) = UserDataHeader::parse(&probe) {
             let target = ud.archive_offset as u64;
             if target + 0x20 <= file_len {
@@ -171,9 +187,9 @@ impl<R: Read + Seek> Archive<R> {
             }
         }
 
-        // 3. Scan (0x200-aligned, like storm.dll) for an embedded archive.
-        //    A 1 MiB window is read at a time, with 0x200 bytes of overlap
-        //    so candidates near the window end can still be parsed.
+        // 3. 扫描内嵌归档（按 0x200 对齐，与 storm.dll 相同）。
+        //    每次读取 1 MiB 窗口，并保留 0x200 字节的重叠，
+        //    使靠近窗口末尾的候选仍可被解析。
         let limit = file_len.min(0x0800_0000);
         const CHUNK: usize = 0x10_0000;
         let mut window = vec![0u8; CHUNK + 0x200];
@@ -225,19 +241,18 @@ impl<R: Read + Seek> Archive<R> {
         Err(Error::NotAnArchive)
     }
 
-    /// Load hash/block/hi-block and HET/BET tables with per-table tolerance:
-    /// every table failure downgrades to a warning as long as one usable
-    /// hash-index (classic hash or HET) and one file table (block or BET)
-    /// remain.
+    /// 加载 hash/block/hi-block 与 HET/BET 表，并按表逐一容错：
+    /// 只要仍有一个可用的哈希索引（经典 hash 或 HET）和一个文件表
+    /// （block 或 BET），任何单个表的失败都降级为警告。
     fn load_tables(&mut self) -> Result<()> {
         let header = self.header.clone();
         let file_len = self.file_len;
         let base = self.base;
         let archive_end = base + header.archive_size(file_len - base.min(file_len));
 
-        // v4: the header carries its own MD5 over bytes 0x00..0xC0.
-        // StormLib refuses to open on mismatch; we only warn (the repair
-        // path can rewrite header fields, which invalidates it by design).
+        // v4：头自带针对 0x00..0xC0 字节的 MD5。
+        // StormLib 在不匹配时会拒绝打开；我们只发出警告（修复路径可能
+        // 重写头字段，按设计这会使该校验和失效）。
         if self.version == FormatVersion::V4
             && digest::md5_present(&header.md5_header)
             && base + HEADER_MD5_SPAN as u64 <= file_len
@@ -248,10 +263,10 @@ impl<R: Read + Seek> Archive<R> {
             }
         }
 
-        // Work out how many bytes each classic table occupies on disk.
+        // 计算每张经典表在磁盘上占用的字节数。
         let (hash_stored, block_stored) = self.stored_table_sizes(archive_end);
 
-        // --- classic tables -------------------------------------------------
+        // --- 经典表 -------------------------------------------------
         let mut classic = ClassicTables::default();
 
         if header.hash_table_size != 0 {
@@ -335,7 +350,7 @@ impl<R: Read + Seek> Archive<R> {
             None
         };
 
-        // --- HET/BET tables (v3+) -------------------------------------------
+        // --- HET/BET 表（v3+） -------------------------------------------
         if self.version >= FormatVersion::V3 {
             if header.het_table_pos != 0 {
                 let size = self.het_stored_size(archive_end);
@@ -389,7 +404,7 @@ impl<R: Read + Seek> Archive<R> {
             }
         }
 
-        // --- viability ------------------------------------------------------
+        // --- 可用性检查 ------------------------------------------------------
         let has_index = self.classic.as_ref().is_some_and(|c| !c.hash_table.is_empty())
             || self.het.is_some();
         let has_files = self.classic.as_ref().is_some_and(|c| !c.block_table.is_empty())
@@ -406,7 +421,7 @@ impl<R: Read + Seek> Archive<R> {
             ));
         }
 
-        // A HET index without a BET file table cannot resolve names.
+        // 只有 HET 索引而没有 BET 文件表时无法解析名字。
         if self.classic.as_ref().is_none_or(|c| c.hash_table.is_empty())
             && self.het.is_some()
             && self.bet.is_none()
@@ -421,9 +436,8 @@ impl<R: Read + Seek> Archive<R> {
         Ok(())
     }
 
-    /// On-disk sizes of the classic hash/block tables, derived per version
-    /// the way StormLib does: v1 uses the uncompressed size, v2/v3 compute
-    /// them from the gaps between neighbouring tables, v4 stores them.
+    /// 经典 hash/block 表在磁盘上的大小，按版本以 StormLib 的方式推导：
+    /// v1 使用未压缩大小，v2/v3 由相邻表之间的间隙计算，v4 直接存储。
     fn stored_table_sizes(&self, archive_end: u64) -> (Option<u64>, Option<u64>) {
         let h = &self.header;
         let hash_size = h.hash_table_size as u64 * 16;
@@ -446,10 +460,9 @@ impl<R: Read + Seek> Archive<R> {
                 (hs, bs)
             }
             FormatVersion::V2 | FormatVersion::V3 => {
-                // Tables are laid out in ascending order: hash, block,
-                // hi-block; sizes are the gaps between them. Compressed
-                // tables are the only case where the stored size matters,
-                // and it is always <= the uncompressed size.
+                // 表按升序排列：hash、block、hi-block；大小即为它们
+                // 之间的间隙。只有压缩表才需要关心存储大小，
+                // 且它总是 <= 未压缩大小。
                 let hash_pos = base + h.hash_table_pos;
                 let block_pos = base + h.block_table_pos;
                 let hi_pos = if h.hi_block_table_pos != 0 {
@@ -489,8 +502,7 @@ impl<R: Read + Seek> Archive<R> {
         match self.version {
             FormatVersion::V4 => h.bet_table_size64,
             _ => {
-                // BET sits directly below whatever comes next (hash table
-                // or the archive end).
+                // BET 紧贴在下一个边界（hash table 或归档结尾）之下。
                 let upper = if h.hash_table_pos != 0 {
                     h.hash_table_pos
                 } else {
@@ -501,7 +513,7 @@ impl<R: Read + Seek> Archive<R> {
         }
     }
 
-    /// The lowest of the "upper" boundaries (hash / block / hi-block / end).
+    /// 各“上界”（hash / block / hi-block / 归档结尾）中的最小值。
     fn lower_table_boundary(&self, archive_end: u64) -> u64 {
         let h = &self.header;
         let mut boundary = archive_end;
@@ -530,11 +542,10 @@ impl<R: Read + Seek> Archive<R> {
         Ok(buf)
     }
 
-    /// Verify a v4 table MD5 against the **stored** bytes (the encrypted /
-    /// possibly compressed form as it lies in the file), exactly like
-    /// StormLib's `LoadMpqTable` / `SaveMpqTable`. A mismatch only warns —
-    /// the table itself may still decode fine (tolerant-open philosophy).
-    /// Absent (all-zero) MD5s and cut reads are skipped.
+    /// 针对**存储后**的字节（文件中加密 / 可能已压缩的形态）校验 v4 表
+    /// MD5，与 StormLib 的 `LoadMpqTable` / `SaveMpqTable` 完全一致。
+    /// 不匹配只发出警告 —— 表本身仍可能正常解码（宽容打开的理念）。
+    /// 缺失（全零）的 MD5 和被截断的读取会被跳过。
     fn verify_stored_md5(&mut self, what: &str, offset: u64, stored: u64, expected: &[u8; 16]) {
         if self.version != FormatVersion::V4 || !digest::md5_present(expected) || stored == 0 {
             return;
@@ -549,9 +560,9 @@ impl<R: Read + Seek> Archive<R> {
         }
     }
 
-    /// Load `(listfile)` and `(attributes)` — both entirely optional.
+    /// 加载 `(listfile)` 和 `(attributes)` —— 两者都完全可选。
     fn load_optional_metadata(&mut self) {
-        // listfile first: read_file needs an intact table state only.
+        // 先读 listfile：read_file 只要求表状态完整。
         if self.has_file("(listfile)") {
             match self.read_file("(listfile)") {
                 Ok(data) => {
@@ -594,66 +605,113 @@ impl<R: Read + Seek> Archive<R> {
         self.warnings.push(msg.into());
     }
 
-    // -- public accessors ----------------------------------------------------
+    // -- 公开访问器 ----------------------------------------------------
 
-    /// MPQ format version (1–4) of this archive.
+    /// 此归档的 MPQ 格式版本（1–4）。
     pub fn version(&self) -> FormatVersion {
         self.version
     }
 
-    /// The parsed (raw) MPQ header.
+    /// 解析出的（原始）MPQ 头。
     pub fn header(&self) -> &MpqHeader {
         &self.header
     }
 
-    /// Sector size in bytes.
+    /// sector 大小（字节）。
     pub fn sector_size(&self) -> u32 {
         self.sector_size
     }
 
-    /// Offset of the archive within the containing file.
+    /// 归档在所在文件中的偏移。
     pub fn archive_offset(&self) -> u64 {
         self.base
     }
 
-    /// Non-fatal issues noticed while opening the archive.
+    /// 打开归档时发现的非致命问题。
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
 
-    /// Non-fatal issues hit while reading file data (e.g. sector CRC
-    /// mismatches); keeps the most recent 64 entries.
+    /// 读取文件数据时遇到的非致命问题（例如 sector CRC 不匹配）；
+    /// 保留最近 64 条。
     pub fn read_warnings(&self) -> Vec<String> {
         self.read_warnings.borrow().iter().cloned().collect()
     }
 
-    /// File names from `(listfile)` (may be empty when absent).
+    /// 来自 `(listfile)` 的文件名（缺失时可能为空）。
     pub fn file_names(&self) -> &[String] {
         &self.names
     }
 
-    /// Parsed `(attributes)` if present and readable.
+    /// 解析出的 `(attributes)`（存在且可读时）。
     pub fn attributes(&self) -> Option<&Attributes> {
         self.attributes.as_ref()
     }
 
-    /// Decoded classic tables (crate-internal: used by the modifier to
-    /// preserve original hash-table slots, locales and unnamed blocks).
+    /// 解码后的经典表（crate 内部：供修改器使用，以保留原始的
+    /// hash 表槽位、locale 和无名块）。
     pub(crate) fn classic_tables(&self) -> Option<&ClassicTables> {
         self.classic.as_ref()
     }
 
-    /// Decoded BET table (crate-internal: used by the modifier).
+    /// 解码后的 BET 表（crate 内部：供修改器使用）。
     pub(crate) fn bet_table(&self) -> Option<&BetTable> {
         self.bet.as_ref()
     }
 
-    /// Whether a HET/BET table pair is in use.
+    /// 是否正在使用 HET/BET 表对。
     pub fn uses_het_bet(&self) -> bool {
         self.het.is_some() && self.bet.is_some()
     }
 
-    // -- lookup ---------------------------------------------------------------
+    // -- 密码保护（自定义 AEAD 扩展） --------------------------
+
+    /// 归档是否带有 `(password)` 保险库，即其文件是否以密码 AEAD 方案
+    /// 封装。无论如何文件*名字*始终可读；读取内容需要
+    /// [`Archive::unlock`]。
+    pub fn is_password_protected(&self) -> bool {
+        self.has_file(passcrypt::PASSWORD_FILE_NAME)
+    }
+
+    /// 是否持有正确的主密钥（此前成功执行过
+    /// [`Archive::unlock`] / [`Archive::unlock_with_master_key`]）。
+    pub fn is_unlocked(&self) -> bool {
+        self.master_key.is_some()
+    }
+
+    /// 已解封的主密钥（归档已解锁时）。
+    pub fn master_key(&self) -> Option<[u8; 32]> {
+        self.master_key
+    }
+
+    /// 读取并解析 `(password)` 保险库（与归档当前的锁定状态无关 ——
+    /// 保险库本身以明文存储）。
+    fn password_vault(&self) -> Result<passcrypt::Vault> {
+        let bytes = self.read_file(passcrypt::PASSWORD_FILE_NAME)?;
+        passcrypt::Vault::parse(&bytes)
+    }
+
+    /// 针对保险库的 AEAD 校验器验证密码，并保留已解封的主密钥供后续
+    /// 读取使用。密码错误时以 [`Error::PasswordMismatch`] 失败。
+    pub fn unlock(&mut self, password: &str) -> Result<()> {
+        let master = self.password_vault()?.open(password.as_bytes())?;
+        self.master_key = Some(master);
+        Ok(())
+    }
+
+    /// 安装从别处获得的主密钥（例如 GUI 在重新加载后保留的密钥）；
+    /// 它必须通过校验器验证，否则归档保持锁定并返回
+    /// [`Error::PasswordMismatch`]。
+    pub fn unlock_with_master_key(&mut self, master: &[u8; 32]) -> Result<()> {
+        let vault = self.password_vault()?;
+        if !vault.verify_master(master) {
+            return Err(Error::PasswordMismatch);
+        }
+        self.master_key = Some(*master);
+        Ok(())
+    }
+
+    // -- 查找 ---------------------------------------------------------------
 
     fn file_entry_from_classic(&self, index: usize, locale: u16) -> Option<FileEntry> {
         let classic = self.classic.as_ref()?;
@@ -688,9 +746,9 @@ impl<R: Read + Seek> Archive<R> {
         })
     }
 
-    /// Look a file up by name; returns the entry without a name attached.
+    /// 按名字查找文件；返回未附带名字的条目。
     fn find_entry(&self, name: &str) -> Option<FileEntry> {
-        // Classic hash table takes precedence (mirrors StormLib).
+        // 经典 hash table 优先（与 StormLib 一致）。
         if let Some(classic) = &self.classic {
             if !classic.hash_table.is_empty() {
                 if let Some((hash, _block)) = classic.find(name) {
@@ -702,7 +760,7 @@ impl<R: Read + Seek> Archive<R> {
             }
         }
 
-        // HET+BET fallback.
+        // HET+BET 回退路径。
         if let (Some(het), Some(bet)) = (&self.het, &self.bet) {
             let file_hash = jenkins::file_name_hash(name);
             let masked = (file_hash & Self::het_and_mask(het)) | Self::het_or_mask(het);
@@ -728,20 +786,20 @@ impl<R: Read + Seek> Archive<R> {
         1u64 << (het.name_hash_bit_size - 1)
     }
 
-    /// Whether a file with this name exists in the archive.
+    /// 归档中是否存在该名字的文件。
     pub fn has_file(&self, name: &str) -> bool {
         self.find_entry(name).is_some_and(|e| e.exists())
     }
 
-    /// Look a file up by name; returns the entry with the name attached
-    /// so it can be fed to [`Archive::read_entry`].
+    /// 按名字查找文件；返回附带名字的条目，
+    /// 可直接交给 [`Archive::read_entry`] 使用。
     pub fn find_file(&self, name: &str) -> Option<FileEntry> {
         let mut entry = self.find_entry(name)?;
         entry.name = Some(name.to_string());
         Some(entry)
     }
 
-    /// Read a file by name.
+    /// 按名字读取文件。
     pub fn read_file(&self, name: &str) -> Result<Vec<u8>> {
         let mut entry = self
             .find_entry(name)
@@ -750,15 +808,14 @@ impl<R: Read + Seek> Archive<R> {
         self.read_entry(&entry)
     }
 
-    /// List all files: entries from the file table with names attached
-    /// where known.
+    /// 列出所有文件：文件表中的条目，已知名字的附带名字。
     pub fn entries(&self) -> Vec<FileEntry> {
         let mut result: Vec<FileEntry> = Vec::new();
 
         match (&self.classic, &self.bet) {
             (Some(classic), _) if !classic.block_table.is_empty() => {
-                // Classic table: iterate hash entries so that locale info
-                // and duplicate names are respected.
+                // 经典表：遍历 hash 条目，从而正确处理 locale 信息
+                // 和重复名字。
                 let mut seen = vec![false; classic.block_table.len()];
                 for hash in &classic.hash_table {
                     if hash.is_free() {
@@ -784,7 +841,7 @@ impl<R: Read + Seek> Archive<R> {
             _ => {}
         }
 
-        // Attach names: (listfile) entries first, then known special files.
+        // 附上名字：先处理 (listfile) 条目，再处理已知的特殊文件。
         for name in self
             .names
             .iter()
@@ -808,7 +865,7 @@ impl<R: Read + Seek> Archive<R> {
         result
     }
 
-    /// Read a file given its [`FileEntry`] (from [`Archive::entries`]).
+    /// 按给定的 [`FileEntry`]（来自 [`Archive::entries`]）读取文件。
     pub fn read_entry(&self, entry: &FileEntry) -> Result<Vec<u8>> {
         if !entry.exists() {
             if entry.is_deleted_marker() {
@@ -821,7 +878,19 @@ impl<R: Read + Seek> Archive<R> {
 
         self.verify_chunk_md5s(entry);
 
-        let key = if entry.is_encrypted() {
+        // 密码 AEAD 文件（自定义扩展）从不使用 storm 加密：
+        // 其密钥派生自主密钥 + 块索引。
+        let pwd_aead = entry.flags & FILE_PASSWORD_AEAD != 0;
+        let aead_key: Option<[u8; 32]> = if pwd_aead {
+            match self.master_key {
+                Some(ref master) => Some(passcrypt::derive_file_key(master, entry.block_index)),
+                None => return Err(Error::PasswordRequired),
+            }
+        } else {
+            None
+        };
+
+        let key = if entry.is_encrypted() && !pwd_aead {
             match &entry.name {
                 Some(name) => crypt::file_key(
                     name,
@@ -840,7 +909,9 @@ impl<R: Read + Seek> Archive<R> {
         if entry.is_single_unit() {
             let raw = self.read_at_plain(raw_start, entry.compressed_size as usize)?;
             let mut data = raw;
-            if entry.is_encrypted() {
+            if let Some(aead) = aead_key {
+                data = passcrypt::open_sector(&aead, entry.block_index, 0, &data)?;
+            } else if entry.is_encrypted() {
                 crypt::decrypt_bytes(&mut data, key);
             }
             if entry.is_compressed() {
@@ -856,18 +927,19 @@ impl<R: Read + Seek> Archive<R> {
             return Ok(data);
         }
 
-        // Sector-based file.
+        // 基于 sector 的文件。
         let sector_size = self.sector_size as u64;
         let nsec = (entry.size as u64).div_ceil(sector_size) as u32;
         let compressed = entry.is_compressed();
         let encrypted = entry.is_encrypted();
         let has_crc = entry.flags & FILE_SECTOR_CRC != 0;
 
-        // Sector offset table only exists for compressed files.
+        // sector 偏移表只存在于压缩文件中。密码 AEAD 块以未加密方式
+        // 存储它（只有 sector 本身是机密）。
         let offsets: Vec<u32> = if compressed {
             let table_dwords = nsec as usize + 1 + if has_crc { nsec as usize } else { 0 };
             let mut raw = self.read_at_plain(raw_start, table_dwords * 4)?;
-            if encrypted {
+            if encrypted && !pwd_aead {
                 crypt::decrypt_bytes(&mut raw, key.wrapping_sub(1));
             }
             raw.chunks_exact(4)
@@ -878,15 +950,29 @@ impl<R: Read + Seek> Archive<R> {
         };
 
         if compressed {
-            // Sanity per StormLib: monotonic offsets, plausible sector sizes.
+            // 按 StormLib 做健全性检查：偏移单调递增，sector 大小合理。
+            // AEAD sector 带有 16 字节标签，因此留有余量。
             let arch_size = entry.compressed_size;
+            let max_sector = if pwd_aead {
+                self.sector_size + TAG_LEN as u32
+            } else {
+                self.sector_size
+            };
             for i in 0..nsec as usize {
                 let a = offsets.get(i).copied().unwrap_or(u32::MAX);
                 let b = offsets.get(i + 1).copied().unwrap_or(u32::MAX);
-                if b < a || (b - a) > self.sector_size || b > arch_size {
+                if b < a || (b - a) > max_sector || b > arch_size {
                     return Err(Error::Corrupt("implausible sector offset table"));
                 }
             }
+        }
+
+        // 已封装的 sector 是变长的（明文 + 标签）：没有偏移表就无法
+        // 得知其边界。写入方总是以压缩方式（即带偏移表）存储 AEAD 文件。
+        if pwd_aead && !compressed {
+            return Err(Error::Corrupt(
+                "password AEAD file without sector offset table",
+            ));
         }
 
         let mut out: Vec<u8> = Vec::with_capacity(entry.size as usize);
@@ -902,17 +988,19 @@ impl<R: Read + Seek> Archive<R> {
             };
 
             if raw_len == 0 {
-                // Sparse / absent sector: zero-fill.
+                // 稀疏 / 缺失的 sector：以零填充。
                 out.extend(std::iter::repeat_n(0u8, expected as usize));
                 continue;
             }
 
             let mut raw = self.read_at_plain(raw_start + raw_off, raw_len as usize)?;
-            if encrypted {
+            if let Some(aead) = aead_key {
+                raw = passcrypt::open_sector(&aead, entry.block_index, i, &raw)?;
+            } else if encrypted {
                 crypt::decrypt_bytes(&mut raw, key.wrapping_add(i));
             }
 
-            let sector = if compressed && raw_len < expected {
+            let sector = if compressed && raw.len() < expected as usize {
                 if entry.flags & FILE_COMPRESS != 0 {
                     compression::decompress_masked(&raw, expected as usize)?
                 } else {
@@ -927,8 +1015,8 @@ impl<R: Read + Seek> Archive<R> {
             }
             out.extend_from_slice(&sector[..sector.len().min(expected as usize)]);
 
-            // Optional per-sector checksums: CRC32 of the decompressed data,
-            // mismatch is reported but not fatal for the whole read.
+            // 可选的逐 sector 校验和：解压后数据的 CRC32，
+            // 不匹配会被报告，但对整个读取而言不是致命错误。
             if has_crc && self.read_warnings.borrow().len() < 64 {
                 let crc_index = (nsec as usize + 1) + i as usize;
                 if let Some(&stored) = offsets.get(crc_index) {
@@ -949,12 +1037,12 @@ impl<R: Read + Seek> Archive<R> {
         Ok(out)
     }
 
-    /// v4 raw-chunk checksums: when the header sets `raw_chunk_size`, every
-    /// file's stored (raw) data is followed by `ceil(csize / chunk)` MD5s,
-    /// one per chunk of the *stored* bytes (not counted in `csize` — the
-    /// same layout StormLib's `WriteMemDataMD5` writes). Mismatches are
-    /// read-warnings, like sector CRCs. Arrays that run past EOF are
-    /// skipped rather than verified against zero fill.
+    /// v4 raw-chunk 校验和：当头设置了 `raw_chunk_size` 时，每个文件的
+    /// 已存储（原始）数据之后跟着 `ceil(csize / chunk)` 个 MD5，
+    /// 针对每块*存储后*的字节（不计入 `csize` —— 与 StormLib 的
+    /// `WriteMemDataMD5` 写出的布局相同）。不匹配会记为读取警告，
+    /// 与 sector CRC 一样。越过文件末尾的数组会被跳过，
+    /// 而不是针对零填充做校验。
     fn verify_chunk_md5s(&self, entry: &FileEntry) {
         let chunk = self.header.raw_chunk_size;
         if self.version != FormatVersion::V4
@@ -988,7 +1076,7 @@ impl<R: Read + Seek> Archive<R> {
         }
     }
 
-    /// Recover the underlying reader (position unspecified).
+    /// 取回底层 reader（位置未定义）。
     pub fn into_inner(self) -> R {
         self.reader.into_inner()
     }
@@ -1006,7 +1094,7 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
-/// Standard CRC-32 (IEEE), used for the optional sector checksums.
+/// 标准 CRC-32（IEEE），用于可选的 sector 校验和。
 fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &b in data {

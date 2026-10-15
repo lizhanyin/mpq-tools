@@ -1,10 +1,10 @@
-//! mpqtool-gui — Tauri 2 graphical interface for mpqtool.
+//! mpqtool-gui —— mpqtool 的 Tauri 2 图形界面。
 //!
-//! The frontend (gui/ui) is a Vue 3 + Naive UI app built with Vite
-//! (`npm run build` → ui/dist); this crate hosts the mpq-powered
-//! commands it invokes.
+//! 前端（gui/ui）是使用 Vite 构建的 Vue 3 + Naive UI 应用
+//! （`npm run build` → ui/dist）；本 crate 承载其调用的
+//! 由 mpq 提供能力的各条命令。
 
-// Prevents an extra console window on Windows in release builds.
+// 避免 Windows 的 release 构建额外弹出一个控制台窗口。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
@@ -19,6 +19,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::open_archive,
             commands::reload_archive,
+            commands::unlock_archive,
+            commands::apply_password_op,
             commands::preview_file,
             commands::extract,
             commands::diagnose_archive,

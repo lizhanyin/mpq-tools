@@ -1,4 +1,4 @@
-//! Performance bench for archive modification. Not run by default:
+//! 归档修改的性能基准测试。默认不运行：
 //!
 //! ```console
 //! cargo test --release -p mpq --test bench_modify -- --ignored --nocapture
@@ -9,7 +9,7 @@ mod common;
 use common::{ArchiveSpec, FileSpec};
 use std::time::Instant;
 
-/// ~1 MB of semi-repetitive text (compresses like real script/data files).
+/// 约 1 MB 的半重复文本（压缩表现与真实的脚本/数据文件相近）。
 fn text_mb(seed: u32, mb: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(mb * 1024 * 1024);
     let mut i = seed;
@@ -55,8 +55,8 @@ fn modify_60mb_archive_replace_and_add_20mb() {
         t0.elapsed()
     );
 
-    // Replace the last 10 files and add 10 new ones — 20 MB of fresh
-    // content against a 60 MB archive.
+    // 替换最后 10 个文件并新增 10 个新文件——在 60 MB 的归档上
+    // 写入 20 MB 的新内容。
     let mut additions = Vec::new();
     for i in 0..N_ADD {
         additions.push((format!("new\\add{i:02}.bin"), text_mb(1000 + i, 1)));
@@ -79,7 +79,7 @@ fn modify_60mb_archive_replace_and_add_20mb() {
         t1.elapsed()
     );
 
-    // Reference point: how long just compressing the 20 MB would take.
+    // 参照基准：仅压缩这 20 MB 需要多长时间。
     let t2 = Instant::now();
     for (_, data) in &additions {
         let z = common::zlib(data);

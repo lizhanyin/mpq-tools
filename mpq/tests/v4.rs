@@ -1,6 +1,6 @@
-//! v4 support end to end: full header parsing, the six MD5 checksums,
-//! per-file raw-chunk MD5s, v4 write-back (modify / create / convert) and
-//! repair-time re-hashing of the header.
+//! v4 支持端到端测试：完整头部解析、六项 MD5 校验和、
+//! 每文件 raw-chunk MD5、v4 写回（modify / create / convert），
+//! 以及修复时对头部的重新哈希。
 
 mod common;
 
@@ -31,7 +31,7 @@ fn md5_warnings<'a>(a: &'a Archive<Cursor<&[u8]>>) -> Vec<&'a str> {
     a.warnings().iter().map(|w| w.as_str()).filter(|w| w.contains("MD5")).collect()
 }
 
-// -- reading --------------------------------------------------------------------
+// -- 读取 --------------------------------------------------------------------
 
 #[test]
 fn v4_opens_and_reads_without_md5_warnings() {
@@ -42,7 +42,7 @@ fn v4_opens_and_reads_without_md5_warnings() {
     assert_eq!(a.read_file("data\\table.txt").unwrap(), b"1,2,3\n4,5,6\n");
     assert_eq!(a.read_file("secret.bin").unwrap(), b"classified payload");
     assert!(md5_warnings(&a).is_empty(), "checksums verify: {:?}", a.warnings());
-    // The v4-only header fields actually parsed.
+    // v4 专属头部字段确实被解析了。
     assert!(a.header().raw_chunk_size == 0);
     assert_eq!(a.header().hash_table_size64, a.header().hash_table_size as u64 * 16);
 }
@@ -50,19 +50,19 @@ fn v4_opens_and_reads_without_md5_warnings() {
 #[test]
 fn v4_header_md5_mismatch_only_warns() {
     let mut bytes = build(&spec_v4());
-    bytes[0xC0] ^= 0xFF; // inside MD5_MpqHeader itself, outside its 0xC0 span
+    bytes[0xC0] ^= 0xFF; // 位于 MD5_MpqHeader 自身之内，在其 0xC0 覆盖范围之外
     let a = open(&bytes).unwrap();
     assert_eq!(a.version(), FormatVersion::V4);
     assert!(md5_warnings(&a).len() == 1, "exactly the header warning: {:?}", a.warnings());
     assert!(md5_warnings(&a)[0].contains("header MD5"));
-    // Data is untouched by the broken checksum.
+    // 数据未受损坏校验和的影响。
     assert_eq!(a.read_file("readme.txt").unwrap(), b"v4 archive\n");
 }
 
 #[test]
 fn v4_hash_table_md5_mismatch_warns() {
     let mut bytes = build(&spec_v4());
-    bytes[0x80] ^= 0xFF; // inside MD5_HashTable (also inside the header MD5 span)
+    bytes[0x80] ^= 0xFF; // 位于 MD5_HashTable 内（也在头部 MD5 覆盖范围内）
     let a = open(&bytes).unwrap();
     let w = md5_warnings(&a);
     assert!(w.iter().any(|w| w.contains("hash table")), "hash table warning: {w:?}");
@@ -82,9 +82,9 @@ fn v4_hetbet_uses_explicit_sizes_and_md5s() {
     assert_eq!(a.read_file("b.txt").unwrap(), b"BBB");
     assert!(md5_warnings(&a).is_empty(), "{:?}", a.warnings());
 
-    // A wrong HET checksum is a warning; the table stays usable.
+    // 错误的 HET 校验和只产生警告；表仍然可用。
     let mut corrupt = bytes;
-    corrupt[0xB0] ^= 0xFF; // inside MD5_HetTable
+    corrupt[0xB0] ^= 0xFF; // 位于 MD5_HetTable 内
     let a = open(&corrupt).unwrap();
     let w = md5_warnings(&a);
     assert!(w.iter().any(|w| w.contains("HET table")), "HET warning: {w:?}");
@@ -94,16 +94,15 @@ fn v4_hetbet_uses_explicit_sizes_and_md5s() {
 #[test]
 fn v4_raw_chunk_md5s_are_verified_on_read() {
     let mut s = spec_v4();
-    s.raw_chunk_size = 8; // small chunks: several per file
+    s.raw_chunk_size = 8; // 小 chunk：每个文件有多个
     let bytes = build(&s);
     let a = open(&bytes).unwrap();
     assert_eq!(a.header().raw_chunk_size, 8);
     assert_eq!(a.read_file("readme.txt").unwrap(), b"v4 archive\n");
     assert!(a.read_warnings().is_empty(), "intact chunk MD5s: {:?}", a.read_warnings());
 
-    // Corrupt the first chunk MD5 of the first block (header is 0xD0, the
-    // stored data of readme.txt is 11 raw bytes, so the array starts at
-    // 0xD0 + 11).
+    // 破坏第一个 block 的第一个 chunk MD5（头部为 0xD0，readme.txt
+    // 的存储数据是 11 个原始字节，因此该数组从 0xD0 + 11 开始）。
     let mut corrupt = bytes;
     corrupt[0xD0 + 11] ^= 0xFF;
     let a = open(&corrupt).unwrap();
@@ -113,11 +112,11 @@ fn v4_raw_chunk_md5s_are_verified_on_read() {
         "chunk mismatch reported: {:?}",
         a.read_warnings()
     );
-    // Other files verify cleanly.
+    // 其他文件校验通过。
     assert_eq!(a.read_file("secret.bin").unwrap(), b"classified payload");
 }
 
-// -- writing --------------------------------------------------------------------
+// -- 写入 --------------------------------------------------------------------
 
 #[test]
 fn modify_preserves_v4_and_recomputes_md5s() {
@@ -158,9 +157,9 @@ fn create_v4_empty_opens_and_accepts_imports() {
 
 #[test]
 fn convert_between_v4_and_older_versions() {
-    // v1 -> v4: the produced container carries valid v4 checksums.
+    // v1 -> v4：生成的容器带有有效的 v4 校验和。
     let mut s = spec_v4();
-    s.version = 0; // v1 source
+    s.version = 0; // v1 源
     let src = build(&s);
     let out = convert(&src, FormatVersion::V4).unwrap();
     let a = open(&out.bytes).unwrap();
@@ -168,26 +167,25 @@ fn convert_between_v4_and_older_versions() {
     assert!(md5_warnings(&a).is_empty(), "{:?}", a.warnings());
     assert_eq!(a.read_file("readme.txt").unwrap(), b"v4 archive\n");
 
-    // v4 -> v1: explicit downgrade still works.
+    // v4 -> v1：显式降级仍然可行。
     let v4 = build(&spec_v4());
     let out = convert(&v4, FormatVersion::V1).unwrap();
     let a = open(&out.bytes).unwrap();
     assert_eq!(a.version(), FormatVersion::V1);
     assert_eq!(a.read_file("secret.bin").unwrap(), b"classified payload");
 
-    // v4 -> v4 is a no-op returning the input unchanged.
+    // v4 -> v4 是无操作，原样返回输入。
     let out = convert(&v4, FormatVersion::V4).unwrap();
     assert_eq!(out.bytes, v4);
 }
 
-// -- repair ---------------------------------------------------------------------
+// -- 修复 ---------------------------------------------------------------------
 
 #[test]
 fn repair_recomputes_v4_header_md5() {
-    // Repaired header fields invalidate MD5_MpqHeader; repair must
-    // recompute it so the result verifies cleanly. Appended junk changes
-    // the real archive span, so the rewritten size fields differ from what
-    // the builder originally hashed.
+    // 修复头部字段会使 MD5_MpqHeader 失效；repair 必须重新计算它，
+    // 让结果能干净地通过校验。追加的垃圾数据改变了归档的真实跨度，
+    // 因此重写后的大小字段与构建器最初哈希的内容不同。
     let mut src = build(&spec_v4());
     src.extend_from_slice(&[0xAA; 16]);
     let report = mpq::repair(&mut src, false).unwrap();
@@ -205,7 +203,7 @@ fn repair_recomputes_v4_header_md5() {
     assert!(md5_warnings(&a).is_empty(), "repaired archive verifies: {:?}", a.warnings());
     assert_eq!(a.read_file("readme.txt").unwrap(), b"v4 archive\n");
 
-    // A corrupt header MD5 alone is diagnosed and fixed.
+    // 仅头部 MD5 损坏的情况会被诊断并修复。
     let mut src = build(&spec_v4());
     src[0xC0] ^= 0xFF;
     let report = mpq::repair(&mut src, false).unwrap();

@@ -11,8 +11,10 @@ import RepairModal from './components/RepairModal.vue'
 import ModifyModal from './components/ModifyModal.vue'
 import NewArchiveModal from './components/NewArchiveModal.vue'
 import ConvertModal from './components/ConvertModal.vue'
+import PasswordModal from './components/PasswordModal.vue'
 import SettingsModal from './components/SettingsModal.vue'
-import { S, reloadArchive, handleDrop } from './store'
+import { S, reloadArchive, handleDrop, anyModalOpen, log } from './store'
+import { toast } from './toast'
 import * as ipc from './ipc'
 
 const ACCENT = '#2f6fe0'
@@ -50,6 +52,15 @@ onMounted(async () => {
   try {
     offDrop = await ipc.onDragDropEvent((event) => {
       const p = event.payload
+      // 有弹窗/浮窗打开时忽略拖拽：不显示「松开导入」覆盖层，
+      // 松手时提示原因（拖拽事件在 webview 层触发，不受弹窗遮罩限制）。
+      if (anyModalOpen.value) {
+        if (p.type === 'drop' && (p.paths || []).length > 0) {
+          log('（有窗口打开，已忽略拖入的文件）')
+          toast.info('有窗口打开时不能拖拽导入，请先关闭窗口')
+        }
+        return
+      }
       if (p.type === 'enter') {
         // 只有 enter/drop 事件携带 paths；over 仅有 position，
         // 不能用它重算数量（否则一移动鼠标就变成 0 个文件）。
@@ -92,6 +103,7 @@ onUnmounted(() => {
       <ModifyModal />
       <NewArchiveModal />
       <ConvertModal />
+      <PasswordModal />
       <SettingsModal />
 
       <div v-if="S.dropping" class="drop-overlay">

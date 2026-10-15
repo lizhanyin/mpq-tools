@@ -1,4 +1,4 @@
-//! `(attributes)` — optional per-file metadata stored inside the archive.
+//! `(attributes)` —— 存储在归档内的可选逐文件元数据。
 
 use crate::error::{Error, Result};
 
@@ -7,7 +7,7 @@ pub const ATTR_FILETIME: u32 = 0x2;
 pub const ATTR_MD5: u32 = 0x4;
 pub const ATTR_PATCH_BIT: u32 = 0x8;
 
-/// Per-file metadata decoded from `(attributes)`.
+/// 从 `(attributes)` 解码出的逐文件元数据。
 #[derive(Debug, Clone, Default)]
 pub struct FileAttributes {
     pub crc32: Option<u32>,
@@ -15,7 +15,7 @@ pub struct FileAttributes {
     pub md5: Option<[u8; 16]>,
 }
 
-/// Parsed `(attributes)` content.
+/// 解析后的 `(attributes)` 内容。
 #[derive(Debug, Clone, Default)]
 pub struct Attributes {
     pub version: u32,
@@ -27,9 +27,9 @@ pub struct Attributes {
 }
 
 impl Attributes {
-    /// Parse the raw (already decompressed) `(attributes)` data for
-    /// `file_count` files. Tolerant: unknown versions or truncated arrays
-    /// produce an error the caller may downgrade to a warning.
+    /// 解析 `file_count` 个文件的原始（已解压的）`(attributes)` 数据。
+    /// 处理较为宽容：版本未知或数组被截断时返回错误，调用方可将其
+    /// 降级为警告。
     pub fn parse(data: &[u8], file_count: usize) -> Result<Self> {
         if data.len() < 8 {
             return Err(Error::Corrupt("(attributes) too small"));
@@ -93,7 +93,7 @@ impl Attributes {
         Ok(attrs)
     }
 
-    /// Attributes for file index `i`, if the arrays cover it.
+    /// 文件索引 `i` 的属性（前提是各数组覆盖到该索引）。
     pub fn file(&self, index: usize) -> FileAttributes {
         FileAttributes {
             crc32: self.crc32.get(index).copied(),

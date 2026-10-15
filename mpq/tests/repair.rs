@@ -1,5 +1,5 @@
-//! Repair integration tests: corrupt a healthy synthetic archive in
-//! specific ways, repair it, and verify the archive is readable again.
+//! 修复集成测试：以特定方式损坏一个健康的合成归档，
+//! 然后修复它，并验证归档重新变得可读。
 
 mod common;
 
@@ -64,9 +64,9 @@ fn wrong_archive_size_is_fixed() {
 #[test]
 fn oversized_hash_table_is_trimmed() {
     let mut bytes = healthy();
-    // Protector-style abuse: declare 1 Mi entries.
+    // Protector 式的滥用：声明 1 Mi 个条目。
     wr32(&mut bytes, 0x18, 0x10_0000);
-    let archive = open(&bytes).unwrap(); // reader tolerates via zero fill
+    let archive = open(&bytes).unwrap(); // 读取器通过零填充容忍该值
     assert!(archive.warnings().is_empty() || true);
 
     let report = repair(&mut bytes, true).unwrap();
@@ -78,8 +78,8 @@ fn oversized_hash_table_is_trimmed() {
 #[test]
 fn out_of_range_hash_table_is_relocated_by_scan() {
     let mut bytes = healthy();
-    // Point the hash table far beyond EOF; the real table is still in the
-    // file and must be found by the deep scan.
+    // 将哈希表指向远超 EOF 的位置；真正的表仍在文件中，
+    // 必须由深度扫描找到。
     wr32(&mut bytes, 0x10, 0x7F00_0000);
     assert!(open(&bytes).is_err(), "unrepaired archive must not open");
 
@@ -156,11 +156,11 @@ fn v3_bad_ext_table_positions_are_cleared() {
         ..ArchiveSpec::default()
     });
     let mut bytes = bytes;
-    // het/bet positions live at 0x34/0x3C (already 0 in the synthetic
-    // archive); fake a BET pointer beyond EOF and repair it away.
+    // het/bet 位置位于 0x34/0x3C（在合成归档中本来就是 0）；
+    // 伪造一个超出 EOF 的 BET 指针，然后将其修复掉。
     let bet = 0x7FFF_FFFFu64.to_le_bytes();
     bytes[0x34..0x3C].copy_from_slice(&bet);
-    // header_size is 0x44 so the field is on disk.
+    // header_size 为 0x44，因此该字段确实存在于磁盘上。
     let report = repair(&mut bytes, true).unwrap();
     assert!(report.issues.iter().any(|i| i.field == "bet_table_pos"));
     assert_eq!(&bytes[0x34..0x3C], &0u64.to_le_bytes());
@@ -171,7 +171,7 @@ fn v3_bad_ext_table_positions_are_cleared() {
 #[test]
 fn diagnose_does_not_modify_input() {
     let mut bytes = healthy();
-    wr32(&mut bytes, 0x08, 1); // wrong size
+    wr32(&mut bytes, 0x08, 1); // 错误的大小
     let before = bytes.clone();
     let report = diagnose(&bytes).unwrap();
     assert!(!report.issues.is_empty());
@@ -180,9 +180,9 @@ fn diagnose_does_not_modify_input() {
 
 #[test]
 fn truncated_archive_still_repairs_enough_to_open() {
-    // Chop off the last 8 bytes (half of the final block entry): repair
-    // trims the block table count so the archive opens again. Only the
-    // last block entry ((listfile)) is lost; the real files survive.
+    // 砍掉最后 8 字节（最后一个块表条目的一半）：修复会缩减
+    // 块表计数，使归档重新可以打开。只丢失最后一个块表条目
+    //（即 (listfile)），真正的文件完好无损。
     let mut bytes = healthy();
     bytes.truncate(bytes.len() - 8);
     let report = repair(&mut bytes, true).unwrap();

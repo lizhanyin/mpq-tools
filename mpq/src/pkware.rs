@@ -1,9 +1,8 @@
-//! PKWARE Data Compression Library "explode" (decompression).
+//! PKWARE Data Compression Library 的 "explode"（解压）。
 //!
-//! Faithful port of the public PKWARE DCL format implementation used by
-//! StormLib (`pklib/explode.c`). MPQ archives store PKWARE-compressed
-//! data with method byte 0x08 (or, under the legacy `IMPLODE` flag,
-//! without any method byte at all).
+//! 忠实移植自 StormLib 所用的公开 PKWARE DCL 格式实现
+//! （`pklib/explode.c`）。MPQ 归档以方法字节 0x08 存储 PKWARE 压缩的
+//! 数据（或者在旧式 `IMPLODE` 标志下，完全不带方法字节）。
 
 use crate::error::Error;
 
@@ -12,7 +11,7 @@ const CMP_ASCII: u8 = 1;
 
 include!("pkware_tables.rs");
 
-/// Build the canonical-code lookup table used for length and distance codes.
+/// 构建用于长度码与距离码的规范码查找表。
 fn gen_decode_tabs(start_indexes: &[u8], length_bits: &[u8], elements: usize) -> [u8; 0x100] {
     let mut positions = [0u8; 0x100];
     for i in 0..elements {
@@ -27,15 +26,15 @@ fn gen_decode_tabs(start_indexes: &[u8], length_bits: &[u8], elements: usize) ->
 }
 
 struct AscTables {
-    /// ch_bits possibly modified (reduced) by gen_asc_tabs
+    /// 被 gen_asc_tabs 修改（缩减）过的 ch_bits
     ch_bits_asc: [u8; 0x100],
-    /// level 1 (8-bit) decode
+    /// 第 1 级（8 位）解码
     l1: [u8; 0x100],
-    /// level 2 (4 extra bits)
+    /// 第 2 级（额外 4 位）
     l2: [u8; 0x100],
-    /// level 3 (2 extra bits)
+    /// 第 3 级（额外 2 位）
     l3: [u8; 0x80],
-    /// level 4 (8+ extra bits)
+    /// 第 4 级（额外 8 位以上）
     l4: [u8; 0x100],
 }
 
@@ -48,8 +47,8 @@ fn gen_asc_tabs() -> AscTables {
         l4: [0; 0x100],
     };
 
-    // Iterate symbols from 0xFF down to 0. The tables are zero-initialized,
-    // exactly like the reference implementation's zeroed work buffer.
+    // 从 0xFF 向 0 迭代各个符号。这些表初始化为零，
+    // 与参考实现中清零的工作缓冲区完全一致。
     for count in (0..=0xFFusize).rev() {
         let code = CH_CODE_ASC[count];
         let bits_asc = t.ch_bits_asc[count];
@@ -96,15 +95,15 @@ fn gen_asc_tabs() -> AscTables {
     t
 }
 
-/// Decompress a PKWARE DCL stream.
+/// 解压 PKWARE DCL 数据流。
 ///
-/// `input` is the raw implode stream (no method byte). Up to `max_out`
-/// decompressed bytes are appended to `out`.
+/// `input` 是原始的 implode 流（不含方法字节）。最多 `max_out`
+/// 个解压后的字节会被追加到 `out`。
 ///
-/// The reference implementation flushes its output ring in 0x1000-byte
-/// chunks and can therefore emit trailing garbage after the end-of-stream
-/// marker; callers always know the real uncompressed size (MPQ stores it),
-/// so we cap the output exactly like StormLib's bounded write callback.
+/// 参考实现按 0x1000 字节为块冲刷输出环形缓冲区，因此可能在流结束
+/// 标记之后输出尾随垃圾；而调用方总是知道真实的未压缩大小
+/// （MPQ 中有存储），所以我们像 StormLib 的有界写回调一样
+/// 对输出做精确截断。
 pub fn explode(input: &[u8], out: &mut Vec<u8>, max_out: usize) -> crate::error::Result<()> {
     if input.len() <= 4 {
         return Err(Error::Corrupt("pkware stream too short"));
@@ -131,7 +130,7 @@ pub fn explode(input: &[u8], out: &mut Vec<u8>, max_out: usize) -> crate::error:
 
     let mut ctx = ExplodeCtx {
         input,
-        in_pos: 2, // header consumed; bit buffer is loaded from byte 2
+        in_pos: 2, // 头部已消费；位缓冲区从第 2 字节开始加载
         bit_buff: 0,
         extra_bits: 0,
         dsize_bits,
@@ -142,9 +141,9 @@ pub fn explode(input: &[u8], out: &mut Vec<u8>, max_out: usize) -> crate::error:
         asc: asc_tables.as_ref(),
     };
 
-    // Prime the 16-bit bit buffer with input[2] like the reference does:
-    // bit_buff = in_buff[2]; extra_bits = 0; in_pos = 3. The reference then
-    // reads further bytes at the *top* half of the 16-bit buffer.
+    // 像参考实现那样用 input[2] 预载 16 位位缓冲区：
+    // bit_buff = in_buff[2]; extra_bits = 0; in_pos = 3。随后参考实现
+    // 在 16 位缓冲区的*高*半部分继续读入后续字节。
     ctx.bit_buff = input[2] as u32;
     ctx.in_pos = 3;
 
@@ -154,7 +153,7 @@ pub fn explode(input: &[u8], out: &mut Vec<u8>, max_out: usize) -> crate::error:
 struct ExplodeCtx<'a> {
     input: &'a [u8],
     in_pos: usize,
-    /// 16-bit bit buffer; valid bits are the low `8 + extra_bits` bits.
+    /// 16 位位缓冲区；有效位是低 `8 + extra_bits` 位。
     bit_buff: u32,
     extra_bits: u32,
     dsize_bits: u32,
@@ -171,7 +170,7 @@ enum BitsResult {
 }
 
 impl ExplodeCtx<'_> {
-    /// Remove `nbits` from the bit buffer, refilling from the input.
+    /// 从位缓冲区中移除 `nbits` 位，必要时从输入补充。
     fn waste_bits(&mut self, nbits: u32) -> BitsResult {
         if nbits <= self.extra_bits {
             self.extra_bits -= nbits;
@@ -187,14 +186,14 @@ impl ExplodeCtx<'_> {
         self.bit_buff |= (self.input[self.in_pos] as u32) << 8;
         self.in_pos += 1;
         self.bit_buff >>= nbits - self.extra_bits;
-        // C computes (extra - nbits) + 8 with unsigned wraparound; the
-        // reordered form avoids the intermediate underflow.
+        // C 里按无符号回绕计算 (extra - nbits) + 8；调整顺序的写法
+        // 避免了中间过程的下溢。
         self.extra_bits = (self.extra_bits + 8) - nbits;
         BitsResult::Ok
     }
 }
 
-/// Result codes of `decode_lit`.
+/// `decode_lit` 的结果码。
 const LIT_ERROR: u32 = 0x306;
 const LIT_END: u32 = 0x305;
 
@@ -236,7 +235,7 @@ fn decode_lit(ctx: &mut ExplodeCtx) -> u32 {
         return b;
     }
 
-    // ASCII mode
+    // ASCII 模式
     let asc = ctx.asc.unwrap();
     
     let value = if ctx.bit_buff & 0xFF != 0 {
@@ -297,16 +296,16 @@ fn expand(
     out: &mut Vec<u8>,
     max_out: usize,
 ) -> crate::error::Result<()> {
-    // Ring buffer of 0x2204 bytes; decompression starts writing at 0x1000,
-    // flushes 0x1000 bytes whenever it reaches 0x2000.
+    // 0x2204 字节的环形缓冲区；解压从 0x1000 处开始写入，
+    // 每当到达 0x2000 就冲刷出 0x1000 字节。
     let mut ring = vec![0u8; 0x2204];
     let mut output_pos: usize = 0x1000;
     let limit = out.len().saturating_add(max_out);
 
     fn flush(ring: &mut [u8], output_pos: &mut usize, out: &mut Vec<u8>, limit: usize) {
         let end = *output_pos;
-        // Exactly 0x1000 bytes per crossing, like the reference: bytes
-        // produced past the boundary stay pending in the ring buffer.
+        // 每次越过边界精确输出 0x1000 字节，与参考实现一致：
+        // 越过边界的字节会继续留在环形缓冲区中待处理。
         let take = 0x1000.min(limit - out.len());
         out.extend_from_slice(&ring[0x1000..0x1000 + take]);
         let keep = end - 0x1000;
@@ -339,7 +338,7 @@ fn expand(
             let target = output_pos;
             let source = output_pos - minus_dist as usize;
             output_pos += rep_length as usize;
-            // Byte-by-byte: sequences may overlap (run-length style).
+            // 逐字节复制：序列可能重叠（游程式的重复）。
             let mut t = target;
             let mut s = source;
             while t < output_pos {
@@ -360,8 +359,8 @@ fn expand(
         }
     }
 
-    // Final flush: emit whatever is still pending (not the fixed 0x1000
-    // the in-loop flush uses).
+    // 最终冲刷：输出所有仍待处理的内容（而不是循环内冲刷
+    // 使用的固定 0x1000 字节）。
     let end = output_pos;
     let take = (end - 0x1000).min(limit - out.len());
     out.extend_from_slice(&ring[0x1000..0x1000 + take]);
@@ -376,19 +375,19 @@ mod tests {
     fn rejects_bad_streams() {
         let mut out = Vec::new();
         assert!(explode(&[], &mut out, 64).is_err());
-        assert!(explode(&[0, 9, 0, 0, 0], &mut out, 64).is_err()); // bad dict size
-        assert!(explode(&[7, 4, 0, 0, 0], &mut out, 64).is_err()); // bad mode
+        assert!(explode(&[0, 9, 0, 0, 0], &mut out, 64).is_err()); // 非法字典大小
+        assert!(explode(&[7, 4, 0, 0, 0], &mut out, 64).is_err()); // 非法模式
     }
 
-    /// Vectors from tests/fixtures: `pk_text.orig` is the committed
-    /// original; the streams (and the `pk_rand`/`pk_runs` pairs) come from
-    /// the implode encoder ported in examples/gen_pk_fixtures.rs, which
-    /// regenerates them and round-trip-verifies each against this decoder.
+    /// 测试向量来自 tests/fixtures：`pk_text.orig` 是已提交的原始文件；
+    /// 各数据流（以及 `pk_rand`/`pk_runs` 这两对）来自
+    /// examples/gen_pk_fixtures.rs 中移植的 implode 编码器，
+    /// 它会重新生成这些向量，并逐一与本解码器做往返验证。
     #[test]
     fn explodes_reference_vectors() {
-        // Note: PKWARE ASCII mode (ctype 1) is never produced by MPQ
-        // tools and does not round-trip in the reference pklib either,
-        // so only binary-mode vectors are tested.
+        // 注意：MPQ 工具从不产生 PKWARE ASCII 模式（ctype 1），
+        // 参考的 pklib 也无法对该模式做往返转换，
+        // 因此这里只测试二进制模式的向量。
         let vectors: [(&[u8], &[u8], &str); 3] = [
             (
                 include_bytes!("../tests/fixtures/pk_text.bin"),
@@ -415,13 +414,13 @@ mod tests {
 
     #[test]
     fn decode_tabs_match_reference_shape() {
-        // The length-code table must place symbol 0 (code 0x05, 3 bits) at
-        // indexes 0x05, 0x0D, .. — spot check a few entries.
+        // 长度码表必须把符号 0（码 0x05，3 位）放在索引
+        // 0x05、0x0D、……处 —— 抽查几个表项。
         let t = gen_decode_tabs(&LEN_CODE, &LEN_BITS, 0x10);
         assert_eq!(t[0x05], 0);
         assert_eq!(t[0x0D], 0);
         assert_eq!(t[0x15], 0);
-        // symbol 1 (code 0x03, 2 bits)
+        // 符号 1（码 0x03，2 位）
         assert_eq!(t[0x03], 1);
         assert_eq!(t[0x07], 1);
     }

@@ -1,5 +1,5 @@
-//! Round-trip integration tests: archives built by the in-test writer
-//! must open and read back correctly through the public API.
+//! 往返（round-trip）集成测试：由测试内写入器构建的归档
+//! 必须能通过公共 API 正确打开并读回。
 
 mod common;
 
@@ -83,7 +83,7 @@ fn v1_compressed_multi_sector_with_listfile() {
     assert!(names.contains(&"arr\\units.xml".to_string()));
     let expected: Vec<u8> = content.into_bytes();
     assert_eq!(archive.read_file("arr\\units.xml").unwrap(), expected);
-    // Slash normalization on lookup.
+    // 查找时对斜杠做归一化。
     assert_eq!(archive.read_file("arr/units.xml").unwrap(), expected);
 }
 
@@ -102,7 +102,7 @@ fn v1_encrypted_compressed_sectors() {
 
 #[test]
 fn v1_encrypted_stored_sectors() {
-    let content = lorem("plain stored encrypted ", 400); // > 1 sector, multiple of 4
+    let content = lorem("plain stored encrypted ", 400); // 超过 1 个 sector，且是 4 的倍数
     let spec = ArchiveSpec {
         version: 0,
         sector_shift: 3,
@@ -206,7 +206,7 @@ fn v3_het_bet_archive_without_classic_tables() {
             r"data\nested\beta.bin".to_string(),
             b"0123456789".repeat(50),
         ),
-        ("third.lst".to_string(), vec![0xAB; 7000]), // crosses sector boundary
+        ("third.lst".to_string(), vec![0xAB; 7000]), // 跨越 sector 边界
     ];
     let bytes = common::build_hetbet(&files);
     let archive = open(&bytes);
@@ -271,7 +271,7 @@ fn missing_listfile_still_lists_entries() {
     assert_eq!(entries.len(), 1);
     assert!(entries[0].name.is_none());
     assert_eq!(entries[0].display_name(), "<unnamed #0>");
-    // Uncompressed file reads fine even without a name.
+    // 即使没有名字，未压缩文件也能正常读取。
     assert_eq!(
         archive.read_entry(&entries[0]).unwrap(),
         b"no listfile here".to_vec()
@@ -289,7 +289,7 @@ fn attributes_file_is_parsed() {
     };
     let archive = open_owned(build(&spec));
     let attrs = archive.attributes().expect("(attributes) parsed");
-    // The CRC array covers every block entry (attr.txt, listfile, attributes).
+    // CRC 数组覆盖每个块表条目（attr.txt、listfile、attributes）。
     assert_eq!(attrs.crc32.len(), 3);
     assert_eq!(attrs.crc32[0], crc32_of(b"with attributes"));
     assert!(archive.has_file("(attributes)"));
@@ -298,8 +298,8 @@ fn attributes_file_is_parsed() {
 
 #[test]
 fn wrong_archive_size_field_still_opens() {
-    // A zeroed archive size field must not prevent opening (v1 archives
-    // often carry garbage there; storm ignores the value).
+    // 归档大小字段被清零时必须仍能打开（v1 归档的该字段
+    // 常带有垃圾值；storm 会忽略它）。
     let spec = ArchiveSpec {
         version: 0,
         zero_archive_size: true,
@@ -342,8 +342,8 @@ fn missing_file_reports_not_found() {
 
 #[test]
 fn pkware_imploded_file() {
-    // A file stored with the legacy IMPLODE flag: raw PKWARE DCL stream
-    // from the fixtures (produced by Blizzard's compressor), no method byte.
+    // 以旧式 IMPLODE 标志存储的文件：来自 fixture 的原始 PKWARE DCL
+    // 流（由 Blizzard 的压缩器生成），没有方法字节。
     let stream = include_bytes!("fixtures/pk_text.bin").to_vec();
     let expected = include_bytes!("fixtures/pk_text.orig").to_vec();
     let spec = ArchiveSpec {
@@ -385,8 +385,8 @@ fn many_files_and_locale_probing() {
     }
 }
 
-/// Regenerate the small fixture used by the crate-level doc example.
-/// Runs as part of the test suite; writing the same bytes is idempotent.
+/// 重新生成 crate 级文档示例所用的小 fixture。
+/// 作为测试套件的一部分运行；写入相同的字节是幂等的。
 #[test]
 fn write_doc_fixture() {
     use std::io::Write;

@@ -1,34 +1,43 @@
-//! Error types for the MPQ library.
+//! MPQ 库的错误类型。
 
 use std::fmt;
 
-/// Result alias used across the crate.
+/// 整个 crate 通用的 Result 别名。
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// All errors the MPQ library can produce.
+/// MPQ 库可能产生的所有错误。
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
-    /// Underlying I/O failure.
+    /// 底层 I/O 失败。
     Io(std::io::Error),
-    /// No MPQ header could be located in the stream.
+    /// 在数据流中找不到 MPQ 头部。
     NotAnArchive,
-    /// The header declares a format version this library does not understand.
+    /// 头部声明了本库无法识别的格式版本。
     UnsupportedVersion(u16),
-    /// A table or header field is inconsistent / corrupt.
+    /// 某个表或头部字段不一致/已损坏。
     Corrupt(&'static str),
-    /// A table or header field is inconsistent / corrupt (dynamic message).
+    /// 某个表或头部字段不一致/已损坏（动态消息）。
     InvalidData(String),
-    /// The requested file was not found in the archive.
+    /// 在归档中找不到请求的文件。
     FileNotFound(String),
-    /// The file exists but is marked deleted.
+    /// 文件存在，但已被标记为删除。
     FileDeleted,
-    /// The file uses a compression method that is not supported.
+    /// 文件使用了不支持的压缩方法。
     UnsupportedCompression(u8),
-    /// The file is encrypted and no usable key could be derived.
+    /// 文件已加密，且无法推导出可用的密钥。
     UnknownFileKey,
-    /// A data block failed MD5/CRC verification.
+    /// 某个数据块未通过 MD5/CRC 校验。
     ChecksumMismatch(String),
+    /// 归档受密码保护，但尚未提供密码
+    /// （自定义 AEAD 扩展）。
+    PasswordRequired,
+    /// 提供的密码（或主密钥）未通过验证。
+    PasswordMismatch,
+    /// AEAD 认证失败——密钥错误，或数据已被篡改/损坏。
+    Crypto(String),
+    /// `(password)` 保险库使用了本库无法识别的方案版本。
+    UnsupportedScheme(u16),
 }
 
 impl fmt::Display for Error {
@@ -48,6 +57,18 @@ impl fmt::Display for Error {
             }
             Error::UnknownFileKey => write!(f, "file is encrypted and the key could not be derived"),
             Error::ChecksumMismatch(msg) => write!(f, "checksum mismatch: {msg}"),
+            Error::PasswordRequired => write!(
+                f,
+                "archive is password-protected; supply the password first"
+            ),
+            Error::PasswordMismatch => {
+                write!(f, "password verification failed (wrong password?)")
+            }
+            Error::Crypto(msg) => write!(f, "crypto error: {msg}"),
+            Error::UnsupportedScheme(v) => write!(
+                f,
+                "unsupported password-encryption scheme version: {v}"
+            ),
         }
     }
 }

@@ -27,6 +27,9 @@ Rust 实现的 MPQ 归档读取/修改库（`mpq`）与命令行工具（`mpqtoo
   - 只要 hash 表或 HET 之一可用 + block 表或 BET 之一可用即可打开
 - **修改归档**（导入/替换与删除，见下节）：保留文件块原样拷贝，
   重建容器（hash/block 表、`(listfile)`、头部），自带结果校验
+- **密码保护**（自定义 v4 扩展，见「密码保护」节）：每扇区
+  ChaCha20-Poly1305 认证加密，Argon2id 包装的每归档主密钥存放于
+  `(password)` 内部文件；支持换密码（不重写数据）与解除保护
 
 ## 用法（库）
 
@@ -61,7 +64,16 @@ mpqtool add    <archive> <files...>   # 导入文件（同名替换）
             --no-reencrypt-key2       # key-v2 文件存明文（默认重新加密）
 mpqtool delete <archive> <names...>   # 按名删除文件
         -o, --output <FILE>           # 写到别处（默认就地修改）
+mpqtool encrypt <archive> -p <密码>   # 启用密码保护（自定义 v4 扩展）
+        -o, --output <FILE>           # 写到别处（默认就地修改）
+mpqtool decrypt <archive> -p <密码>   # 解除密码保护
+mpqtool passwd  <archive> <旧密码> <新密码>
+                                      # 更换密码（不重写数据）
 mpqtool repair [options] <archive>    # 诊断 / 修复头部元数据
+
+受密码保护的归档：info / list / extract / cat / add / delete 均可加
+`-p/--password`；未提供时 info / list 仅提示（文件名可见），读取与
+修改类命令给出明确错误。
 ```
 
 示例：
@@ -140,6 +152,52 @@ $ mpqtool delete map.w3x oldfile.txt
 已写入 map.w3x（73888 字节）
 ```
 
+## 密码保护（自定义 v4 扩展）
+
+MPQ 格式本身没有密码机制，本库在其上做私有扩展（设计文档见
+`docs/password-encryption-design.md` 方案②）：文件内容加密、打开归档
+需输入密码。**加密后的档只有本工具（配合密码）能打开**，StormLib、
+MPQ Editor 等第三方工具一律不识别——这是既定代价，也正是加密的目的。
+
+方案要点：
+
+- **先压缩后加密，按扇区 AEAD**（ChaCha20-Poly1305）：每扇区独立
+  nonce 与 AAD（由文件索引 + 扇区索引派生），随机访问天然保留；
+  16 字节认证标签提供逐扇区防篡改——密文改动一位、密钥不对或扇区
+  挪位都会当场报错
+- **密钥体系（KEK 包装）**：每归档随机 32 字节主密钥；实际加密文件
+  的密钥由主密钥经 HKDF-SHA256 按**文件索引**派生；主密钥用
+  Argon2id(密码, salt) 异或包装后存入 `(password)` 内部文件
+  （128 字节定长、明文单块存储）。**换密码只需原位重写这 128 字节**，
+  不必重加密任何数据
+- **密码校验器**：`(password)` 中还有一条用主密钥 AEAD 密封的已知
+  常量（verifier）——打开时先验它，密码错立刻拒绝，而不是读到某个
+  文件才发现
+- **标记**：块标志 `FILE_ENCRYPTED | 0x0800_0000`（自定义位）；
+  归档是否受保护以 `(password)` 文件存在为准（BET 表只编码部分
+  标志位，不可靠）。文件名仍可见（基础版不隐藏名单）
+- **互转限制**：受保护归档拒绝转 v1–v3（扩展基于 v4）；`protect`
+  会自动把容器升级为 v4 并重算全部 MD5
+- **修改受保护归档**：需先解锁（主密钥由 GUI state / CLI `--password`
+  提供）；保持表槽位不变的文件原样拷贝（密钥按索引派生，槽位不变
+  即有效），槽位变化的按新索引重新密封，导入的新文件同样加密
+
+库接口：`mpq::protect` / `mpq::unprotect` / `mpq::change_password`，
+`Archive::unlock(password)` 解锁后正常 `read_file` / `entries`。
+
+```console
+$ mpqtool encrypt map.w3x -p hunter2
+已启用密码保护：3 个文件按扇区密封（ChaCha20-Poly1305），容器为 MPQ v4。
+注意：第三方 MPQ 工具将无法打开该文件。
+已写入 map.w3x（74488 字节）
+
+$ mpqtool cat map.w3x war3map.j            # 无密码 → 明确报错
+$ mpqtool cat map.w3x war3map.j -p hunter2 # 正常输出
+
+$ mpqtool passwd map.w3x hunter2 n3w-pw    # 换密码，数据不动
+$ mpqtool decrypt map.w3x -p n3w-pw        # 解除保护
+```
+
 ## GUI（mpqtool-gui）
 
 图形界面基于 **Tauri 2**（Rust 后端 + Vue 3 / Naive UI 前端，中文由
@@ -174,6 +232,10 @@ cargo build --release -p mpqtool-gui
   （自动重载）或「在界面中打开结果」
 - 「工具 → 修复头信息」：问题列表 → 应用修复 → 保存修复副本
   或直接在界面中重新打开修复结果
+- **密码保护**（自定义 v4 扩展）：打开受保护归档时自动弹密码框
+  （可取消，文件名仍可浏览；「工具 → 输入密码解锁」可再解锁）；
+  「工具 → 设置密码 / 修改密码 / 解除密码保护」与修改归档同款
+  「应用 → 保存 / 在界面中打开」流程；解锁状态跨刷新保持
 - 「设置 → 界面设置」调整全局字号（自动保存）
 
 前端（`gui/ui`）为 Vite 构建的 **Vue 3 + Naive UI** 单页应用，通过
@@ -201,9 +263,14 @@ Tauri IPC 调用 `gui/src` 中的命令（打开/预览/提取/修复/修改）�
   空文件、不可压缩数据、保留前后缀
 - 修复测试：11 类损坏场景（表位置越界重定位、表项数截断、版本推断、
   头长度规整、v3 字段清零等）修复后归档可正常读取
+- 密码测试：加密写→解锁读取 roundtrip（v1 源自动升 v4、单单元/空文件/
+  不可压缩数据）、错密码立即拒绝、未解锁读取报错、字节篡改触发 AEAD
+  标签失败（其他文件不受影响）、换密码仅重写 128 字节且旧密码失效、
+  解除保护 roundtrip、受保护归档上增删文件、直接删除 `(password)`
+  被拒、v1–v3 转换被拒、空归档保护/解除
 
 ```console
-$ cargo test        # 94 项测试
+$ cargo test        # 112 项测试
 ```
 
 ## 目录结构
@@ -218,6 +285,7 @@ mpq/            读取/修改库（edition 2024, no unsafe）
   src/hetbet.rs       HET/BET 扩展表
   src/compression.rs  zlib/pkware/bzip2/lzma 解压调度
   src/pkware.rs       PKWARE DCL explode 移植
+  src/passcrypt.rs    密码保护扩展（Argon2id/HKDF/ChaCha20-Poly1305）
   src/repair.rs       头部诊断/修复 + 表位置深度扫描（v4 修复后重算头部 MD5）
   src/modify.rs       导入/删除：块原样拷贝 + 容器重建（v4 保持版本并重算 MD5）
   src/create.rs       新建空归档（v1–v4）与版本转换辅助

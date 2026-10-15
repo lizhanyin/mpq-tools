@@ -1,12 +1,21 @@
-//! mpqtool — inspect, extract and repair MPQ archives (CLI).
-//! The graphical interface lives in the separate `mpqtool-gui` crate.
+//! mpqtool — 检查、提取和修复 MPQ 归档（CLI）。
+//! 图形界面位于独立的 `mpqtool-gui` crate 中。
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use mpq::{Archive, Error, FormatVersion};
 use mpqtool::tasks;
+
+/// 供操作（可能）受密码保护归档的子命令共享的 `--password` 参数。
+#[derive(Args)]
+struct PasswordArg {
+    /// 受密码保护归档的密码（自定义 v4 AEAD 扩展；
+    /// 见 `mpqtool encrypt`）。
+    #[arg(short = 'p', long = "password", value_name = "PASSWORD")]
+    password: Option<String>,
+}
 
 #[derive(Parser)]
 #[command(
@@ -16,9 +25,11 @@ use mpqtool::tasks;
     long_about = "Reads MPQ archives following the v3 protocol, with full v4 support \
 (header fields, MD5 checksum verification for tables, header and raw data \
 chunks, and v4 write-back). Imports and deletes files, converts between \
-container versions, and repairs damaged headers. Non-essential data such as \
-(listfile), (attributes) or HET/BET tables may be missing — the archive \
-still opens. The graphical interface is the separate mpqtool-gui binary."
+container versions, and repairs damaged headers. Password protection \
+(encrypt/decrypt/passwd) is a custom v4 extension only this tool understands. \
+Non-essential data such as (listfile), (attributes) or HET/BET tables may be \
+missing — the archive still opens. The graphical interface is the separate \
+mpqtool-gui binary."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -27,85 +38,133 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Show archive header and table summary.
+    /// 显示归档头部与各表的摘要。
     Info {
-        /// Archive file.
+        /// 归档文件。
         archive: PathBuf,
+        #[command(flatten)]
+        pw: PasswordArg,
     },
-    /// List files inside the archive.
+    /// 列出归档内的文件。
     List {
-        /// Archive file.
+        /// 归档文件。
         archive: PathBuf,
-        /// Show extra detail (flags, locale, table source).
+        /// 显示额外细节（flags、locale、表来源）。
         #[arg(short, long)]
         verbose: bool,
+        #[command(flatten)]
+        pw: PasswordArg,
     },
-    /// Extract files to a directory (default: all known files).
+    /// 将文件提取到目录（默认：所有已知文件）。
     Extract {
-        /// Archive file.
+        /// 归档文件。
         archive: PathBuf,
-        /// Files to extract (default: all named files).
+        /// 要提取的文件（默认：所有具名文件）。
         files: Vec<String>,
-        /// Output directory (default: archive name without extension).
+        /// 输出目录（默认：不带扩展名的归档名）。
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Extract every table entry, including unnamed ones
-        /// (unnamed encrypted files cannot be decrypted).
+        /// 提取每一个表条目，包括未命名的条目
+        ///（未命名的加密文件无法解密）。
         #[arg(long)]
         all_entries: bool,
+        #[command(flatten)]
+        pw: PasswordArg,
     },
-    /// Write one file to stdout.
+    /// 将单个文件写到标准输出。
     Cat {
-        /// Archive file.
+        /// 归档文件。
         archive: PathBuf,
-        /// File name inside the archive.
+        /// 归档内的文件名。
         name: String,
+        #[command(flatten)]
+        pw: PasswordArg,
     },
-    /// Import files into the archive (stored under their file name;
-    /// an existing file of the same name is replaced).
+    /// 将文件导入归档（以其文件名存储；
+    /// 同名的现有文件会被替换）。
     Add {
-        /// Archive file.
+        /// 归档文件。
         archive: PathBuf,
-        /// Files to import.
+        /// 要导入的文件。
         #[arg(required = true)]
         files: Vec<PathBuf>,
-        /// Output file (default: modify the input in place).
+        /// 输出文件（默认：原地修改输入）。
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Store re-encoded key-v2 files unencrypted instead of
-        /// re-encrypting them at their new offset (default).
+        /// 将重新编码的 key-v2 文件存为未加密，
+        /// 而不是（默认行为）在其新偏移处重新加密。
         #[arg(long)]
         no_reencrypt_key2: bool,
+        #[command(flatten)]
+        pw: PasswordArg,
     },
-    /// Delete files from the archive by name.
+    /// 按名称从归档中删除文件。
     Delete {
-        /// Archive file.
+        /// 归档文件。
         archive: PathBuf,
-        /// Names of files to delete (as shown by `mpqtool list`).
+        /// 要删除的文件名（如 `mpqtool list` 所示）。
         #[arg(required = true)]
         names: Vec<String>,
-        /// Output file (default: modify the input in place).
+        /// 输出文件（默认：原地修改输入）。
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Store re-encoded key-v2 files unencrypted instead of
-        /// re-encrypting them at their new offset (default).
+        /// 将重新编码的 key-v2 文件存为未加密，
+        /// 而不是（默认行为）在其新偏移处重新加密。
         #[arg(long)]
         no_reencrypt_key2: bool,
+        #[command(flatten)]
+        pw: PasswordArg,
     },
-    /// Diagnose and repair damaged header metadata.
-    Repair {
-        /// Archive file.
+    /// 用密码保护归档（自定义 v4 AEAD 扩展：
+    /// 逐 sector 的 ChaCha20-Poly1305，Argon2id 包装的主密钥）。
+    /// 只有本工具能打开结果。会将容器升级为 v4。
+    Encrypt {
+        /// 归档文件。
         archive: PathBuf,
-        /// Only report issues, do not write anything.
-        #[arg(long)]
-        dry_run: bool,
-        /// Modify the input file instead of writing a new one.
-        #[arg(long)]
-        in_place: bool,
-        /// Output file (default: <name>.fixed.<ext>).
+        /// 用于保护的密码。
+        #[arg(short = 'p', long = "password", value_name = "PASSWORD")]
+        password: String,
+        /// 输出文件（默认：原地修改输入）。
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// Disable the deep scan that relocates misplaced tables.
+    },
+    /// 移除密码保护（需要密码）。
+    Decrypt {
+        /// 归档文件。
+        archive: PathBuf,
+        /// 归档当前的密码。
+        #[arg(short = 'p', long = "password", value_name = "PASSWORD")]
+        password: String,
+        /// 输出文件（默认：原地修改输入）。
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// 更改归档的密码（重新包装主密钥；数据不会被重新加密）。
+    Passwd {
+        /// 归档文件。
+        archive: PathBuf,
+        /// 当前密码。
+        old_password: String,
+        /// 新密码。
+        new_password: String,
+        /// 输出文件（默认：原地修改输入）。
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// 诊断并修复损坏的头部元数据。
+    Repair {
+        /// 归档文件。
+        archive: PathBuf,
+        /// 仅报告问题，不写入任何内容。
+        #[arg(long)]
+        dry_run: bool,
+        /// 修改输入文件而不是写入新文件。
+        #[arg(long)]
+        in_place: bool,
+        /// 输出文件（默认：<name>.fixed.<ext>）。
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// 禁用重新定位错位表的深度扫描。
         #[arg(long)]
         no_deep: bool,
     },
@@ -114,32 +173,44 @@ enum Command {
 fn main() {
     let cli = Cli::parse();
     let code = match cli.command {
-        // No subcommand: summarize usage (the GUI is the mpqtool-gui binary).
+        // 无子命令：显示用法摘要（GUI 是 mpqtool-gui 二进制）。
         None => {
             Cli::command().print_help().unwrap_or(());
             0
         }
-        Some(Command::Info { archive }) => cmd_info(&archive),
-        Some(Command::List { archive, verbose }) => cmd_list(&archive, verbose),
+        Some(Command::Info { archive, pw }) => cmd_info(&archive, pw.password.as_deref()),
+        Some(Command::List { archive, verbose, pw }) => cmd_list(&archive, verbose, pw.password.as_deref()),
         Some(Command::Extract {
             archive,
             files,
             output,
             all_entries,
-        }) => cmd_extract(&archive, &files, output, all_entries),
-        Some(Command::Cat { archive, name }) => cmd_cat(&archive, &name),
+            pw,
+        }) => cmd_extract(&archive, &files, output, all_entries, pw.password.as_deref()),
+        Some(Command::Cat { archive, name, pw }) => cmd_cat(&archive, &name, pw.password.as_deref()),
         Some(Command::Add {
             archive,
             files,
             output,
             no_reencrypt_key2,
-        }) => cmd_add(&archive, &files, output, !no_reencrypt_key2),
+            pw,
+        }) => cmd_add(&archive, &files, output, !no_reencrypt_key2, pw.password.as_deref()),
         Some(Command::Delete {
             archive,
             names,
             output,
             no_reencrypt_key2,
-        }) => cmd_delete(&archive, &names, output, !no_reencrypt_key2),
+            pw,
+        }) => cmd_delete(&archive, &names, output, !no_reencrypt_key2, pw.password.as_deref()),
+        Some(Command::Encrypt { archive, password, output }) => {
+            cmd_encrypt(&archive, &password, output)
+        }
+        Some(Command::Decrypt { archive, password, output }) => {
+            cmd_decrypt(&archive, &password, output)
+        }
+        Some(Command::Passwd { archive, old_password, new_password, output }) => {
+            cmd_passwd(&archive, &old_password, &new_password, output)
+        }
         Some(Command::Repair {
             archive,
             dry_run,
@@ -151,8 +222,31 @@ fn main() {
     std::process::exit(code);
 }
 
-fn open_archive(path: &Path) -> mpq::Result<Archive<std::fs::File>> {
-    Archive::open(path)
+/// 打开归档，受保护时用 `password` 解锁。`strict` 决定归档受保护但
+/// 未提供密码时的行为：读取类命令以明确的错误失败；列举类命令
+/// 仅发出警告（没有密码时文件名仍然可见）。
+fn open_archive(
+    path: &Path,
+    password: Option<&str>,
+    strict: bool,
+) -> mpq::Result<Archive<std::fs::File>> {
+    let mut archive = Archive::open(path)?;
+    if archive.is_password_protected() {
+        match password {
+            Some(p) => archive.unlock(p)?,
+            None => {
+                if strict {
+                    eprintln!("error: 归档受密码保护（自定义 v4 加密扩展）；需要 --password 提供密码");
+                    std::process::exit(1);
+                } else {
+                    eprintln!(
+                        "note: 归档受密码保护；未提供 --password，文件名可见但内容不可读取"
+                    );
+                }
+            }
+        }
+    }
+    Ok(archive)
 }
 
 fn print_warnings(archive: &Archive<std::fs::File>) {
@@ -161,8 +255,8 @@ fn print_warnings(archive: &Archive<std::fs::File>) {
     }
 }
 
-fn cmd_info(path: &Path) -> i32 {
-    let archive = match open_archive(path) {
+fn cmd_info(path: &Path, password: Option<&str>) -> i32 {
+    let archive = match open_archive(path, password, false) {
         Ok(a) => a,
         Err(e) => return fail(e),
     };
@@ -193,6 +287,16 @@ fn cmd_info(path: &Path) -> i32 {
         println!("Archive size64: {:#x}", h.archive_size64);
     }
     println!("Listfile:       {} name(s)", archive.file_names().len());
+    if archive.is_password_protected() {
+        println!(
+            "Password:       protected (custom AEAD extension){}",
+            if archive.is_unlocked() {
+                " — unlocked"
+            } else {
+                " — locked, contents need --password"
+            }
+        );
+    }
     println!(
         "Attributes:     {}",
         match archive.attributes() {
@@ -210,8 +314,8 @@ fn cmd_info(path: &Path) -> i32 {
     0
 }
 
-fn cmd_list(path: &Path, verbose: bool) -> i32 {
-    let archive = match open_archive(path) {
+fn cmd_list(path: &Path, verbose: bool, password: Option<&str>) -> i32 {
+    let archive = match open_archive(path, password, false) {
         Ok(a) => a,
         Err(e) => return fail(e),
     };
@@ -251,8 +355,9 @@ fn cmd_extract(
     files: &[String],
     output: Option<PathBuf>,
     all_entries: bool,
+    password: Option<&str>,
 ) -> i32 {
-    let archive = match open_archive(path) {
+    let archive = match open_archive(path, password, true) {
         Ok(a) => a,
         Err(e) => return fail(e),
     };
@@ -296,8 +401,8 @@ fn cmd_extract(
     }
 }
 
-fn cmd_cat(path: &Path, name: &str) -> i32 {
-    let archive = match open_archive(path) {
+fn cmd_cat(path: &Path, name: &str, password: Option<&str>) -> i32 {
+    let archive = match open_archive(path, password, true) {
         Ok(a) => a,
         Err(e) => return fail(e),
     };
@@ -346,7 +451,7 @@ fn cmd_repair(
             return 0;
         }
         if report.changed {
-            // Verify the repaired bytes actually open.
+            // 验证修复后的字节确实能打开。
             match Archive::new(std::io::Cursor::new(&bytes)) {
                 Ok(a) => {
                     for w in a.warnings() {
@@ -386,30 +491,37 @@ fn print_issues(report: &mpq::RepairReport) {
 
 // -- add / delete --------------------------------------------------------------
 
-/// Shared driver for the add / delete subcommands: read the archive, apply
-/// the modification (the library self-verifies the result), print the
-/// report and write the output.
+/// add / delete 子命令的共享驱动：读取归档，应用修改（库会自行
+/// 验证结果），打印报告并写出输出文件。
 fn run_modify(
     path: &Path,
+    password: Option<&str>,
     deletions: Vec<mpq::Deletion>,
     additions: Vec<(String, Vec<u8>)>,
     output: Option<PathBuf>,
     reencrypt_key2: bool,
 ) -> i32 {
-    // Reject deletions of names that do not exist (like `zip -d`).
+    // 受保护的归档做任何修改都需要主密钥；这个探测用的归档
+    // 也服务于下面的缺失名称检查。
+    let mut master_key = None;
+    let probe = match open_archive(path, password, true) {
+        Ok(a) => a,
+        Err(e) => return fail(e),
+    };
+    if probe.is_password_protected() {
+        master_key = probe.master_key();
+    }
+
+    // 拒绝删除不存在的名称（类似 `zip -d`）。
     for del in &deletions {
         if let mpq::Deletion::ByName(name) = del {
-            match open_archive(path) {
-                Ok(a) => {
-                    if !a.has_file(name) {
-                        eprintln!("error: file not found: {name}");
-                        return 1;
-                    }
-                }
-                Err(e) => return fail(e),
+            if !probe.has_file(name) {
+                eprintln!("error: file not found: {name}");
+                return 1;
             }
         }
     }
+    drop(probe);
 
     let bytes = match tasks::read_file(path) {
         Ok(b) => b,
@@ -417,6 +529,7 @@ fn run_modify(
     };
     let options = mpq::ModifyOptions {
         reencrypt_key_v2: reencrypt_key2,
+        master_key,
         ..Default::default()
     };
     let outcome = match mpq::modify_with(&bytes, &deletions, &additions, &options) {
@@ -424,15 +537,26 @@ fn run_modify(
         Err(e) => return fail(e),
     };
     print_modify_report(&outcome.report, reencrypt_key2);
+    print_encryption_notes(&outcome.report);
 
+    write_outcome(path, output, &outcome.bytes)
+}
+
+fn print_encryption_notes(report: &mpq::ModifyReport) {
+    if report.encrypted > 0 {
+        println!("已按密码方案加密 {} 个文件", report.encrypted);
+    }
+    if report.decrypted > 0 {
+        println!("已解密 {} 个文件", report.decrypted);
+    }
+}
+
+/// 写出修改结果（默认原地写入，与 add/delete 一致）。
+fn write_outcome(path: &Path, output: Option<PathBuf>, bytes: &[u8]) -> i32 {
     let out_path = output.unwrap_or_else(|| path.to_path_buf());
-    match std::fs::write(&out_path, &outcome.bytes) {
+    match std::fs::write(&out_path, bytes) {
         Ok(()) => {
-            println!(
-                "已写入 {}（{} 字节）",
-                out_path.display(),
-                outcome.bytes.len()
-            );
+            println!("已写入 {}（{} 字节）", out_path.display(), bytes.len());
             0
         }
         Err(e) => {
@@ -484,6 +608,7 @@ fn cmd_add(
     files: &[PathBuf],
     output: Option<PathBuf>,
     reencrypt_key2: bool,
+    password: Option<&str>,
 ) -> i32 {
     let mut additions: Vec<(String, Vec<u8>)> = Vec::new();
     for file in files {
@@ -505,7 +630,7 @@ fn cmd_add(
             }
         }
     }
-    run_modify(path, Vec::new(), additions, output, reencrypt_key2)
+    run_modify(path, password, Vec::new(), additions, output, reencrypt_key2)
 }
 
 fn cmd_delete(
@@ -513,12 +638,70 @@ fn cmd_delete(
     names: &[String],
     output: Option<PathBuf>,
     reencrypt_key2: bool,
+    password: Option<&str>,
 ) -> i32 {
     let deletions: Vec<mpq::Deletion> = names
         .iter()
         .map(|n| mpq::Deletion::ByName(n.clone()))
         .collect();
-    run_modify(path, deletions, Vec::new(), output, reencrypt_key2)
+    run_modify(path, password, deletions, Vec::new(), output, reencrypt_key2)
+}
+
+// -- 密码保护 ---------------------------------------------------------
+
+fn cmd_encrypt(path: &Path, password: &str, output: Option<PathBuf>) -> i32 {
+    let bytes = match tasks::read_file(path) {
+        Ok(b) => b,
+        Err(e) => return fail(Error::Io(e)),
+    };
+    let outcome = match mpq::protect(&bytes, password, &mpq::Argon2Params::default()) {
+        Ok(o) => o,
+        Err(e) => return fail(e),
+    };
+    println!(
+        "已启用密码保护：{} 个文件按扇区密封（ChaCha20-Poly1305），\
+         容器为 MPQ v4。注意：第三方 MPQ 工具将无法打开该文件。",
+        outcome.report.encrypted
+    );
+    for w in &outcome.report.dropped {
+        println!("自动移除（加密后失效）：{w}");
+    }
+    write_outcome(path, output, &outcome.bytes)
+}
+
+fn cmd_decrypt(path: &Path, password: &str, output: Option<PathBuf>) -> i32 {
+    let bytes = match tasks::read_file(path) {
+        Ok(b) => b,
+        Err(e) => return fail(Error::Io(e)),
+    };
+    let outcome = match mpq::unprotect(&bytes, password) {
+        Ok(o) => o,
+        Err(e) => return fail(e),
+    };
+    println!(
+        "已解除密码保护：{} 个文件解密，(password) 已移除。",
+        outcome.report.decrypted
+    );
+    write_outcome(path, output, &outcome.bytes)
+}
+
+fn cmd_passwd(
+    path: &Path,
+    old_password: &str,
+    new_password: &str,
+    output: Option<PathBuf>,
+) -> i32 {
+    let bytes = match tasks::read_file(path) {
+        Ok(b) => b,
+        Err(e) => return fail(Error::Io(e)),
+    };
+    let out = match mpq::change_password(&bytes, old_password, new_password, &mpq::Argon2Params::default())
+    {
+        Ok(o) => o,
+        Err(e) => return fail(e),
+    };
+    println!("已更换密码（仅重新包装主密钥，数据未重写）。");
+    write_outcome(path, output, &out)
 }
 
 fn fail(e: Error) -> i32 {

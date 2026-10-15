@@ -1,26 +1,26 @@
-//! MPQ archive header (v1–v4) and the `MPQ\x1B` user-data header.
+//! MPQ 归档头部（v1–v4）以及 `MPQ\x1B` 用户数据头部。
 
 use crate::error::{Error, Result};
 
-/// `MPQ\x1A` as a little-endian u32.
+/// 以小端 u32 表示的 `MPQ\x1A`。
 pub const MPQ_MAGIC: u32 = 0x1A51_504D;
-/// `MPQ\x1B` (user data header) as a little-endian u32.
+/// 以小端 u32 表示的 `MPQ\x1B`（用户数据头部）。
 pub const USERDATA_MAGIC: u32 = 0x1B51_504D;
 
-/// Standard on-disk size of each header version.
+/// 各头部版本在磁盘上的标准大小。
 pub const HEADER_SIZE_V1: u32 = 0x20;
 pub const HEADER_SIZE_V2: u32 = 0x2C;
 pub const HEADER_SIZE_V3: u32 = 0x44;
 pub const HEADER_SIZE_V4: u32 = 0xD0;
 
-/// Bytes covered by the v4 header's own MD5 (`MD5_MpqHeader` @ 0xC0):
-/// everything from the signature up to and including `MD5_HetTable`.
+/// v4 头部自身 MD5（`MD5_MpqHeader` @ 0xC0）覆盖的字节数：
+/// 即从签名字段起直至 `MD5_HetTable`（含）的全部内容。
 pub const HEADER_MD5_SPAN: usize = 0xC0;
 
-/// Maximum bytes we ever need to look at a header candidate.
+/// 检查头部候选时最多需要读取的字节数。
 pub const MAX_HEADER_READ: u64 = HEADER_SIZE_V4 as u64;
 
-/// MPQ format version as declared in the header field.
+/// 头部字段中声明的 MPQ 格式版本。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FormatVersion {
     V1,
@@ -30,7 +30,7 @@ pub enum FormatVersion {
 }
 
 impl FormatVersion {
-    /// Parse the raw u16 field. Values above 3 are rejected.
+    /// 解析原始 u16 字段。大于 3 的值会被拒绝。
     pub fn from_raw(v: u16) -> Result<Self> {
         match v {
             0 => Ok(FormatVersion::V1),
@@ -51,19 +51,19 @@ impl FormatVersion {
     }
 }
 
-/// The `MPQ\x1B` user data header found in front of Warcraft III /
-/// Starcraft II map archives.
+/// 见于 Warcraft III / Starcraft II 地图归档前部的 `MPQ\x1B`
+/// 用户数据头部。
 #[derive(Debug, Clone)]
 pub struct UserDataHeader {
     pub data_size: u32,
-    /// Offset of the real MPQ header, relative to the user data header.
+    /// 真实 MPQ 头部的偏移，相对于用户数据头部。
     pub archive_offset: u32,
     pub header_size: u32,
 }
 
 impl UserDataHeader {
-    /// Parse from at least 16 bytes. Returns `None` (not an error) when the
-    /// data does not look like a sane user data header.
+    /// 至少要有 16 字节才能解析。当数据看起来不像一个合理的用户数据
+    /// 头部时返回 `None`（而不是报错）。
     pub fn parse(buf: &[u8]) -> Option<Self> {
         if buf.len() < 16 {
             return None;
@@ -75,8 +75,8 @@ impl UserDataHeader {
         let data_size = le_u32(buf, 4);
         let archive_offset = le_u32(buf, 8);
         let header_size = le_u32(buf, 12);
-        // Sanity exactly like StormLib's IsValidMpqUserData:
-        // header_size <= data_size && data_size <= archive_offset.
+        // 合理性检查与 StormLib 的 IsValidMpqUserData 完全一致：
+        // header_size <= data_size && data_size <= archive_offset。
         if header_size > data_size || data_size > archive_offset {
             return None;
         }
@@ -88,8 +88,8 @@ impl UserDataHeader {
     }
 }
 
-/// Raw MPQ header, kept close to the on-disk layout. Fields beyond the
-/// declared version may be absent in the file and then read as 0.
+/// 原始 MPQ 头部，布局贴近磁盘存储。超出所声明版本的字段在文件中
+/// 可能不存在，此时读作 0。
 #[derive(Debug, Clone, Default)]
 pub struct MpqHeader {
     pub header_size: u32,
@@ -115,25 +115,25 @@ pub struct MpqHeader {
     pub hi_block_table_size64: u64,
     pub het_table_size64: u64,
     pub bet_table_size64: u64,
-    /// v4: size of raw data chunks covered by each per-file MD5 (0 = none).
+    /// v4：每个文件级 MD5 所覆盖的原始数据块大小（0 = 无）。
     pub raw_chunk_size: u32,
-    /// v4 @ 0x70: MD5 of the block table as stored (encrypted/compressed).
+    /// v4 @ 0x70：block table 按存储形态（加密/压缩后）的 MD5。
     pub md5_block_table: [u8; 16],
-    /// v4 @ 0x80: MD5 of the hash table as stored.
+    /// v4 @ 0x80：hash table 按存储形态的 MD5。
     pub md5_hash_table: [u8; 16],
-    /// v4 @ 0x90: MD5 of the hi-block table as stored.
+    /// v4 @ 0x90：hi-block 表按存储形态的 MD5。
     pub md5_hi_block_table: [u8; 16],
-    /// v4 @ 0xA0: MD5 of the BET table as stored.
+    /// v4 @ 0xA0：BET 表按存储形态的 MD5。
     pub md5_bet_table: [u8; 16],
-    /// v4 @ 0xB0: MD5 of the HET table as stored.
+    /// v4 @ 0xB0：HET 表按存储形态的 MD5。
     pub md5_het_table: [u8; 16],
-    /// v4 @ 0xC0: MD5 of the header itself, covering bytes `0x00..0xC0`.
+    /// v4 @ 0xC0：头部自身的 MD5，覆盖 `0x00..0xC0` 字节。
     pub md5_header: [u8; 16],
 }
 
 impl MpqHeader {
-    /// Parse a header from `buf` (length must be >= 8; shorter headers are
-    /// tolerated per the v3 spec, missing fields become 0).
+    /// 从 `buf` 解析头部（长度必须 >= 8；按照 v3 规范，较短的头部也被
+    /// 容忍，缺失的字段读作 0）。
     pub fn parse(buf: &[u8]) -> Result<(Self, FormatVersion)> {
         if buf.len() < HEADER_SIZE_V1 as usize {
             return Err(Error::Corrupt("MPQ header truncated below 0x20 bytes"));
@@ -156,8 +156,8 @@ impl MpqHeader {
             ..MpqHeader::default()
         };
 
-        // Tolerance: some tools write header_size smaller than the standard
-        // v1 size; the fields up to 0x20 are still valid.
+        // 宽容处理：某些工具写入的 header_size 小于标准 v1 大小；
+        // 但 0x20 之前的字段仍然有效。
         if h.header_size < HEADER_SIZE_V1 {
             h.header_size = HEADER_SIZE_V1;
         }
@@ -192,30 +192,30 @@ impl MpqHeader {
         Ok((h, version))
     }
 
-    /// Sanity check used while scanning for the header inside a larger file.
+    /// 在更大的文件中扫描头部时使用的合理性检查。
     pub fn plausible(&self, file_len: u64, base: u64) -> bool {
         if self.header_size < HEADER_SIZE_V1 || self.header_size > 0x1000 {
             return false;
         }
-        // Sector exponent sanity: only the low byte is meaningful per storm.
+        // sector 指数的合理性检查：按照 storm 的实现只有低字节有意义。
         if self.block_size > 0xFF {
             return false;
         }
-        // Huge declared tables with a tiny file are usually false positives.
+        // 文件很小却声明了巨大的表，通常是误报。
         let _ = file_len;
         let _ = base;
         true
     }
 
-    /// Sector size in bytes: `512 << block_size`, low byte only.
+    /// sector 大小（字节）：`512 << block_size`，仅取低字节。
     pub fn sector_size(&self) -> u32 {
         512u32 << (self.block_size & 0xFF)
     }
 
-    /// Effective archive size in bytes (relative to archive start).
+    /// 有效归档大小（字节，相对于归档起始处）。
     ///
-    /// Tolerant: prefers the 64-bit size, falls back to the 32-bit size,
-    /// and finally yields the actual available length.
+    /// 宽容处理：优先采用 64 位大小，退回 32 位大小，
+    /// 最终以实际可用长度为准。
     pub fn archive_size(&self, file_len_from_base: u64) -> u64 {
         if self.archive_size64 != 0 && self.archive_size64 <= file_len_from_base {
             self.archive_size64
@@ -260,7 +260,7 @@ mod tests {
         b[0..4].copy_from_slice(&MPQ_MAGIC.to_le_bytes());
         b[4..8].copy_from_slice(&HEADER_SIZE_V1.to_le_bytes());
         b[12..14].copy_from_slice(&v.to_le_bytes());
-        b[14..16].copy_from_slice(&3u16.to_le_bytes()); // 4096-byte sectors
+        b[14..16].copy_from_slice(&3u16.to_le_bytes()); // 4096 字节的 sector
         b
     }
 
@@ -275,12 +275,12 @@ mod tests {
 
     #[test]
     fn parses_v3_with_missing_tail() {
-        // v3 header where only 0x30 bytes were stored (tolerated):
-        // v3 fields beyond the stored length must read as 0.
+        // 只存储了 0x30 字节的 v3 头部（被容忍）：
+        // 存储长度之外的 v3 字段必须读作 0。
         let mut buf = build_header(2);
         buf.truncate(0x30);
-        // parse sees fewer than HEADER_SIZE_V3 bytes -> v3 fields stay 0,
-        // which parse() must tolerate rather than fail.
+        // parse 看到的字节少于 HEADER_SIZE_V3 -> v3 字段保持为 0，
+        // parse() 必须容忍这种情况而不是报错。
         let r = MpqHeader::parse(&buf);
         assert!(r.is_ok());
         let (_, v) = r.unwrap();
@@ -300,7 +300,7 @@ mod tests {
     fn userdata_magic_check() {
         let mut b = [0u8; 16];
         b[0..4].copy_from_slice(&USERDATA_MAGIC.to_le_bytes());
-        // sizes: header 0x10 <= data 0x100 <= archive offset 0x200
+        // 大小：header 0x10 <= data 0x100 <= archive offset 0x200
         b[4..8].copy_from_slice(&0x100u32.to_le_bytes());
         b[8..12].copy_from_slice(&0x200u32.to_le_bytes());
         b[12..16].copy_from_slice(&0x10u32.to_le_bytes());

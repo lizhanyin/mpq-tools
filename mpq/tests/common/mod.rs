@@ -1,10 +1,9 @@
-//! Test-only MPQ archive builder.
+//! 仅用于测试的 MPQ 归档构建器。
 //!
-//! Produces byte-exact archives for the classic tables (hash/block/
-//! hi-block) across header versions v1–v4, with zlib compression, storm
-//! encryption, key-v2, single-unit files, sector CRCs, `(listfile)`,
-//! `(attributes)`, the `MPQ\x1B` user-data wrapper, the v4 MD5 checksum
-//! fields (tables + header) and optional per-file raw-chunk MD5s.
+//! 为经典表（hash/block/hi-block 表）生成字节级精确的归档，覆盖 v1–v4
+//! 各头部版本，支持 zlib 压缩、storm 加密、key-v2、single-unit 文件、
+//! sector CRC、`(listfile)`、`(attributes)`、`MPQ\x1B` user-data 包装、
+//! v4 的 MD5 校验字段（各表 + 头部），以及可选的每文件 raw-chunk MD5。
 
 #![allow(dead_code)]
 
@@ -30,7 +29,7 @@ pub const FILE_KEY_V2: u32 = 0x0002_0000;
 pub const FILE_COMPRESS: u32 = 0x0000_0200;
 pub const FILE_IMPLODE: u32 = 0x0000_0100;
 
-/// How one stored file is laid out.
+/// 单个存储文件的布局方式。
 #[derive(Clone)]
 pub struct FileSpec {
     pub name: String,
@@ -39,11 +38,11 @@ pub struct FileSpec {
     pub encrypt: bool,
     pub single_unit: bool,
     pub fix_key: bool,
-    /// Pre-encoded raw payload (stored as method-0x02 zlib content);
-    /// overrides `data`.
+    /// 预编码的原始负载（以 method-0x02 zlib 内容存储）；
+    /// 覆盖 `data`。
     pub raw_payload: Option<Vec<u8>>,
-    /// Pre-encoded PKWARE implode stream with its uncompressed size;
-    /// stored under the legacy IMPLODE flag without a method byte.
+    /// 预编码的 PKWARE implode 流及其未压缩大小；
+    /// 以旧式 IMPLODE 标志存储，不带方法字节。
     pub imploded: Option<(Vec<u8>, u32)>,
 }
 
@@ -79,8 +78,8 @@ impl FileSpec {
         self.fix_key = true;
         self
     }
-    /// Store as a legacy PKWARE implode file: `stream` is the raw DCL
-    /// stream, `real_size` the uncompressed size.
+    /// 以旧式 PKWARE implode 文件存储：`stream` 为原始 DCL 流，
+    /// `real_size` 为未压缩大小。
     pub fn imploded(mut self, stream: Vec<u8>, real_size: u32) -> Self {
         self.imploded = Some((stream, real_size));
         self
@@ -89,23 +88,23 @@ impl FileSpec {
 
 #[derive(Default, Clone)]
 pub struct ArchiveSpec {
-    /// 0 = v1, 1 = v2, 2 = v3, 3 = v4.
+    /// 0 = v1，1 = v2，2 = v3，3 = v4。
     pub version: u16,
-    /// Sector size exponent (sector = 512 << shift).
+    /// sector 大小的指数（sector = 512 << shift）。
     pub sector_shift: u16,
     pub with_listfile: bool,
-    /// Include an `(attributes)` file with CRC32s.
+    /// 包含带 CRC32 的 `(attributes)` 文件。
     pub with_attributes: bool,
-    /// Write a hi-block table (v2+).
+    /// 写入 hi-block 表（v2+）。
     pub with_hi_block: bool,
-    /// Wrap in an `MPQ\x1B` user-data header.
+    /// 用 `MPQ\x1B` user-data 头包装。
     pub userdata: bool,
-    /// Garbage bytes in front of the archive (tests the header scan).
+    /// 归档前部的垃圾字节（测试头部扫描）。
     pub prefix_garbage: usize,
-    /// Write 0 into the archive size field (tolerance test).
+    /// 在归档大小字段写入 0（容错测试）。
     pub zero_archive_size: bool,
-    /// v4: chunk size for per-file raw-data MD5s written behind every
-    /// block (0 = none).
+    /// v4：每个 block 后面写入的每文件 raw-data MD5 的 chunk 大小
+    /// （0 = 不写）。
     pub raw_chunk_size: u32,
     pub files: Vec<FileSpec>,
 }
@@ -146,7 +145,7 @@ fn next_pow2(n: usize) -> usize {
     p
 }
 
-/// Build the raw bytes of a complete archive.
+/// 构建完整归档的原始字节。
 pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
     let mut files = spec.files.clone();
     if spec.with_listfile {
@@ -156,11 +155,11 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
         );
     }
     if spec.with_attributes {
-        // The CRC array covers every block entry: real files, the
-        // (listfile), and 0 for the (attributes) file itself.
+        // CRC 数组覆盖每个 block 条目：真实文件、(listfile)，
+        // 以及 (attributes) 文件自身对应的 0。
         let mut attr = Vec::new();
         put_u32(&mut attr, 100);
-        put_u32(&mut attr, 1); // CRC32 flag
+        put_u32(&mut attr, 1); // CRC32 标志
         for f in &spec.files {
             put_u32(&mut attr, crc32(&f.data));
         }
@@ -169,7 +168,7 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
             put_u32(&mut attr, crc32(names.join("
 ").as_bytes()));
         }
-        put_u32(&mut attr, 0); // (attributes) itself
+        put_u32(&mut attr, 0); // (attributes) 文件自身
         files.push(FileSpec::text("(attributes)", "").raw_payload_compressed(attr));
     }
 
@@ -180,8 +179,8 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
         2 => 0x44,
         _ => 0xD0, // v4
     };
-    // v4 raw-chunk MD5s: ceil(stored / chunk) digests behind every block,
-    // not counted in the block table's csize (StormLib WriteMemDataMD5).
+    // v4 raw-chunk MD5：每个 block 后跟 ceil(stored / chunk) 个摘要，
+    // 不计入 block 表的 csize（StormLib WriteMemDataMD5）。
     let chunk_overhead = |stored: usize| {
         if spec.raw_chunk_size > 0 {
             stored.div_ceil(spec.raw_chunk_size as usize) * 16
@@ -190,8 +189,8 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
         }
     };
 
-    // Sizes never depend on the key (encryption preserves length), so a
-    // measuring pass with a dummy position yields exact lengths.
+    // 大小从不依赖密钥（加密不改变长度），因此用占位位置做一次
+    // 测量即可得到精确长度。
     let measured: Vec<usize> = files
         .iter()
         .map(|f| {
@@ -200,8 +199,8 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
         })
         .collect();
 
-    // Assign block positions (needed for key-v2 derivation); pad each
-    // block to dword alignment like real archives do.
+    // 分配各 block 的位置（key-v2 派生需要）；像真实归档一样把
+    // 每个 block 填充到 dword 对齐。
     let mut cursor = header_size as u64;
     let mut block_positions = Vec::with_capacity(files.len());
     for len in &measured {
@@ -210,7 +209,7 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
         cursor = (cursor + 3) & !3;
     }
 
-    // Encode file blocks.
+    // 编码各文件 block。
     let mut blocks: Vec<(u64, u32, u32, u32)> = Vec::with_capacity(files.len());
     let mut block_data: Vec<Vec<u8>> = Vec::with_capacity(files.len());
     for (i, f) in files.iter().enumerate() {
@@ -236,7 +235,7 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
         blocks.push((pos, csize, fsize, flags));
     }
 
-    // Hash table.
+    // 哈希表。
     let hash_size = next_pow2(files.len() * 2);
     let mut hash_entries = vec![[0u8; 16]; hash_size];
     for e in hash_entries.iter_mut() {
@@ -257,8 +256,8 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
         let e = &mut hash_entries[slot];
         e[0..4].copy_from_slice(&hash_string(&f.name, HASH_NAME_A).to_le_bytes());
         e[4..8].copy_from_slice(&hash_string(&f.name, HASH_NAME_B).to_le_bytes());
-        e[8] = 0; // locale lo
-        e[9] = 0; // locale hi
+        e[8] = 0; // locale 低字节
+        e[9] = 0; // locale 高字节
         e[10] = 0; // platform
         e[11] = 0; // flags
         e[12..16].copy_from_slice(&(i as u32).to_le_bytes());
@@ -266,7 +265,7 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
     let mut hash_table: Vec<u8> = hash_entries.concat();
     encrypt_bytes(&mut hash_table, KEY_HASH_TABLE);
 
-    // Block table.
+    // 块表。
     let mut block_table = Vec::new();
     for (pos, csize, fsize, flags) in &blocks {
         put_u32(&mut block_table, *pos as u32);
@@ -289,7 +288,7 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
     };
     let archive_size = cursor;
 
-    // Header.
+    // 头部。
     let mut header = Vec::new();
     header.extend_from_slice(b"MPQ\x1a");
     put_u32(&mut header, header_size);
@@ -306,29 +305,29 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
     put_u32(&mut header, blocks.len() as u32);
     if spec.version >= 1 {
         put_u64(&mut header, hi_pos.unwrap_or(0));
-        put_u16(&mut header, 0); // hash table pos hi
-        put_u16(&mut header, 0); // block table pos hi
+        put_u16(&mut header, 0); // 哈希表位置高 16 位
+        put_u16(&mut header, 0); // 块表位置高 16 位
     }
     if spec.version >= 2 {
         put_u64(&mut header, archive_size);
-        put_u64(&mut header, 0); // bet table pos
-        put_u64(&mut header, 0); // het table pos
+        put_u64(&mut header, 0); // BET 表位置
+        put_u64(&mut header, 0); // HET 表位置
     }
     if spec.version >= 3 {
-        // v4-only: explicit stored table sizes + MD5s over the stored
-        // (encrypted) bytes, then the header's own MD5 over 0x00..0xC0.
-        put_u64(&mut header, hash_table.len() as u64); // hash size64
-        put_u64(&mut header, block_table.len() as u64); // block size64
+        // 仅 v4：显式的表存储大小 + 对存储（加密后）字节的 MD5，
+        // 然后是头部自身对 0x00..0xC0 的 MD5。
+        put_u64(&mut header, hash_table.len() as u64); // 哈希表 size64
+        put_u64(&mut header, block_table.len() as u64); // 块表 size64
         put_u64(
             &mut header,
             hi_pos.map(|_| blocks.len() as u64 * 2).unwrap_or(0),
         );
-        put_u64(&mut header, 0); // het size64
-        put_u64(&mut header, 0); // bet size64
+        put_u64(&mut header, 0); // HET size64
+        put_u64(&mut header, 0); // BET size64
         put_u32(&mut header, spec.raw_chunk_size);
         header.extend_from_slice(&md5_of(&block_table)); // 0x70 MD5_BlockTable
         header.extend_from_slice(&md5_of(&hash_table)); // 0x80 MD5_HashTable
-        let hi_bytes = vec![0u8; blocks.len() * 2]; // hi words are all zero
+        let hi_bytes = vec![0u8; blocks.len() * 2]; // hi 字全为零
         if hi_pos.is_some() {
             header.extend_from_slice(&md5_of(&hi_bytes)); // 0x90 MD5_HiBlock
         } else {
@@ -336,33 +335,32 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
         }
         header.extend_from_slice(&[0u8; 16]); // 0xA0 MD5_BetTable
         header.extend_from_slice(&[0u8; 16]); // 0xB0 MD5_HetTable
-        header.extend_from_slice(&md5_of(&header[..0xC0])); // 0xC0 header MD5
+        header.extend_from_slice(&md5_of(&header[..0xC0])); // 0xC0 头部 MD5
     }
     debug_assert_eq!(header.len(), header_size as usize);
 
     let mut out = Vec::new();
-    // Garbage prefix: keep the archive 0x200-aligned like embedded archives.
+    // 垃圾前缀：像内嵌归档一样保持归档 0x200 对齐。
     while out.len() < spec.prefix_garbage {
         out.push(0xEE);
     }
     if spec.userdata {
         out.extend_from_slice(b"MPQ\x1b");
-        put_u32(&mut out, 0x10); // user data size
-        put_u32(&mut out, 0); // header offset, patched below
-        put_u32(&mut out, 0x10); // user data header size
+        put_u32(&mut out, 0x10); // user data 大小
+        put_u32(&mut out, 0); // 头部偏移，稍后修补
+        put_u32(&mut out, 0x10); // user data 头大小
         let header_off = out.len() as u32;
         out[8..12].copy_from_slice(&header_off.to_le_bytes());
     }
     let archive_start = out.len();
-    // Fix up archive-relative offsets to be relative to the archive start:
-    // they already are (cursor started at header_size), and the header goes
-    // down at archive_start, so no adjustment needed.
+    // 把归档相对偏移修正为相对归档起点：它们本来就是（cursor 从
+    // header_size 起步），而头部就写在 archive_start 处，因此无需调整。
     out.extend_from_slice(&header);
     for (i, data) in block_data.iter().enumerate() {
         out.extend_from_slice(data);
         if spec.raw_chunk_size > 0 {
-            // Per-chunk MD5s directly behind the stored data (not part of
-            // csize), then the usual dword alignment padding.
+            // 每个 chunk 的 MD5 紧跟在存储数据之后（不计入 csize），
+            // 然后照常填充到 dword 对齐。
             let chunk = spec.raw_chunk_size as usize;
             for c in data.chunks(chunk) {
                 out.extend_from_slice(&md5_of(c));
@@ -383,8 +381,8 @@ pub fn build(spec: &ArchiveSpec) -> Vec<u8> {
 }
 
 impl FileSpec {
-    /// A file whose stored payload is already zlib-compressed content
-    /// (used for `(attributes)` etc.).
+    /// 存储负载已经是 zlib 压缩内容的文件
+    /// （用于 `(attributes)` 等）。
     fn raw_payload_compressed(mut self, payload: Vec<u8>) -> Self {
         self.compress = true;
         self.raw_payload = Some(payload);
@@ -392,7 +390,7 @@ impl FileSpec {
     }
 }
 
-/// Encode one file's stored block.
+/// 编码单个文件的存储 block。
 fn encode_file(f: &FileSpec, block_pos: u64, sector_size: u32) -> (Vec<u8>, u32, u32, u32) {
     if let Some(raw) = &f.raw_payload {
         let z = zlib(raw);
@@ -439,8 +437,8 @@ fn encode_file(f: &FileSpec, block_pos: u64, sector_size: u32) -> (Vec<u8>, u32,
     }
 
     if !f.compress {
-        // Stored sectors at fixed offsets, no sector table; each sector
-        // is encrypted with its own key (key + index).
+        // sector 按固定偏移存储，无 sector 表；每个 sector 用各自的
+        // 密钥（key + index）加密。
         let mut payload = Vec::with_capacity(f.data.len());
         for (i, chunk) in f.data.chunks(sector_size as usize).enumerate() {
             let mut c = chunk.to_vec();
@@ -453,7 +451,7 @@ fn encode_file(f: &FileSpec, block_pos: u64, sector_size: u32) -> (Vec<u8>, u32,
         return (payload, csize, fsize, 0);
     }
 
-    // Compressed sector layout.
+    // 压缩 sector 布局。
     let nsec = fsize.div_ceil(sector_size).max(1) as usize;
     let mut sectors: Vec<Vec<u8>> = Vec::with_capacity(nsec);
     let mut crcs: Vec<u32> = Vec::with_capacity(nsec);
@@ -466,7 +464,7 @@ fn encode_file(f: &FileSpec, block_pos: u64, sector_size: u32) -> (Vec<u8>, u32,
         } else {
             chunk.to_vec()
         };
-        // Pad encrypted sectors to dword alignment (offsets include pad).
+        // 加密后的 sector 填充到 dword 对齐（偏移量包含填充）。
         let mut sector = sector;
         if f.encrypt && sector.len() % 4 != 0 {
             let pad_to = sector.len() + 4 - sector.len() % 4;
@@ -475,7 +473,7 @@ fn encode_file(f: &FileSpec, block_pos: u64, sector_size: u32) -> (Vec<u8>, u32,
         crcs.push(crc32(chunk));
         sectors.push(sector);
     }
-    let table_len = (nsec + 1) * 4 + nsec * 4; // offsets + CRCs
+    let table_len = (nsec + 1) * 4 + nsec * 4; // 偏移量 + CRC
     let mut offsets: Vec<u32> = Vec::with_capacity(nsec + 1);
     offsets.push(table_len as u32);
     let mut acc = table_len as u32;
@@ -507,7 +505,7 @@ fn encode_file(f: &FileSpec, block_pos: u64, sector_size: u32) -> (Vec<u8>, u32,
 }
 
 // ---------------------------------------------------------------------------
-// v3 HET + BET archive builder (no classic hash/block tables)
+// v3 HET + BET 归档构建器（无经典 hash/block 表）
 
 use mpq::file_name_hash;
 
@@ -533,19 +531,19 @@ fn set_bits(buf: &mut [u8], offset: usize, bits: usize, value: u64) {
     }
 }
 
-/// Build a v3 archive whose only name index is HET and whose only file
-/// table is BET (classic hash/block tables declared empty).
+/// 构建一个 v3 归档，其唯一名称索引是 HET，唯一文件表是 BET
+/// （经典 hash/block 表声明为空）。
 pub fn build_hetbet(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     build_hetbet_version(files, 2)
 }
 
-/// Same, with a v4 header (explicit HET/BET stored sizes + MD5s).
+/// 同上，但使用 v4 头部（显式的 HET/BET 存储大小 + MD5）。
 pub fn build_hetbet_v4(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     build_hetbet_version(files, 3)
 }
 
-/// [`build_hetbet`] plus a `(listfile)` entry naming the files — real v3
-/// archives carry one, so the names survive a classic-table rewrite.
+/// 在 [`build_hetbet`] 基础上追加一个列出各文件名的 `(listfile)` 条目 —
+/// 真实的 v3 归档带有它，这样名称能在经典表重写后保留下来。
 pub fn build_hetbet_with_listfile(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut all: Vec<(String, Vec<u8>)> = files.to_vec();
     let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
@@ -557,7 +555,7 @@ pub fn build_hetbet_version(files: &[(String, Vec<u8>)], version: u16) -> Vec<u8
     let sector_size = 4096u32;
     let header_size: u64 = if version >= 3 { 0xD0 } else { 0x44 };
 
-    // Encode all file blocks (uncompressed, stored sectors).
+    // 编码所有文件 block（未压缩，sector 直接存储）。
     let mut cursor = header_size;
     let mut blocks = Vec::new();
     for (name, data) in files {
@@ -568,13 +566,13 @@ pub fn build_hetbet_version(files: &[(String, Vec<u8>)], version: u16) -> Vec<u8
         blocks.push((name, data, pos, data.len() as u32, flags));
     }
 
-    // --- BET table ---
+    // --- BET 表 ---
     let n = blocks.len();
     let max_pos = blocks.iter().map(|b| b.2).max().unwrap_or(0);
     let max_size = blocks.iter().map(|b| b.1.len() as u64).max().unwrap_or(0);
     let bc_pos = bits_needed(max_pos);
     let bc_size = bits_needed(max_size);
-    let bc_csize = bits_needed(max_size); // stored: csize == fsize
+    let bc_csize = bits_needed(max_size); // 存储时 csize == fsize
     let mut flag_list: Vec<u32> = Vec::new();
     for b in &blocks {
         if !flag_list.contains(&b.4) {
@@ -590,24 +588,24 @@ pub fn build_hetbet_version(files: &[(String, Vec<u8>)], version: u16) -> Vec<u8
     let mut bet_body = Vec::new();
     let table_size = 76 + flag_list.len() * 4 + records_bytes + hash_bytes;
     put_u32(&mut bet_body, table_size as u32); // +0x0C dwTableSize
-    put_u32(&mut bet_body, n as u32); // entry count
+    put_u32(&mut bet_body, n as u32); // 条目数
     put_u32(&mut bet_body, 0); // unknown08
-    put_u32(&mut bet_body, entry_size as u32); // table entry size (bits)
-    put_u32(&mut bet_body, 0); // bit index file pos
-    put_u32(&mut bet_body, bc_pos); // bit index file size
-    put_u32(&mut bet_body, bc_pos + bc_size); // bit index cmp size
-    put_u32(&mut bet_body, bc_pos + bc_size + bc_csize); // bit index flag
-    put_u32(&mut bet_body, bc_pos + bc_size + bc_csize + bc_flag); // bit index unknown
-    put_u32(&mut bet_body, bc_pos); // bit count file pos
-    put_u32(&mut bet_body, bc_size); // bit count file size
-    put_u32(&mut bet_body, bc_csize); // bit count cmp size
-    put_u32(&mut bet_body, bc_flag); // bit count flag
-    put_u32(&mut bet_body, 0); // bit count unknown
-    put_u32(&mut bet_body, hash_bits as u32); // bit total name hash2
-    put_u32(&mut bet_body, 0); // bit extra name hash2
-    put_u32(&mut bet_body, hash_bits as u32); // bit count name hash2
-    put_u32(&mut bet_body, hash_bytes as u32); // name hash array size
-    put_u32(&mut bet_body, flag_list.len() as u32); // flag count
+    put_u32(&mut bet_body, entry_size as u32); // 表条目大小（位）
+    put_u32(&mut bet_body, 0); // 文件位置的位偏移
+    put_u32(&mut bet_body, bc_pos); // 文件大小的位偏移
+    put_u32(&mut bet_body, bc_pos + bc_size); // 压缩大小的位偏移
+    put_u32(&mut bet_body, bc_pos + bc_size + bc_csize); // 标志的位偏移
+    put_u32(&mut bet_body, bc_pos + bc_size + bc_csize + bc_flag); // 未知字段的位偏移
+    put_u32(&mut bet_body, bc_pos); // 文件位置的位数
+    put_u32(&mut bet_body, bc_size); // 文件大小的位数
+    put_u32(&mut bet_body, bc_csize); // 压缩大小的位数
+    put_u32(&mut bet_body, bc_flag); // 标志的位数
+    put_u32(&mut bet_body, 0); // 未知字段的位数
+    put_u32(&mut bet_body, hash_bits as u32); // 名称 hash2 的总位数
+    put_u32(&mut bet_body, 0); // 名称 hash2 的额外位数
+    put_u32(&mut bet_body, hash_bits as u32); // 名称 hash2 的位数
+    put_u32(&mut bet_body, hash_bytes as u32); // 名称 hash 数组大小
+    put_u32(&mut bet_body, flag_list.len() as u32); // 标志数量
     debug_assert_eq!(bet_body.len(), 76);
     for f in &flag_list {
         put_u32(&mut bet_body, *f);
@@ -643,7 +641,7 @@ pub fn build_hetbet_version(files: &[(String, Vec<u8>)], version: u16) -> Vec<u8
     bet.extend_from_slice(&bet_body);
     encrypt_bytes(&mut bet[12..], KEY_BLOCK_TABLE);
 
-    // --- HET table ---
+    // --- HET 表 ---
     let total_count = next_pow2(n * 4 / 3);
     let index_bits = bits_needed(n as u64) as usize;
     let index_bytes = (total_count * index_bits).div_ceil(8);
@@ -662,13 +660,13 @@ pub fn build_hetbet_version(files: &[(String, Vec<u8>)], version: u16) -> Vec<u8
     let het_table_size = 32 + total_count + index_bytes;
     let mut het_body = Vec::new();
     put_u32(&mut het_body, het_table_size as u32);
-    put_u32(&mut het_body, n as u32); // entry count
-    put_u32(&mut het_body, total_count as u32); // total count
-    put_u32(&mut het_body, 64); // name hash bit size
-    put_u32(&mut het_body, index_bits as u32); // index size total
-    put_u32(&mut het_body, 0); // index size extra
-    put_u32(&mut het_body, index_bits as u32); // index size
-    put_u32(&mut het_body, index_bytes as u32); // index table size
+    put_u32(&mut het_body, n as u32); // 条目数
+    put_u32(&mut het_body, total_count as u32); // 总槽位数
+    put_u32(&mut het_body, 64); // 名称 hash 位大小
+    put_u32(&mut het_body, index_bits as u32); // 索引总位数
+    put_u32(&mut het_body, 0); // 索引额外位数
+    put_u32(&mut het_body, index_bits as u32); // 索引位数
+    put_u32(&mut het_body, index_bytes as u32); // 索引表大小
     het_body.extend_from_slice(&probe);
     het_body.extend_from_slice(&indexes);
     let mut het = Vec::new();
@@ -678,7 +676,7 @@ pub fn build_hetbet_version(files: &[(String, Vec<u8>)], version: u16) -> Vec<u8
     het.extend_from_slice(&het_body);
     encrypt_bytes(&mut het[12..], KEY_HASH_TABLE);
 
-    // --- assemble (canonical v3 order: HET, then BET) ---
+    // --- 组装（v3 规范顺序：先 HET，后 BET） ---
     let het_pos = cursor;
     cursor += het.len() as u64;
     let bet_pos = cursor;
@@ -690,31 +688,31 @@ pub fn build_hetbet_version(files: &[(String, Vec<u8>)], version: u16) -> Vec<u8
     put_u32(&mut out, header_size as u32);
     put_u32(&mut out, archive_size as u32);
     put_u16(&mut out, version);
-    put_u16(&mut out, 3); // 4096 sectors
-    put_u32(&mut out, 0); // hash table pos
-    put_u32(&mut out, 0); // block table pos
-    put_u32(&mut out, 0); // hash table size
-    put_u32(&mut out, 0); // block table size
-    put_u64(&mut out, 0); // hi block pos
+    put_u16(&mut out, 3); // 4096 字节的 sector
+    put_u32(&mut out, 0); // 哈希表位置
+    put_u32(&mut out, 0); // 块表位置
+    put_u32(&mut out, 0); // 哈希表大小
+    put_u32(&mut out, 0); // 块表大小
+    put_u64(&mut out, 0); // hi block 位置
     put_u16(&mut out, 0);
     put_u16(&mut out, 0);
-    put_u64(&mut out, archive_size); // archive size 64
-    put_u64(&mut out, bet_pos); // bet pos
-    put_u64(&mut out, het_pos); // het pos
+    put_u64(&mut out, archive_size); // 归档大小（64 位）
+    put_u64(&mut out, bet_pos); // BET 位置
+    put_u64(&mut out, het_pos); // HET 位置
     if version >= 3 {
-        // v4-only: stored sizes + MD5s for the (only) tables present.
-        put_u64(&mut out, 0); // hash size64
-        put_u64(&mut out, 0); // block size64
+        // 仅 v4：为（仅有的）存在的表写入存储大小 + MD5。
+        put_u64(&mut out, 0); // 哈希表 size64
+        put_u64(&mut out, 0); // 块表 size64
         put_u64(&mut out, 0); // hi-block size64
-        put_u64(&mut out, het.len() as u64); // het size64
-        put_u64(&mut out, bet.len() as u64); // bet size64
-        put_u32(&mut out, 0); // raw chunk size
+        put_u64(&mut out, het.len() as u64); // HET size64
+        put_u64(&mut out, bet.len() as u64); // BET size64
+        put_u32(&mut out, 0); // raw chunk 大小
         out.extend_from_slice(&[0u8; 16]); // MD5_BlockTable
         out.extend_from_slice(&[0u8; 16]); // MD5_HashTable
         out.extend_from_slice(&[0u8; 16]); // MD5_HiBlockTable
         out.extend_from_slice(&md5_of(&bet)); // MD5_BetTable
         out.extend_from_slice(&md5_of(&het)); // MD5_HetTable
-        out.extend_from_slice(&md5_of(&out[..0xC0])); // header MD5
+        out.extend_from_slice(&md5_of(&out[..0xC0])); // 头部 MD5
     }
     debug_assert_eq!(out.len(), header_size as usize);
     for (_, data, _, _, _) in &blocks {

@@ -1,18 +1,18 @@
-//! Shared helpers used by both the CLI and the GUI.
+//! CLI 与 GUI 共用的辅助函数。
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use mpq::{Archive, FileEntry};
 
-/// Result of a batch extraction.
+/// 批量提取的结果。
 pub struct ExtractResult {
     pub ok: usize,
     pub failed: usize,
     pub messages: Vec<String>,
 }
 
-/// Extract the given entries into `out_dir`, mirroring in-archive paths.
+/// 将给定条目提取到 `out_dir`，保持与归档内一致的路径结构。
 pub fn extract_entries<R: Read + std::io::Seek>(
     archive: &Archive<R>,
     entries: &[FileEntry],
@@ -69,27 +69,29 @@ pub fn extract_entries<R: Read + std::io::Seek>(
     result
 }
 
-/// Join an in-archive name onto the output dir, refusing path escapes.
+/// 将归档内的名称拼接到输出目录上，拒绝路径逃逸。
 pub fn safe_join(base: &Path, name: &str) -> PathBuf {
     let mut path = base.to_path_buf();
     let cleaned = name.replace('/', "\\");
     for part in cleaned.split('\\') {
         if part.is_empty() || part == "." || part == ".." {
-            continue; // never escape the output directory
+            continue; // 绝不逃出输出目录
         }
         path.push(part);
     }
     path
 }
 
-/// Short flag string for list views: E=exists K=encrypted C=compressed
-/// 1=single unit #=sector CRC P=patch.
+/// 列表视图用的短标志串：E=存在 K=已加密 A=密码 AEAD
+/// C=已压缩 1=单一单元 #=sector CRC P=补丁。
 pub fn flag_summary(flags: u32) -> String {
     let mut s = String::new();
     if flags & mpq::FILE_EXISTS != 0 {
         s.push('E');
     }
-    if flags & mpq::FILE_ENCRYPTED != 0 {
+    if flags & mpq::FILE_PASSWORD_AEAD != 0 {
+        s.push('A');
+    } else if flags & mpq::FILE_ENCRYPTED != 0 {
         s.push('K');
     }
     if flags & (mpq::FILE_COMPRESS | mpq::FILE_IMPLODE) != 0 {
@@ -107,14 +109,14 @@ pub fn flag_summary(flags: u32) -> String {
     s
 }
 
-/// Load a whole file into memory.
+/// 将整个文件载入内存。
 pub fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     std::fs::File::open(path)?.read_to_end(&mut buf)?;
     Ok(buf)
 }
 
-/// Default output name for a repaired archive: `<stem>.fixed.<ext>`.
+/// 修复后归档的默认输出名称：`<stem>.fixed.<ext>`。
 pub fn repaired_path(path: &Path) -> PathBuf {
     let mut p = path.to_path_buf();
     let ext = p
@@ -129,36 +131,34 @@ pub fn repaired_path(path: &Path) -> PathBuf {
     p
 }
 
-// -- virtual directory tree ------------------------------------------------
+// -- 虚拟目录树 ------------------------------------------------
 
-/// Virtual folder that collects unnamed entries (no listfile names for them).
+/// 收集未命名条目的虚拟文件夹（它们没有 listfile 名称）。
 pub const UNNAMED_DIR: &str = "(未命名)";
-/// Virtual folder that collects MPQ-internal metadata files.
+/// 收集 MPQ 内部元数据文件的虚拟文件夹。
 pub const SYSTEM_DIR: &str = "(系统文件)";
 
-/// MPQ has no real directories — file names are flat paths with `\`
-/// separators. This tree synthesizes the folder structure a file manager
-/// would show, merging folders case-insensitively (MPQ name hashing is
-/// case-insensitive too).
+/// MPQ 没有真正的目录——文件名就是以 `\` 为分隔符的扁平路径。
+/// 这棵树合成出文件管理器会呈现的文件夹结构，文件夹按不区分
+/// 大小写的方式合并（MPQ 的名称哈希同样不区分大小写）。
 #[derive(Default)]
 pub struct TreeNode {
-    /// Display name of this folder segment ("" for the root).
+    /// 此文件夹段的显示名（根为 ""）。
     pub name: String,
-    /// Sub-folders, sorted case-insensitively by name.
+    /// 子文件夹，按名称不区分大小写排序。
     pub dirs: Vec<TreeNode>,
-    /// Files directly inside this folder, sorted case-insensitively by name.
+    /// 直接位于此文件夹内的文件，按名称不区分大小写排序。
     pub files: Vec<FileEntry>,
-    /// Number of files in this folder and everything below it.
+    /// 此文件夹及其下所有层级的文件数量。
     pub file_count: usize,
-    /// Sum of uncompressed sizes over `file_count` files.
+    /// `file_count` 个文件的未压缩大小之和。
     pub total_size: u64,
-    /// Sum of compressed sizes over `file_count` files.
+    /// `file_count` 个文件的压缩后大小之和。
     pub total_csize: u64,
 }
 
-/// Split an in-archive name into path segments, accepting both `\` and `/`
-/// separators and dropping empty / `.` / `..` parts (same normalization as
-/// [`safe_join`]).
+/// 将归档内的名称拆分为路径段，接受 `\` 和 `/` 两种分隔符，
+/// 并丢弃空段 / `.` / `..`（与 [`safe_join`] 相同的归一化规则）。
 pub fn split_path(name: &str) -> Vec<String> {
     name.replace('/', "\\")
         .split('\\')
@@ -167,14 +167,14 @@ pub fn split_path(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Build the virtual tree over all entries. Unnamed entries land in a
-/// [`UNNAMED_DIR`] folder, MPQ-internal files in a [`SYSTEM_DIR`] folder.
+/// 在全部条目之上构建虚拟树。未命名条目归入 [`UNNAMED_DIR`]
+/// 文件夹，MPQ 内部文件归入 [`SYSTEM_DIR`] 文件夹。
 pub fn build_tree(entries: &[FileEntry]) -> TreeNode {
     let mut root = TreeNode::default();
 
     for entry in entries {
-        // Path segments of the *folder* containing the file: the last
-        // segment of a regular name is the file name itself, not a folder.
+        // 文件所在的*文件夹*的路径段：常规名称的最后一段
+        // 是文件名本身，而不是文件夹。
         let dir_segments: Vec<String> = match &entry.name {
             Some(name) if mpq::SPECIAL_FILES.contains(&name.as_str()) => {
                 vec![SYSTEM_DIR.to_string()]
@@ -215,7 +215,7 @@ fn insert(node: &mut TreeNode, segments: &[String], entry: FileEntry) {
     }
 }
 
-/// Sort children and aggregate sizes bottom-up.
+/// 对子节点排序并自底向上聚合大小。
 fn finalize(node: &mut TreeNode) {
     for dir in &mut node.dirs {
         finalize(dir);
@@ -235,7 +235,7 @@ fn finalize(node: &mut TreeNode) {
     }
 }
 
-/// Resolve a folder path inside the tree (case-insensitively).
+/// 在树中解析文件夹路径（不区分大小写）。
 pub fn node_at<'a>(root: &'a TreeNode, path: &[String]) -> Option<&'a TreeNode> {
     let mut node = root;
     for seg in path {
@@ -245,7 +245,7 @@ pub fn node_at<'a>(root: &'a TreeNode, path: &[String]) -> Option<&'a TreeNode> 
     Some(node)
 }
 
-/// Every file entry inside `node` and its sub-folders.
+/// `node` 及其子文件夹内的所有文件条目。
 pub fn collect_files(node: &TreeNode) -> Vec<FileEntry> {
     let mut out = node.files.clone();
     for dir in &node.dirs {
@@ -254,8 +254,8 @@ pub fn collect_files(node: &TreeNode) -> Vec<FileEntry> {
     out
 }
 
-/// Selection keys of every file inside `node` and its sub-folders — like
-/// [`collect_files`] but without cloning the (path-heavy) entries.
+/// `node` 及其子文件夹内所有文件的选择键——与 [`collect_files`]
+/// 类似，但不克隆（路径很占空间的）条目。
 pub fn collect_keys(node: &TreeNode) -> Vec<(mpq::TableSource, usize)> {
     let mut out: Vec<_> = node
         .files
@@ -268,7 +268,7 @@ pub fn collect_keys(node: &TreeNode) -> Vec<(mpq::TableSource, usize)> {
     out
 }
 
-/// Entries whose full in-archive path contains `needle` (case-insensitive).
+/// 归档内完整路径包含 `needle` 的条目（不区分大小写）。
 pub fn search_tree(root: &TreeNode, needle: &str) -> Vec<FileEntry> {
     fn walk(node: &TreeNode, prefix: &str, needle: &str, out: &mut Vec<FileEntry>) {
         for dir in &node.dirs {
@@ -295,8 +295,7 @@ pub fn search_tree(root: &TreeNode, needle: &str) -> Vec<FileEntry> {
     out
 }
 
-/// Whether any file below `node` matches the search needle; drives the
-/// filtered tree view.
+/// `node` 之下是否有任何文件匹配搜索词；用于驱动过滤后的树视图。
 pub fn subtree_matches(node: &TreeNode, needle: &str) -> bool {
     fn walk(node: &TreeNode, prefix: &str, needle: &str) -> bool {
         node.files.iter().any(|f| {
@@ -318,11 +317,11 @@ pub fn subtree_matches(node: &TreeNode, needle: &str) -> bool {
     walk(node, "", needle.to_lowercase().as_str())
 }
 
-// -- modification times from (attributes) -----------------------------------
+// -- 来自 (attributes) 的修改时间 -----------------------------------
 
-/// `block_index -> file_time` for archives carrying a `(attributes)` table
-/// with FILETIME data. Indices line up with the table `entries()` walked
-/// (classic block table, or BET records when there is no classic one).
+/// 携带含 FILETIME 数据的 `(attributes)` 表的归档所对应的
+/// `block_index -> file_time` 映射。索引与 `entries()` 遍历的表
+/// 一一对应（经典块表，或没有经典块表时的 BET 记录）。
 pub fn file_time_map<R: Read + std::io::Seek>(
     archive: &mpq::Archive<R>,
 ) -> std::collections::HashMap<usize, u64> {
@@ -337,10 +336,10 @@ pub fn file_time_map<R: Read + std::io::Seek>(
     map
 }
 
-/// Format a Windows FILETIME (100 ns ticks since 1601-01-01, UTC) as
-/// `YYYY-MM-DD HH:MM` in UTC.
+/// 将 Windows FILETIME（自 1601-01-01 UTC 起的 100 纳秒刻度数）
+/// 格式化为 UTC 时区的 `YYYY-MM-DD HH:MM`。
 pub fn format_filetime(ft: u64) -> String {
-    // Seconds between 1601-01-01 and 1970-01-01.
+    // 1601-01-01 与 1970-01-01 之间的秒数。
     const EPOCH_DIFF_100NS: u128 = 116_444_736_000_000_000;
     if ft < EPOCH_DIFF_100NS as u64 {
         return String::new();
@@ -356,7 +355,7 @@ pub fn format_filetime(ft: u64) -> String {
     )
 }
 
-/// Howard Hinnant's `civil_from_days`: days since 1970-01-01 -> (y, m, d).
+/// Howard Hinnant 的 `civil_from_days`：自 1970-01-01 起的天数 -> (y, m, d)。
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
@@ -404,13 +403,13 @@ mod tests {
         assert_eq!(tree.total_size, 42);
         assert_eq!(tree.total_csize, 25);
 
-        // `data` merged its case variants into one folder.
+        // `data` 把它的大小写变体合并成了一个文件夹。
         let data = tree.dirs.iter().find(|d| d.name == "data").unwrap();
         assert_eq!(data.dirs.len(), 1);
         assert_eq!(data.dirs[0].files.len(), 2);
         assert_eq!(data.files.len(), 0);
 
-        // The special file went to the system folder.
+        // 特殊文件进入了系统文件夹。
         let sys = tree
             .dirs
             .iter()
@@ -419,7 +418,7 @@ mod tests {
         assert_eq!(sys.files.len(), 1);
         assert_eq!(sys.files[0].name.as_deref(), Some("(listfile)"));
 
-        assert_eq!(tree.files.len(), 1); // top.txt at root
+        assert_eq!(tree.files.len(), 1); // top.txt 位于根
     }
 
     #[test]
@@ -454,11 +453,11 @@ mod tests {
     #[test]
     fn filetime_formatting() {
         assert_eq!(format_filetime(0), "");
-        // Unix epoch: 1970-01-01 00:00 UTC.
+        // Unix 纪元：1970-01-01 00:00 UTC。
         assert_eq!(format_filetime(116_444_736_000_000_000), "1970-01-01 00:00");
         // 2023-01-01 00:00 UTC.
         assert_eq!(format_filetime(133_170_048_000_000_000), "2023-01-01 00:00");
-        // 2000-02-29 12:34 UTC (leap day).
+        // 2000-02-29 12:34 UTC（闰日）。
         assert_eq!(format_filetime(125_963_012_400_000_000), "2000-02-29 12:34");
     }
 }

@@ -1,11 +1,10 @@
-//! Storm-style encryption, hashing and name handling.
+//! Storm 风格的加密、哈希与名称处理。
 //!
-//! Everything in this module mirrors the algorithms used by Blizzard's
-//! `storm.dll` / StormLib: the 0x500-entry crypt table, the four hash
-//! functions used for the classic hash table, and the symmetric stream
-//! cipher applied to tables, sector offset tables and file data.
+//! 本模块中的一切都复刻了暴雪 `storm.dll` / StormLib 所用的算法：
+//! 0x500 项的 crypt table、经典 hash table 所用的四个哈希函数，
+//! 以及施加于各表、sector 偏移表和文件数据的对称流密码。
 
-/// Build the 0x500-entry storm crypt table (compile-time via `const`).
+/// 构建 0x500 项的 storm crypt table（经 `const` 在编译期完成）。
 const fn build_crypt_table() -> [u32; 0x500] {
     let mut table = [0u32; 0x500];
     let mut seed: u32 = 0x0010_0001;
@@ -26,27 +25,27 @@ const fn build_crypt_table() -> [u32; 0x500] {
     table
 }
 
-/// The storm crypt table, generated at compile time.
+/// storm crypt table，编译期生成。
 pub static CRYPT_TABLE: [u32; 0x500] = build_crypt_table();
 
-/// Hash type for the classic hash table index (`hash % table_size`).
+/// 经典 hash table 索引使用的哈希类型（`hash % table_size`）。
 pub const HASH_TABLE_INDEX: u32 = 0x000;
-/// Hash type producing `name1` of a hash table entry.
+/// 生成 hash table 条目 `name1` 的哈希类型。
 pub const HASH_NAME_A: u32 = 0x100;
-/// Hash type producing `name2` of a hash table entry.
+/// 生成 hash table 条目 `name2` 的哈希类型。
 pub const HASH_NAME_B: u32 = 0x200;
-/// Hash type producing the per-file encryption key.
+/// 生成文件级加密密钥的哈希类型。
 pub const HASH_FILE_KEY: u32 = 0x300;
-/// Offset of the "key2 mix" sub-table used by the stream cipher.
+/// 流密码所用 "key2 mix" 子表的偏移。
 pub const HASH_KEY2_MIX: u32 = 0x400;
 
-/// Encryption key of the classic hash table: `HashString("(hash table)", FILE_KEY)`.
+/// 经典 hash table 的加密密钥：`HashString("(hash table)", FILE_KEY)`。
 pub const KEY_HASH_TABLE: u32 = 0xC3AF_3770;
-/// Encryption key of the classic block table: `HashString("(block table)", FILE_KEY)`.
+/// 经典 block table 的加密密钥：`HashString("(block table)", FILE_KEY)`。
 pub const KEY_BLOCK_TABLE: u32 = 0xEC83_B3A3;
 
-/// Map a byte through the storm uppercase table: ASCII `a-z` to `A-Z`
-/// and `/` to `\`. Bytes >= 0x80 are passed through unchanged.
+/// 经 storm 大写映射表转换单个字节：ASCII `a-z` 映射为 `A-Z`，
+/// `/` 映射为 `\`。>= 0x80 的字节原样通过。
 #[inline]
 pub fn upper_byte(b: u8) -> u8 {
     match b {
@@ -56,8 +55,8 @@ pub fn upper_byte(b: u8) -> u8 {
     }
 }
 
-/// Map a byte through the storm lowercase table: ASCII `A-Z` to `a-z`
-/// and `/` to `\`. Used by the HET/BET name hash.
+/// 经 storm 小写映射表转换单个字节：ASCII `A-Z` 映射为 `a-z`，
+/// `/` 映射为 `\`。用于 HET/BET 名称哈希。
 #[inline]
 pub fn lower_byte(b: u8) -> u8 {
     match b {
@@ -67,16 +66,16 @@ pub fn lower_byte(b: u8) -> u8 {
     }
 }
 
-/// Normalize a file name the way the classic tables see it:
-/// ASCII-uppercased with `/` converted to `\`.
+/// 按经典表看待文件名的方式将其规范化：
+/// ASCII 大写化，并把 `/` 转换为 `\`。
 pub fn normalize_name(name: &str) -> Vec<u8> {
     name.bytes().map(upper_byte).collect()
 }
 
-/// Storm `HashString` over an already normalized byte string.
+/// 对已规范化的字节串执行 Storm `HashString`。
 ///
-/// `hash_type` is one of [`HASH_TABLE_INDEX`], [`HASH_NAME_A`],
-/// [`HASH_NAME_B`] or [`HASH_FILE_KEY`].
+/// `hash_type` 为 [`HASH_TABLE_INDEX`]、[`HASH_NAME_A`]、
+/// [`HASH_NAME_B`] 或 [`HASH_FILE_KEY`] 之一。
 pub fn hash_bytes(normalized: &[u8], hash_type: u32) -> u32 {
     let mut seed1: u32 = 0x7FED_7FED;
     let mut seed2: u32 = 0xEEEE_EEEE;
@@ -93,14 +92,14 @@ pub fn hash_bytes(normalized: &[u8], hash_type: u32) -> u32 {
     seed1
 }
 
-/// Storm `HashString` over a raw name (normalized internally).
+/// 对原始名称执行 Storm `HashString`（内部先规范化）。
 pub fn hash_string(name: &str, hash_type: u32) -> u32 {
     hash_bytes(&normalize_name(name), hash_type)
 }
 
-/// Decrypt `data` (little-endian u32 units) in place with the storm stream
-/// cipher. `data.len()` should be a multiple of 4; any trailing bytes are
-/// left untouched (real archives always align).
+/// 用 storm 流密码就地解密 `data`（以小端 u32 为单位）。
+/// `data.len()` 应为 4 的倍数；末尾不足的字节保持原样
+/// （真实归档总是对齐的）。
 pub fn decrypt_bytes(data: &mut [u8], key: u32) {
     let mut key1 = key;
     let mut key2: u32 = 0xEEEE_EEEE;
@@ -120,7 +119,7 @@ pub fn decrypt_bytes(data: &mut [u8], key: u32) {
     }
 }
 
-/// Encrypt `data` in place (inverse of [`decrypt_bytes`]).
+/// 就地加密 `data`（[`decrypt_bytes`] 的逆操作）。
 pub fn encrypt_bytes(data: &mut [u8], key: u32) {
     let mut key1 = key;
     let mut key2: u32 = 0xEEEE_EEEE;
@@ -140,15 +139,15 @@ pub fn encrypt_bytes(data: &mut [u8], key: u32) {
     }
 }
 
-/// Derive the per-file encryption key.
+/// 派生文件级加密密钥。
 ///
-/// * `name` – the full in-archive file name
-/// * `fix_key` – the block has the `KEY_V2`/`FIX_KEY` flag
-/// * `block_pos` – file block offset relative to the archive start
-/// * `file_size` – uncompressed file size
+/// * `name` – 归档内的完整文件名
+/// * `fix_key` – 块带有 `KEY_V2`/`FIX_KEY` 标志
+/// * `block_pos` – 文件块相对于归档起始处的偏移
+/// * `file_size` – 未压缩的文件大小
 ///
-/// The storm algorithm hashes only the base name (path stripped),
-/// and `(key + offset) ^ size` is applied for key-v2 files.
+/// storm 算法只对基础文件名（剥离路径后）做哈希，
+/// key-v2 文件再应用 `(key + offset) ^ size`。
 pub fn file_key(name: &str, fix_key: bool, block_pos: u64, file_size: u32) -> u32 {
     let plain = name.rsplit(['\\', '/']).next().unwrap_or(name);
     let mut key = hash_string(plain, HASH_FILE_KEY);
@@ -162,8 +161,8 @@ pub fn file_key(name: &str, fix_key: bool, block_pos: u64, file_size: u32) -> u3
 mod tests {
     use super::*;
 
-    /// The two table keys are documented constants in StormLib; hitting
-    /// them proves the crypt table + hash function are byte-exact.
+    /// 这两个表密钥是 StormLib 文档中记载的常量；命中它们即证明
+    /// crypt table 与哈希函数逐字节精确。
     #[test]
     fn hash_matches_stormlib_constants() {
         assert_eq!(hash_string("(hash table)", HASH_FILE_KEY), KEY_HASH_TABLE);

@@ -1,4 +1,4 @@
-//! Integration tests for archive creation and version conversion.
+//! 归档创建与版本转换的集成测试。
 
 mod common;
 
@@ -37,7 +37,7 @@ fn spec(version: u16) -> ArchiveSpec {
     }
 }
 
-/// Read every named user entry (MPQ internals excluded) into pairs.
+/// 将每个具名的用户条目（排除 MPQ 内部文件）读取为 (名称, 内容) 对。
 fn snapshot(archive: &Archive<Cursor<&[u8]>>) -> Vec<(String, Vec<u8>)> {
     archive
         .entries()
@@ -67,7 +67,7 @@ fn create_each_version_opens_empty() {
         assert!(!a.uses_het_bet());
         assert_eq!(a.sector_size(), 4096);
         if v == FormatVersion::V4 {
-            // The v4 checksums must be present and the header full-size.
+            // v4 校验和必须存在，且头部为完整大小。
             assert_eq!(a.header().header_size, 0xD0);
             assert_ne!(a.header().md5_header, [0u8; 16], "header MD5 written");
             assert_ne!(a.header().md5_hash_table, [0u8; 16]);
@@ -79,7 +79,7 @@ fn create_each_version_opens_empty() {
 #[test]
 fn create_normalizes_hash_size() {
     let bytes = create(&CreateOptions {
-        hash_table_size: 100, // not a power of two
+        hash_table_size: 100, // 不是 2 的幂
         ..Default::default()
     })
     .unwrap();
@@ -119,11 +119,11 @@ fn create_then_import_files() {
 
 #[test]
 fn convert_v3_to_each_version_preserves_content() {
-    let src = build(&spec(2)); // v3 source with (attributes)
+    let src = build(&spec(2)); // 带 (attributes) 的 v3 源
     let reference = snapshot(&open(&src).unwrap());
 
-    // A rewrite happens for every *different* target (same-version v3 is
-    // the documented no-op, covered by convert_same_version_is_noop).
+    // 每个*不同的*目标版本都会触发重写（同版本 v3 是文档规定的
+    // 无操作，由 convert_same_version_is_noop 覆盖）。
     for target in [FormatVersion::V1, FormatVersion::V2, FormatVersion::V4] {
         let out = convert(&src, target).unwrap();
         let a = open(&out.bytes).unwrap();
@@ -176,7 +176,7 @@ fn convert_preserves_userdata_wrapper() {
     let base = open(&src).unwrap().archive_offset() as usize;
 
     let out = convert(&src, FormatVersion::V3).unwrap();
-    // The bytes in front of the archive survive byte-for-byte.
+    // 归档之前的字节逐字节原样保留。
     assert_eq!(&out.bytes[..base], &src[..base]);
     let a = open(&out.bytes).unwrap();
     assert_eq!(a.version(), FormatVersion::V3);
@@ -192,8 +192,8 @@ fn convert_hetbet_with_listfile_to_classic() {
     ]);
     assert!(open(&src).unwrap().uses_het_bet());
 
-    // v3→v3 is the no-op case; every other target rewrites to classic
-    // tables with names anchored from the listfile.
+    // v3→v3 是无操作的情况；其他所有目标都会重写为经典表，
+    // 文件名从 listfile 重新锚定。
     for target in [FormatVersion::V1, FormatVersion::V2, FormatVersion::V4] {
         let out = convert(&src, target).unwrap();
         let a = open(&out.bytes).unwrap();
@@ -206,9 +206,8 @@ fn convert_hetbet_with_listfile_to_classic() {
 
 #[test]
 fn convert_hetbet_without_listfile_refuses_with_reason() {
-    // Pure HET/BET archive without a (listfile): the file names cannot be
-    // recovered, so a classic-table rewrite would orphan every file. The
-    // conversion must refuse and say why.
+    // 不带 (listfile) 的纯 HET/BET 归档：文件名无法恢复，
+    // 重写为经典表会让所有文件沦为孤儿。转换必须拒绝并说明原因。
     let src = build_hetbet(&[("a.txt".into(), b"AAA".to_vec())]);
     let err = convert(&src, FormatVersion::V1).unwrap_err();
     let msg = err.to_string();
@@ -229,7 +228,7 @@ fn convert_empty_archive_between_versions() {
         assert_eq!(a.version(), target);
         assert!(a.entries().is_empty());
 
-        // The converted empty archive still accepts imports.
+        // 转换后的空归档仍然可以接受导入。
         let out2 = mpq::modify(&out.bytes, &[], &[("x.txt".into(), b"x".to_vec())]).unwrap();
         let a2 = open(&out2.bytes).unwrap();
         assert_eq!(a2.version(), target, "import keeps {target:?}");

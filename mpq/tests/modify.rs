@@ -1,4 +1,4 @@
-//! Integration tests for archive modification (import / delete).
+//! 归档修改（导入 / 删除）的集成测试。
 
 mod common;
 
@@ -9,7 +9,7 @@ use mpq::{Archive, Deletion};
 
 type OpenArchive<'a> = Archive<Cursor<&'a [u8]>>;
 
-/// Open bytes and return the archive plus the normalized name list.
+/// 打开字节并返回归档以及规范化后的名称列表。
 fn open(bytes: &[u8]) -> mpq::Result<(OpenArchive<'_>, Vec<String>)> {
     let archive = Archive::new(Cursor::new(bytes))?;
     let names = archive
@@ -39,7 +39,7 @@ fn spec(version: u16) -> ArchiveSpec {
     }
 }
 
-/// Modify helper: add / delete on raw bytes, returning the new bytes.
+/// 修改辅助函数：对原始字节执行添加 / 删除，返回新字节。
 fn modify(
     bytes: &[u8],
     del: &[Deletion],
@@ -67,14 +67,14 @@ fn add_and_delete_v1() {
     assert!(names.contains(&"data/table.txt".to_string()));
     assert!(names.contains(&"new/imported.txt".to_string()));
     assert!(!archive.has_file("readme.txt"));
-    // (attributes) was dropped: modification invalidates its indices.
+    // (attributes) 被丢弃：修改会使它的索引失效。
     assert!(!archive.has_file("(attributes)"));
     assert!(archive.attributes().is_none());
 
-    // Kept files keep their exact content (raw byte copy).
+    // 保留的文件内容保持完全一致（原始字节复制）。
     assert_eq!(archive.read_file("data\\table.txt").unwrap(), b"1,2,3\n4,5,6\n");
     assert_eq!(archive.read_file("secret.bin").unwrap(), b"top secret payload");
-    // The imported file reads back.
+    // 导入的文件可以读回。
     assert_eq!(archive.read_file("new\\imported.txt").unwrap(), b"fresh content");
 }
 
@@ -85,17 +85,17 @@ fn replace_existing_file() {
         &src,
         &[],
         &[(
-            "Data/Table.txt".into(), // slash + different case must still match
+            "Data/Table.txt".into(), // 斜杠 + 不同大小写仍必须匹配
             b"replaced".to_vec(),
         )],
     );
 
-    // The report shows the sanitized (canonical) name.
+    // 报告显示清理后（规范化）的名称。
     assert_eq!(out.report.replaced, ["Data\\Table.txt"]);
     assert!(out.report.added.is_empty());
 
     let (archive, names) = open(&out.bytes).unwrap();
-    assert_eq!(names.len(), 3); // same count, one replaced
+    assert_eq!(names.len(), 3); // 数量相同，其中一个被替换
     assert_eq!(archive.read_file("data\\table.txt").unwrap(), b"replaced");
 }
 
@@ -108,21 +108,21 @@ fn prefix_userdata_and_versions_preserved() {
         let src = build(&s);
         let out = modify(&src, &[], &[("x.txt".into(), b"x".to_vec())]);
 
-        // The wrapper / garbage prefix must survive byte-for-byte.
+        // 包装头 / 垃圾前缀必须逐字节保留。
         assert_eq!(
             &out.bytes[..archive_base(&src)],
             &src[..archive_base(&src)],
             "prefix lost for version {version}"
         );
         let (archive, _) = open(&out.bytes).unwrap();
-        // Version is kept (v1 stays v1, v2/v3 stay).
+        // 版本保持不变（v1 仍为 v1，v2/v3 亦然）。
         assert_eq!(archive.version().as_u32(), version as u32 + 1);
         assert_eq!(archive.read_file("x.txt").unwrap(), b"x");
         assert_eq!(archive.read_file("readme.txt").unwrap(), b"keep me\n");
     }
 }
 
-/// Offset of the MPQ header inside a built archive (0x200-aligned scan).
+/// 构建的归档内 MPQ 头部的偏移（0x200 对齐扫描）。
 fn archive_base(src: &[u8]) -> usize {
     mpq::locate_header(src).unwrap() as usize
 }
@@ -134,7 +134,7 @@ fn hetbet_archive_gets_classic_tables() {
         ("beta\\b.txt".to_string(), b"BBB".to_vec()),
     ];
     let src = build_hetbet(&files);
-    // Before: HET lookups resolve names even without a listfile.
+    // 修改前：即使没有 listfile，HET 查找也能解析名称。
     assert!(Archive::new(Cursor::new(&src)).unwrap().has_file("alpha.txt"));
 
     let out = modify(
@@ -144,14 +144,14 @@ fn hetbet_archive_gets_classic_tables() {
     );
 
     let (archive, names) = open(&out.bytes).unwrap();
-    assert!(!archive.uses_het_bet()); // HET/BET replaced by classic tables
-    // beta\b.txt stays as an unnamed data block: pure HET/BET archives
-    // carry no names to build a classic hash entry from (unnamed classic
-    // blocks are not listed by the reader, but their bytes survive).
+    assert!(!archive.uses_het_bet()); // HET/BET 被经典表取代
+    // beta\b.txt 仍是一个未命名数据块：纯 HET/BET 归档没有可用于
+    // 构建经典 hash 条目的名称（未命名的经典 block 不会出现在读取器
+    // 的列表中，但其字节保留下来）。
     assert_eq!(names, ["gamma.txt".to_string()]);
     assert_eq!(
         archive.header().block_table_size,
-        3, // beta (unnamed) + gamma + (listfile)
+        3, // beta（未命名）+ gamma + (listfile)
         "beta data block must survive"
     );
     assert_eq!(archive.read_file("gamma.txt").unwrap(), b"G");
@@ -160,8 +160,8 @@ fn hetbet_archive_gets_classic_tables() {
 
 #[test]
 fn unnamed_entries_survive_without_listfile() {
-    // No listfile: entries are unnamed but still addressable through the
-    // original hash slots. The modifier must preserve that.
+    // 没有 listfile：条目未命名，但仍可通过原始 hash 槽位寻址。
+    // 修改器必须保留这一点。
     let mut s = spec(0);
     s.with_listfile = false;
     s.with_attributes = false;
@@ -170,10 +170,10 @@ fn unnamed_entries_survive_without_listfile() {
     let out = modify(&src, &[], &[("later.txt".into(), b"added".to_vec())]);
 
     let (archive, names) = open(&out.bytes).unwrap();
-    // The added file (with its rebuilt listfile) is the only named entry.
+    // 新增的文件（连同重建的 listfile）是唯一有名称的条目。
     assert_eq!(names, ["later.txt".to_string()]);
-    // The previously unnamed files are STILL readable by their original
-    // names — proof the hash slots were preserved, not rebuilt.
+    // 先前未命名的文件仍然可以用原名称读取 — 证明 hash 槽位被
+    // 保留而非重建。
     assert_eq!(archive.read_file("readme.txt").unwrap(), b"keep me\n");
     assert_eq!(archive.read_file("data\\table.txt").unwrap(), b"1,2,3\n4,5,6\n");
     assert_eq!(archive.read_file("secret.bin").unwrap(), b"top secret payload");
@@ -205,9 +205,8 @@ fn delete_unnamed_entry_by_key() {
 
 #[test]
 fn delete_by_name_in_listfile_less_archive() {
-    // Protected map: no listfile, but names are addressable through the
-    // hash table. Deleting by name must work and leave the other
-    // (still unnamed) entries addressable.
+    // 受保护的映射：没有 listfile，但名称可通过哈希表寻址。
+    // 按名称删除必须有效，且其他（仍未命名的）条目保持可寻址。
     let mut s = spec(0);
     s.with_listfile = false;
     s.with_attributes = false;
@@ -244,10 +243,10 @@ fn key_v2_files_are_re_encrypted_at_new_offset() {
 
     assert_eq!(out.report.re_encoded, ["fixed.bin"]);
     let (archive, _) = open(&out.bytes).unwrap();
-    // Readable at its new offset, with the same content…
+    // 在新偏移处可读，内容相同…
     assert_eq!(archive.read_file("fixed.bin").unwrap(), b"key-v2 payload");
     assert_eq!(archive.read_file("filler.txt").unwrap(), b"filler");
-    // …and still key-v2 encrypted (default option).
+    // …并且仍以 key-v2 加密（默认选项）。
     let e = archive.find_file("fixed.bin").unwrap();
     assert!(e.flags & mpq::FILE_ENCRYPTED != 0);
     assert!(e.flags & mpq::FILE_KEY_V2 != 0);
@@ -291,9 +290,9 @@ fn key_v2_plaintext_option() {
 
 #[test]
 fn key_v2_multisector_re_encryption() {
-    // Multi-sector key-v2 file mixing compressible and incompressible
-    // regions: exercises the sector offset table (key-1), per-sector keys
-    // (key+i) and dword-padded sectors.
+    // 多 sector 的 key-v2 文件，混合可压缩与不可压缩区域：覆盖
+    // sector 偏移表（key-1）、每个 sector 的密钥（key+i）以及
+    // dword 填充的 sector。
     let mut content = Vec::new();
     for i in 0..4000u32 {
         content.extend_from_slice(format!("line {i:06} of the payload\n").as_bytes());
@@ -304,7 +303,7 @@ fn key_v2_multisector_re_encryption() {
 
     let s = ArchiveSpec {
         version: 0,
-        sector_shift: 3, // 4096-byte sectors
+        sector_shift: 3, // 4096 字节的 sector
         with_listfile: true,
         with_attributes: false,
         with_hi_block: false,
@@ -333,7 +332,7 @@ fn key_v2_multisector_re_encryption() {
 #[test]
 fn large_imports_and_many_files() {
     let mut s = spec(0);
-    // A file spanning several sectors, plus plenty of incompressible data.
+    // 一个跨多个 sector 的文件，外加大量不可压缩数据。
     let mut big = Vec::new();
     for i in 0..20_000u32 {
         big.extend_from_slice(&i.to_le_bytes());
@@ -405,8 +404,8 @@ fn no_changes_returns_input_unchanged() {
 fn forbidden_and_invalid_import_names() {
     let src = build(&spec(0));
     assert!(mpq::modify(&src, &[], &[("(listfile)".into(), b"x".to_vec())]).is_err());
-    // Traversal parts are stripped rather than fatal (same normalization
-    // as path-escape-proof extraction); the leading "ok" segment stays.
+    // 目录穿越部分被剥离而非报错（与防路径逃逸的提取采用相同的
+    // 规范化）；开头的 "ok" 段保留。
     let out = modify(&src, &[], &[("ok/../name.txt".into(), b"x".to_vec())]);
     let (archive, _) = open(&out.bytes).unwrap();
     assert_eq!(archive.read_file("ok\\name.txt").unwrap(), b"x");

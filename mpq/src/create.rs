@@ -1,13 +1,13 @@
-//! Create new, empty MPQ archives (header versions v1–v4).
+//! 创建新的空 MPQ 归档（头部版本 v1–v4）。
 //!
-//! The result is a minimal, spec-conforming container: the version's header,
-//! a fully-encrypted all-free classic hash table, and an encrypted block
-//! table holding a single free (ghost) entry. A zero-entry block table would
-//! be rejected by readers that require a non-empty file table (this library
-//! included); a free block is the format's own "unused slot" marker, so the
-//! archive opens everywhere and [`crate::modify`] can later import files
-//! into it like into any other archive. v4 containers carry full MD5
-//! checksums (tables + header) via [`crate::modify::finish_v4_header`].
+//! 结果是一个符合规范的极简容器：对应版本的头部、一张完全加密且
+//! 全为空闲项的经典哈希表，以及一张加密的块表，其中只含单个空闲
+//! （幽灵）项。零项的块表会被要求文件表非空的读取器拒绝（本库
+//! 也不例外）；空闲块是该格式自带的“未使用槽位”标记，因此归档
+//! 在任何地方都能打开，之后 [`crate::modify`] 便能像向其他归档导入
+//! 文件那样向其中导入文件。v4 容器还会通过
+//! [`crate::modify::finish_v4_header`] 携带完整的 MD5 校验和
+//! （各表 + 头部）。
 
 use std::io::Cursor;
 
@@ -18,15 +18,15 @@ use crate::header::{FormatVersion, HEADER_SIZE_V1, HEADER_SIZE_V2, HEADER_SIZE_V
 use crate::modify::{finish_v4_header, write_header};
 use crate::tables::HASH_ENTRY_FREE;
 
-/// Knobs for [`create`].
+/// [`create`] 的各项配置。
 #[derive(Debug, Clone, Copy)]
 pub struct CreateOptions {
-    /// Header version to write (v1–v4).
+    /// 要写入的头部版本（v1–v4）。
     pub version: FormatVersion,
-    /// Classic hash table size in entries — the capacity for file names.
-    /// Rounded up to a power of two in `4..=1 Mi` entries.
+    /// 经典哈希表的大小（以项数计）——即文件名的容量。
+    /// 会在 `4..=1 Mi` 项的范围内向上取整为 2 的幂。
     pub hash_table_size: u32,
-    /// Sector size exponent (sector = `512 << shift`), like the header field.
+    /// 扇区大小指数（扇区 = `512 << shift`），与头部字段的含义相同。
     pub sector_shift: u16,
 }
 
@@ -35,13 +35,13 @@ impl Default for CreateOptions {
         CreateOptions {
             version: FormatVersion::V1,
             hash_table_size: 1024,
-            sector_shift: 3, // 4096-byte sectors, the near-universal choice
+            sector_shift: 3, // 4096 字节扇区，几乎通用的选择
         }
     }
 }
 
-/// Build a new, empty MPQ archive as in-memory bytes. The result opens with
-/// [`Archive::new`] and is ready for imports via [`crate::modify`].
+/// 在内存字节中构建一个新的空 MPQ 归档。结果可用 [`Archive::new`]
+/// 打开，并可随后通过 [`crate::modify`] 导入文件。
 pub fn create(options: &CreateOptions) -> Result<Vec<u8>> {
     if options.sector_shift > 30 {
         return Err(Error::InvalidData(format!(
@@ -52,8 +52,7 @@ pub fn create(options: &CreateOptions) -> Result<Vec<u8>> {
     let hash_count = normalize_hash_size(options.hash_table_size);
     let bytes = empty_archive(options.version, hash_count, options.sector_shift);
 
-    // Self-check: the empty container must open as the requested version
-    // with no entries.
+    // 自检：空容器必须能以所请求的版本打开，且不含任何条目。
     let check = Archive::new(Cursor::new(&bytes))?;
     if check.version() != options.version || !check.entries().is_empty() {
         return Err(Error::Corrupt("新建归档自检失败"));
@@ -61,12 +60,12 @@ pub fn create(options: &CreateOptions) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Clamp a requested hash table size to a legal power of two.
+/// 将请求的哈希表大小收敛为合法的 2 的幂。
 pub(crate) fn normalize_hash_size(requested: u32) -> u32 {
     requested.clamp(4, 1 << 20).next_power_of_two()
 }
 
-/// The standard on-disk header size of a version.
+/// 某个版本在磁盘上的标准头部大小。
 pub(crate) fn header_size_of(version: FormatVersion) -> u32 {
     match version {
         FormatVersion::V1 => HEADER_SIZE_V1,
@@ -76,15 +75,15 @@ pub(crate) fn header_size_of(version: FormatVersion) -> u32 {
     }
 }
 
-/// Assemble the empty container: header | hash table | block table.
-/// `hash_count` must already be normalized.
+/// 组装空容器：头部 | 哈希表 | 块表。
+/// `hash_count` 必须已完成归一化。
 pub(crate) fn empty_archive(
     version: FormatVersion,
     hash_count: u32,
     sector_shift: u16,
 ) -> Vec<u8> {
-    // Free classic hash entry: name1/name2 = FFFFFFFF, locale/platform/
-    // flags 0, block index HASH_ENTRY_FREE.
+    // 空闲的经典哈希项：name1/name2 = FFFFFFFF，locale/platform/
+    // flags 为 0，块索引为 HASH_ENTRY_FREE。
     let mut free_entry = [0u8; 16];
     free_entry[0..4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
     free_entry[4..8].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
@@ -96,7 +95,7 @@ pub(crate) fn empty_archive(
     }
     encrypt_bytes(&mut hash_buf, KEY_HASH_TABLE);
 
-    // One free block entry (all fields 0): a placeholder unused block.
+    // 一个空闲块项（所有字段为 0）：占位用的未使用块。
     let mut block_buf = vec![0u8; 16];
     encrypt_bytes(&mut block_buf, KEY_BLOCK_TABLE);
 
