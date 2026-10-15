@@ -309,6 +309,37 @@ body {
   background: #fafbfd;
   z-index: 1;
 }
+.fwindow .fwin-img {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  display: flex;
+  /* 棋盘格底衬托透明像素 */
+  background-color: #fff;
+  background-image: conic-gradient(#e8eaf0 25%, #fafbfc 0 50%, #e8eaf0 0 75%, #fafbfc 0);
+  background-size: 16px 16px;
+  cursor: zoom-in;
+}
+.fwindow .fwin-img.actual { cursor: zoom-out; }
+.fwindow .fwin-img img {
+  display: block;
+  margin: auto; /* 居中，且放大溢出时边缘可滚动到 */
+  max-width: 100%;
+  max-height: 100%;
+  user-select: none;
+}
+.fwindow .fwin-img.actual img {
+  max-width: none;
+  max-height: none;
+}
+.fwindow .fwin-img .img-fallback {
+  margin: auto;
+  padding: 12px 18px;
+  color: var(--text-weak);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
 .fwindow .fwin-resize {
   position: absolute;
   right: 0;

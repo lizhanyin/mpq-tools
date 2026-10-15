@@ -46,6 +46,8 @@ const MOCK_TREE = dir('', [
   dir('war3mapImported', [
     entry('war3mapImported\\toast.blp', 'classic:5', 33792, 21000, 'EKC', 0, 'classic', '2024-06-15 12:30'),
     entry('war3mapImported\\readme.txt', 'classic:6', 800, 400, 'E', 0, 'classic', '2024-06-15 12:31'),
+    entry('war3mapImported\\logo.png', 'classic:11', 40960, 39800, 'EK', 0, 'classic', '2024-06-15 12:32'),
+    entry('war3mapImported\\floor.tga', 'classic:12', 69904, 21000, 'EKC', 0, 'classic', '2024-06-15 12:33'),
   ]),
 ])
 
@@ -54,17 +56,72 @@ const MOCK_INFO = {
   version: 1,
   sector_size: 4096,
   hash_table_size: 1024,
-  block_table_size: 11,
+  block_table_size: 13,
   het_bet: false,
-  listfile_count: 9,
+  listfile_count: 11,
   warnings: ['archive_size 0x2200 与实际 0x22ac 不符，已按实际值处理'],
   tree: MOCK_TREE,
-  entry_count: 11,
+  entry_count: 13,
   protected: false,
   locked: false,
 }
 
 const MOCK_TEXT = `function config takes nothing returns nothing\n    call SetMapName("TRIGSTR_1")\nendfunction\n\n// 中文内容预览测试\n// war3map.j`
+
+/* 图片预览 mock：canvas 画一张渐变卡片当 data URL；tga/blp 模拟
+ * 「已转换为 PNG」的解码路径。 */
+const MOCK_IMAGE_MIME = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  bmp: 'image/bmp', webp: 'image/webp', avif: 'image/avif',
+  ico: 'image/x-icon', svg: 'image/svg+xml',
+}
+
+function mockImageUrl(ext) {
+  const c = document.createElement('canvas')
+  c.width = 220
+  c.height = 140
+  const g = c.getContext('2d')
+  const grad = g.createLinearGradient(0, 0, 220, 140)
+  grad.addColorStop(0, '#4b6cb7')
+  grad.addColorStop(1, '#182848')
+  g.fillStyle = grad
+  g.fillRect(0, 0, 220, 140)
+  g.strokeStyle = 'rgba(255,255,255,.3)'
+  for (let i = 1; i < 6; i++) {
+    g.beginPath(); g.moveTo(i * 36, 0); g.lineTo(i * 36, 140); g.stroke()
+  }
+  g.fillStyle = '#fff'
+  g.font = 'bold 22px sans-serif'
+  g.fillText(`.${ext}`, 14, 34)
+  g.font = '14px sans-serif'
+  g.fillText('mock 图片预览', 14, 60)
+  return c.toDataURL('image/png')
+}
+
+function mockPreview(name) {
+  const ext = (String(name).toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || ''
+  if (ext === 'tga' || ext === 'blp') {
+    return {
+      text: '', size: 33792 + name.length, truncated: false,
+      encoding: 'UTF-8', binary: false,
+      image: { url: mockImageUrl(ext), mime: 'image/png', converted: true },
+    }
+  }
+  if (MOCK_IMAGE_MIME[ext]) {
+    return {
+      text: '', size: 40960 + name.length, truncated: false,
+      encoding: 'UTF-8', binary: false,
+      image: { url: mockImageUrl(ext), mime: MOCK_IMAGE_MIME[ext], converted: false },
+    }
+  }
+  return {
+    text: `--- ${name} ---\n` + MOCK_TEXT,
+    size: name.length + MOCK_TEXT.length + 120,
+    truncated: false,
+    encoding: 'UTF-8',
+    binary: false,
+  }
+}
 
 const MOCKS = {
   open_archive: () => okOpen(),
@@ -72,7 +129,7 @@ const MOCKS = {
   close_archive: () => null,
   unlock_archive: ({ password }) => {
     if (password === 'wrong') throw new Error('密码错误。')
-    return { note: '已解锁：可以读取、提取和修改加密文件。' }
+    return { note: '已解锁：可以读取、提取和修改文件内容。' }
   },
   write_password_note: ({ archivePath, password }) => ({
     note: password
@@ -81,16 +138,10 @@ const MOCKS = {
   }),
   apply_password_op: ({ op }) => ({
     note: op === 'set'
-      ? '已启用密码保护（9 个文件已按扇区密封，容器转为 v4）。'
-      : op === 'change' ? '已更换密码。' : '已解除密码保护（9 个文件已解密）。',
+      ? '已启用密码保护（11 个文件已按扇区密封，容器转为 v4）。'
+      : op === 'change' ? '已更换密码。' : '已解除密码保护（11 个文件已解密）。',
   }),
-  preview_file: ({ name }) => ({
-    text: `--- ${name} ---\n` + MOCK_TEXT,
-    size: name.length + MOCK_TEXT.length + 120,
-    truncated: false,
-    encoding: 'UTF-8',
-    binary: false,
-  }),
+  preview_file: ({ name }) => mockPreview(name),
   stage_edited_file: ({ name, text }) => ({
     name,
     path: `C:\\Users\\dev\\AppData\\Local\\Temp\\mpqtool-edit\\${name.replace(/[\\/]/g, '_')}`,
@@ -98,7 +149,7 @@ const MOCKS = {
     replaces: name === 'war3map.j',
   }),
   extract: ({ keys, dir }) => ({
-    ok: keys.length || 9,
+    ok: keys.length || 11,
     failed: 0,
     messages: [`${dir}\\war3map.j (48213)`, `${dir}\\war3map.w3e (12045)`],
   }),

@@ -9,7 +9,7 @@ use mpqtool::tasks;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::state::{parse_key, GuiState, OpenResult};
+use crate::state::{GuiState, OpenResult, parse_key};
 
 type St<'a> = State<'a, Mutex<GuiState>>;
 
@@ -40,7 +40,8 @@ pub fn open_archive(path: String, state: St) -> Result<OpenResult, String> {
 pub fn reload_archive(state: St) -> Result<OpenResult, String> {
     let mut s = lock(&state);
     let path = s.path.clone().ok_or("请先打开一个归档。")?;
-    let bytes = std::fs::read(&path).map_err(|e| format!("刷新失败：{e}（当前仍显示已载入的内容）"))?;
+    let bytes =
+        std::fs::read(&path).map_err(|e| format!("刷新失败：{e}（当前仍显示已载入的内容）"))?;
     Ok(s.load(path, bytes))
 }
 
@@ -100,20 +101,14 @@ pub fn apply_password_op(
                 outcome.report.encrypted
             );
             if !outcome.report.dropped.is_empty() {
-                note.push_str(&format!(
-                    "；自动移除 {}",
-                    outcome.report.dropped.join("、")
-                ));
+                note.push_str(&format!("；自动移除 {}", outcome.report.dropped.join("、")));
             }
             note.push_str("。注意：第三方 MPQ 工具将无法打开该文件。");
             s.modify_applied = Some((outcome.bytes, note.clone()));
             note
         }
         "change" => {
-            let new = new_password
-                .as_deref()
-                .ok_or("缺少新密码。")?
-                .to_string();
+            let new = new_password.as_deref().ok_or("缺少新密码。")?.to_string();
             if new.is_empty() {
                 return Err("新密码不能为空。".to_string());
             }
@@ -126,8 +121,8 @@ pub fn apply_password_op(
             note
         }
         "remove" => {
-            let outcome = mpq::unprotect(&s.raw, &password)
-                .map_err(|e| format!("解除密码保护失败：{e}"))?;
+            let outcome =
+                mpq::unprotect(&s.raw, &password).map_err(|e| format!("解除密码保护失败：{e}"))?;
             s.master_key = None;
             let note = format!(
                 "已解除密码保护（{} 个文件已解密）。",
@@ -213,6 +208,9 @@ pub struct PreviewDto {
     pub encoding: String,
     /// 内容按有损 UTF-8 回退（多半是二进制）——前端据此禁止编辑。
     pub binary: bool,
+    /// 图片条目：data URL（此时 text 为空，前端改用图片视图）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<crate::imagepreview::ImageDto>,
 }
 
 struct Decoded {
@@ -228,20 +226,36 @@ struct Decoded {
 fn decode_preview(slice: &[u8]) -> Decoded {
     if slice.starts_with(&[0xFF, 0xFE]) {
         let (s, _, _) = encoding_rs::UTF_16LE.decode(slice);
-        return Decoded { text: s.into_owned(), encoding: "UTF-16LE", lossy: false };
+        return Decoded {
+            text: s.into_owned(),
+            encoding: "UTF-16LE",
+            lossy: false,
+        };
     }
     if slice.starts_with(&[0xFE, 0xFF]) {
         let (s, _, _) = encoding_rs::UTF_16BE.decode(slice);
-        return Decoded { text: s.into_owned(), encoding: "UTF-16BE", lossy: false };
+        return Decoded {
+            text: s.into_owned(),
+            encoding: "UTF-16BE",
+            lossy: false,
+        };
     }
     if let Ok(s) = std::str::from_utf8(slice) {
-        return Decoded { text: s.to_string(), encoding: "UTF-8", lossy: false };
+        return Decoded {
+            text: s.to_string(),
+            encoding: "UTF-8",
+            lossy: false,
+        };
     }
     let (s, _, had_errors) = encoding_rs::GBK.decode(slice);
     let s = s.into_owned();
     let has_cjk = s.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c));
     if has_cjk || !had_errors {
-        Decoded { text: s, encoding: "GBK", lossy: false }
+        Decoded {
+            text: s,
+            encoding: "GBK",
+            lossy: false,
+        }
     } else {
         Decoded {
             text: String::from_utf8_lossy(slice).into_owned(),
@@ -288,6 +302,17 @@ pub fn preview_file(name: String, state: St) -> Result<PreviewDto, String> {
         return Err("未打开归档".to_string());
     };
     let data = archive.read_file(&name).map_err(|e| e.to_string())?;
+    // 图片条目按扩展名走图片预览（无 256 KiB 截断，也不可编辑）。
+    if let Some(image) = crate::imagepreview::build(&name, &data)? {
+        return Ok(PreviewDto {
+            text: String::new(),
+            size: data.len(),
+            truncated: false,
+            encoding: "UTF-8".to_string(),
+            binary: false,
+            image: Some(image),
+        });
+    }
     let truncated = data.len() > LIMIT;
     let slice = &data[..data.len().min(LIMIT)];
     let d = decode_preview(slice);
@@ -297,6 +322,7 @@ pub fn preview_file(name: String, state: St) -> Result<PreviewDto, String> {
         truncated,
         encoding: d.encoding.to_string(),
         binary: d.lossy,
+        image: None,
     })
 }
 
@@ -326,7 +352,11 @@ pub fn stage_edited_file(
     // 临时文件名：全路径名净化（\ / 等替换为 _），同名条目的多次编辑后者覆盖前者。
     let sanitized: String = name
         .chars()
-        .map(|c| matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_').then_some(c).unwrap_or('_'))
+        .map(|c| {
+            matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_')
+                .then_some(c)
+                .unwrap_or('_')
+        })
         .collect();
     let file = dir.join(sanitized);
     std::fs::write(&file, &bytes).map_err(|e| format!("写入临时文件失败：{e}"))?;
@@ -369,7 +399,11 @@ pub fn extract(keys: Vec<String>, dir: String, state: St) -> Result<ExtractDto, 
         return Err("未打开归档".to_string());
     };
     let picked: Vec<mpq::FileEntry> = if keys.is_empty() {
-        s.entries.iter().filter(|e| e.name.is_some()).cloned().collect()
+        s.entries
+            .iter()
+            .filter(|e| e.name.is_some())
+            .cloned()
+            .collect()
     } else {
         let wanted: std::collections::HashSet<(mpq::TableSource, usize)> =
             keys.iter().filter_map(|k| parse_key(k)).collect();
@@ -437,7 +471,10 @@ pub fn apply_repair(state: St) -> Result<NoteDto, String> {
     let report = mpq::repair(&mut bytes, true).map_err(|e| format!("修复失败：{e}"))?;
     let unfixed = report.unfixed().len();
     let note = if report.changed {
-        format!("已应用 {} 项修复；{unfixed} 项无法自动修复。", report.issues.len() - unfixed)
+        format!(
+            "已应用 {} 项修复；{unfixed} 项无法自动修复。",
+            report.issues.len() - unfixed
+        )
     } else {
         "没有需要修改的字段。".to_string()
     };
@@ -476,13 +513,19 @@ mod tests {
     fn gbk_text_decodes_as_gbk() {
         // “中文测试” 的 GBK 编码
         let d = decode_preview(&[0xD6, 0xD0, 0xCE, 0xC4, 0xB2, 0xE2, 0xCA, 0xD4]);
-        assert_eq!((d.text.as_str(), d.encoding, d.lossy), ("中文测试", "GBK", false));
+        assert_eq!(
+            (d.text.as_str(), d.encoding, d.lossy),
+            ("中文测试", "GBK", false)
+        );
     }
 
     #[test]
     fn utf8_stays_utf8() {
         let d = decode_preview("中文 ASCII".as_bytes());
-        assert_eq!((d.text.as_str(), d.encoding, d.lossy), ("中文 ASCII", "UTF-8", false));
+        assert_eq!(
+            (d.text.as_str(), d.encoding, d.lossy),
+            ("中文 ASCII", "UTF-8", false)
+        );
     }
 
     #[test]
@@ -492,7 +535,10 @@ mod tests {
             le.extend_from_slice(&u.to_le_bytes());
         }
         let d = decode_preview(&le);
-        assert_eq!((d.text.as_str(), d.encoding, d.lossy), ("中文", "UTF-16LE", false));
+        assert_eq!(
+            (d.text.as_str(), d.encoding, d.lossy),
+            ("中文", "UTF-16LE", false)
+        );
     }
 
     #[test]
@@ -633,8 +679,7 @@ pub fn apply_modify(
         .map(|d| match (&d.name, &d.key) {
             (Some(name), _) => Ok(Deletion::ByName(name.clone())),
             (None, Some(key)) => {
-                let (source, index) =
-                    parse_key(key).ok_or_else(|| format!("无效的表键 {key}"))?;
+                let (source, index) = parse_key(key).ok_or_else(|| format!("无效的表键 {key}"))?;
                 Ok(Deletion::ByKey(source, index))
             }
             (None, None) => Err("删除项缺少名字或表键".to_string()),
@@ -675,7 +720,10 @@ pub fn save_modified(path: String, state: St) -> Result<OpenResult, String> {
 pub fn open_modified(state: St) -> Result<OpenResult, String> {
     let mut s = lock(&state);
     let (bytes, summary) = s.modify_applied.clone().ok_or("请先应用修改。")?;
-    let path = s.path.clone().unwrap_or_else(|| PathBuf::from("modified.mpq"));
+    let path = s
+        .path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("modified.mpq"));
     let mut result = s.load(path, bytes);
     result.note = Some(format!("已载入修改结果（{summary}）"));
     Ok(result)
@@ -842,7 +890,10 @@ pub fn save_converted(path: String, state: St) -> Result<OpenResult, String> {
 pub fn open_converted(state: St) -> Result<OpenResult, String> {
     let mut s = lock(&state);
     let (bytes, note) = s.convert_applied.clone().ok_or("请先应用转换。")?;
-    let path = s.path.clone().unwrap_or_else(|| PathBuf::from("converted.mpq"));
+    let path = s
+        .path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("converted.mpq"));
     let mut result = s.load(path, bytes);
     result.note = Some(format!("已载入转换结果（{note}）"));
     Ok(result)

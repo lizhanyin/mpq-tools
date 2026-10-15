@@ -5,7 +5,7 @@
       <span>预览</span>
       <span v-if="p?.dirty" class="dirty-dot" title="有未保存的修改">●</span>
       <span class="spacer"></span>
-      <n-button size="tiny" type="primary" :disabled="!p?.editable"
+      <n-button v-if="!p?.image" size="tiny" type="primary" :disabled="!p?.editable"
                 :loading="p?.saving"
                 title="把编辑内容排队到「修改归档」，随后在弹窗中确认写入（Ctrl+S）"
                 @click="save">保存</n-button>
@@ -16,8 +16,15 @@
       <span class="weak">{{ headerNote }}</span>
     </div>
     <div class="fwin-editor">
-      <div v-if="loading" class="editor-loading">正在加载编辑器…</div>
-      <div ref="editorHost" class="editor-host"></div>
+      <div v-if="loading && !p?.image" class="editor-loading">正在加载编辑器…</div>
+      <div v-show="!p?.image" ref="editorHost" class="editor-host"></div>
+      <div v-if="p?.image" class="fwin-img" :class="{ actual: !fit }"
+           :title="fit ? '点击按原始像素大小查看' : '点击恢复适应窗口'"
+           @click="fit = !fit">
+        <img v-if="!imgFailed" :src="p.image.url" alt="" draggable="false"
+             @load="onImgLoad" @error="imgFailed = true">
+        <div v-else class="img-fallback">图片解码失败：文件可能不是有效的图片</div>
+      </div>
     </div>
     <div class="fwin-resize" @pointerdown="startResize"></div>
   </div>
@@ -44,16 +51,30 @@
   let applying = false // 程序化 setValue 不计入 dirty
 
   const p = computed(() => S.preview)
+  const fit = ref(true)      // 图片：适应窗口 / 原始像素大小
+  const dims = ref('')       // 图片加载后的自然尺寸（如 512×512）
+  const imgFailed = ref(false)
 
   const headerNote = computed(() => {
     const bits = []
     if (!p.value) return ''
+    if (p.value.image) {
+      if (dims.value) bits.push(dims.value)
+      bits.push(fmtBytes(p.value.size))
+      if (p.value.image.converted) bits.push('已转换为 PNG')
+      return bits.join('，')
+    }
     if (p.value.encoding !== 'UTF-8') bits.push(`按 ${p.value.encoding} 解码`)
     if (p.value.truncated) bits.push(`仅加载前 256 KiB / 共 ${fmtBytes(p.value.size)} 字节，只读`)
     else if (p.value.binary) bits.push('二进制内容，只读')
     else bits.push(`${fmtBytes(p.value.size)} 字节`)
     return bits.join('，')
   })
+
+  function onImgLoad(ev) {
+    imgFailed.value = false
+    dims.value = `${ev.target.naturalWidth}×${ev.target.naturalHeight}`
+  }
 
   // -- 拖动 / 调整大小 ---------------------------------------------------------
 
@@ -127,6 +148,7 @@
   async function syncModel() {
     const cur = S.preview
     if (!cur) return
+    if (cur.image) { loading.value = false; return } // 图片不加载 Monaco
     await ensureEditor()
     if (!editor || loadedName === cur.name) return
     loadedName = cur.name
@@ -158,7 +180,13 @@
   }
 
   onMounted(syncModel)
-  watch(() => S.preview?.name, syncModel)
+  // 切换预览目标时重置图片视图状态；syncModel 负责文本装载。
+  watch(() => S.preview?.name, () => {
+    fit.value = true
+    dims.value = ''
+    imgFailed.value = false
+    syncModel()
+  })
   // 界面字号变化时同步编辑器。
   watch(() => S.fontSize, (v) => { editor?.updateOptions({ fontSize: v }) })
   onUnmounted(() => {

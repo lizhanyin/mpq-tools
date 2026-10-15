@@ -252,8 +252,10 @@ export async function previewFile(name) {
       encoding: p.encoding || 'UTF-8',
       truncated: !!p.truncated,
       binary: !!p.binary,
-      // 截断（后半未加载）或二进制回退时只读，避免保存出损坏内容。
-      editable: !p.truncated && !p.binary,
+      // 图片条目：data URL + 元信息，预览窗改用图片视图。
+      image: p.image || null,
+      // 截断（后半未加载）、二进制回退或图片时只读，避免保存出损坏内容。
+      editable: !p.truncated && !p.binary && !p.image,
       dirty: false,                 // Monaco 里是否改过
       saving: false,
       armed: false,                 // 有未保存修改时关闭需二次确认
