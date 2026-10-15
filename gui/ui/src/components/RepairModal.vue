@@ -45,10 +45,6 @@
                   @click="applyRepair">应用修复</n-button>
       </div>
     </template>
-
-    <template v-if="S.repair && S.repair.note" #footer>
-      <div class="dialog-note" :class="{ error: noteIsError }">{{ S.repair.note }}</div>
-    </template>
   </n-modal>
 </template>
 
@@ -61,5 +57,4 @@
     S.repair ? S.repair.issues.filter((i) => i.action).length : 0)
   const fatal = computed(() =>
     S.repair ? S.repair.issues.length - fixable.value : 0)
-  const noteIsError = computed(() => (S.repair?.note || '').includes('失败'))
 </script>

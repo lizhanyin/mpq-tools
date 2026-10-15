@@ -359,9 +359,6 @@ body {
 .dialog-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .grow { margin-left: auto; }
 
-.dialog-note { color: var(--text); font-size: 0.92em; word-break: break-all; }
-.dialog-note.error { color: var(--danger); }
-
 /* -- 新建归档 / 版本转换弹窗 --------------------------------------------------- */
 
 .field-label { font-weight: 600; margin-top: 2px; }

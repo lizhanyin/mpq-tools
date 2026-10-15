@@ -38,15 +38,10 @@
         <n-button size="small" type="primary" @click="createArchive">选择位置并创建…</n-button>
       </div>
     </template>
-
-    <template v-if="S.create && S.create.note" #footer>
-      <div class="dialog-note" :class="{ error: noteIsError }">{{ S.create.note }}</div>
-    </template>
   </n-modal>
 </template>
 
 <script setup>
-  import { computed } from 'vue'
   import { NModal, NButton, NRadioGroup, NRadio, NSelect } from 'naive-ui'
   import { S, createArchive, closeCreate } from '../store'
 
@@ -61,6 +56,4 @@
     label: `${n.toLocaleString('en-US')} 槽`,
     value: n,
   }))
-
-  const noteIsError = computed(() => (S.create?.note || '').includes('失败'))
 </script>

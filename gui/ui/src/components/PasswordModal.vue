@@ -95,10 +95,6 @@
                   :loading="p.busy" @click="confirmPwOp">应用并保存…</n-button>
       </div>
     </template>
-
-    <template v-if="p && p.error" #footer>
-      <div class="dialog-note error">{{ p.error }}</div>
-    </template>
   </n-modal>
 </template>
 

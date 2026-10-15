@@ -25,10 +25,10 @@ export const S = reactive({
   appliedFilter: '',     // 120ms 防抖后的过滤词
   selected: new Set(),   // 条目 key "classic:12" / "bet:3"
   preview: null,         // { name, text } — 浮动预览窗
-  repair: null,          // { issues, applied, note }
+  repair: null,          // { issues, applied }
   modify: null,          // { additions, deletions, reencrypt, busy }
-  create: null,          // { version, hashSize, note } — 新建归档弹窗
-  convert: null,         // { target, running, note } — 版本转换弹窗
+  create: null,          // { version, hashSize } — 新建归档弹窗
+  convert: null,         // { target, running } — 版本转换弹窗
   pw: null,              // 密码弹窗：{ mode: 'unlock'|'set'|'change'|'remove', … }
   settingsOpen: false,
   logs: [],
@@ -496,7 +496,7 @@ export function closeModify() {
 // 新建归档（「新建归档」窗口）
 
 function defaultCreate() {
-  return { version: 1, hashSize: 1024, note: '' }
+  return { version: 1, hashSize: 1024 }
 }
 
 export function startCreate() {
@@ -519,8 +519,9 @@ export async function createArchive() {
     })
     S.create = null
     applyOpenResult(res)
+    toast.success(`已创建 ${out}`)
   } catch (e) {
-    c.note = String(e) // 创建失败：… / 保存失败：…
+    toast.error(String(e)) // 创建失败：… / 保存失败：…
   }
 }
 
@@ -537,11 +538,11 @@ function defaultConvertTarget(from) {
 
 export function startConvert() {
   if (!S.info) { toast.info('请先打开一个可解析的归档。'); return }
-  S.convert = { target: defaultConvertTarget(S.info.version), running: false, note: '' }
+  S.convert = { target: defaultConvertTarget(S.info.version), running: false }
 }
 
 /** 「开始转换」：先弹系统保存框选输出位置（默认文件名带目标版本号，
- *  位于当前归档所在目录），再转换、写盘并重新载入。 */
+ *  位于当前归档所在目录），再转换、写盘并重新载入；结果与异常以 toast 提示。 */
 export async function runConvert() {
   const c = S.convert
   if (!c || c.running) return
@@ -551,11 +552,10 @@ export async function runConvert() {
   })
   if (!out) return
   c.running = true
-  c.note = '正在转换…'
   try {
     const r = await ipc.invoke('apply_convert', { target: c.target })
     if (!r.applied) {
-      c.note = r.note
+      toast.info(r.note)
       return
     }
     log(r.note)
@@ -564,8 +564,9 @@ export async function runConvert() {
     S.convert = null
     ipc.invoke('discard_convert').catch(() => {})
     applyOpenResult(res)
+    toast.success(r.note)
   } catch (e) {
-    c.note = `转换失败：${e}`
+    toast.error(`转换失败：${e}`)
   } finally {
     c.running = false
   }
@@ -586,7 +587,6 @@ function startPwModal(mode) {
     newPassword: '',      // 用于 change
     confirm: '',          // set / change 的确认输入
     busy: false,
-    error: '',
   }
   if (mode === 'unlock') {
     toast.info('文件名无需密码即可浏览；读取、提取和修改文件内容需要密码。')
@@ -611,13 +611,12 @@ export function startPwOp(mode) {
   startPwModal(mode)
 }
 
-/** 解锁确认：验证密码，成功后即可读取/提取/修改。 */
+/** 解锁确认：验证密码，成功后即可读取/提取/修改；异常以 toast 提示。 */
 export async function submitUnlock() {
   const p = S.pw
   if (!p || p.busy) return
-  if (!p.password) { p.error = '请输入密码。'; return }
+  if (!p.password) { toast.error('请输入密码。'); return }
   p.busy = true
-  p.error = ''
   try {
     const r = await ipc.invoke('unlock_archive', { password: p.password })
     S.pw = null
@@ -625,7 +624,7 @@ export async function submitUnlock() {
     log(r.note)
     toast.success('已解锁')
   } catch (e) {
-    p.error = String(e)
+    toast.error(String(e))
     p.busy = false
   }
 }
@@ -645,27 +644,27 @@ function markedName(marker) {
 }
 
 /** 密码操作确认（set / change / remove）：先选保存位置，再应用到已
- *  载入字节、写盘并重新载入。设置密码默认输出「原名.protected.扩展名」，
- *  修改 / 解除默认沿用原文件名（对话框中均可改）。 */
+ *  载入字节、写盘并重新载入；验证与异常以 toast 提示。
+ *  设置密码默认输出「原名.protected.扩展名」，修改 / 解除默认沿用
+ *  原文件名（对话框中均可改）。 */
 export async function confirmPwOp() {
   const p = S.pw
   if (!p || p.busy) return
   if (p.mode === 'set') {
-    if (!p.password) { p.error = '请输入密码。'; return }
-    if (p.password !== p.confirm) { p.error = '两次输入的密码不一致。'; return }
+    if (!p.password) { toast.error('请输入密码。'); return }
+    if (p.password !== p.confirm) { toast.error('两次输入的密码不一致。'); return }
   } else if (p.mode === 'change') {
-    if (!p.password) { p.error = '请输入当前密码。'; return }
-    if (!p.newPassword) { p.error = '请输入新密码。'; return }
-    if (p.newPassword !== p.confirm) { p.error = '两次输入的新密码不一致。'; return }
+    if (!p.password) { toast.error('请输入当前密码。'); return }
+    if (!p.newPassword) { toast.error('请输入新密码。'); return }
+    if (p.newPassword !== p.confirm) { toast.error('两次输入的新密码不一致。'); return }
   } else if (!p.password) {
-    p.error = '请输入当前密码。'; return
+    toast.error('请输入当前密码。'); return
   }
   const suggested = suggestedPath(
     p.mode === 'set' ? markedName('protected') : U.basenameOf(S.openPath || ''))
   const out = await ipc.dialogSave({ title: '保存密码操作后的归档', defaultPath: suggested })
   if (!out) return
   p.busy = true
-  p.error = ''
   try {
     const args = p.mode === 'change'
       ? { op: 'change', password: p.password, newPassword: p.newPassword }
@@ -689,9 +688,9 @@ export async function confirmPwOp() {
     log(`密码操作结果已保存到 ${out}`)
     toast.success(r.note)
   } catch (e) {
-    p.error = String(e)
+    toast.error(String(e))
+    p.busy = false
   }
-  p.busy = false
 }
 
 /** 关闭密码弹窗（未保存的已应用结果一并丢弃）。 */
@@ -709,11 +708,7 @@ export async function startRepair() {
   if (!S.openPath) { toast.info('请先打开一个归档。'); return }
   try {
     const r = await ipc.invoke('diagnose_archive')
-    S.repair = {
-      issues: r.issues,
-      applied: false,
-      note: r.issues.length === 0 ? '未发现头信息问题。' : '',
-    }
+    S.repair = { issues: r.issues, applied: false }
   } catch (e) {
     log(`诊断失败：${e}`)
     toast.error(`诊断失败：${e}`)
@@ -724,9 +719,10 @@ export async function applyRepair() {
   try {
     const r = await ipc.invoke('apply_repair')
     S.repair.applied = true
-    S.repair.note = r.note
+    log(r.note)
+    toast.success(r.note)
   } catch (e) {
-    S.repair.note = `修复失败：${e}`
+    toast.error(`修复失败：${e}`)
   }
 }
 
@@ -736,10 +732,10 @@ export async function saveRepaired() {
   if (!out) return
   try {
     const r = await ipc.invoke('save_repaired', { path: out })
-    S.repair.note = r.note
-    log(`修复副本已保存到 ${out}`)
+    log(r.note)
+    toast.success(r.note)
   } catch (e) {
-    S.repair.note = String(e) // 保存失败：…
+    toast.error(String(e)) // 保存失败：…
   }
 }
 
@@ -751,6 +747,7 @@ export async function openRepaired() {
     applyOpenResult(res)
   } catch (e) {
     log(String(e))
+    toast.error(String(e))
   }
 }
 

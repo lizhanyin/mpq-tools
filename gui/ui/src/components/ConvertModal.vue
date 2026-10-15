@@ -53,10 +53,6 @@
         </n-button>
       </div>
     </template>
-
-    <template v-if="S.convert && S.convert.note" #footer>
-      <div class="dialog-note" :class="{ error: noteIsError }">{{ S.convert.note }}</div>
-    </template>
   </n-modal>
 </template>
 
@@ -74,7 +70,6 @@
   ]
 
   const running = computed(() => !!S.convert?.running)
-  const noteIsError = computed(() => (S.convert?.note || '').includes('失败'))
   const from = computed(() => S.info?.version ?? 0)
 
   /** 转换后果提示；无法转换的情况由后端在「应用转换」时给出理由。 */
