@@ -4,7 +4,7 @@ import { NButton, NInput } from 'naive-ui'
 import FileTree from './FileTree.vue'
 import FileTable from './FileTable.vue'
 import {
-  S, searching, searchResults, modifyFrozen,
+  S, searching, searchResults,
   setFilter, reloadArchive, navigate,
   extractSelected, deleteSelected,
 } from '../store'
@@ -51,7 +51,7 @@ const matchCount = computed(() => searching.value ? searchResults.value.length :
     <div class="files-panel">
       <div class="toolbar">
         <n-button size="small" :disabled="selCount.size === 0" @click="extractSelected">提取选中</n-button>
-        <n-button size="small" :disabled="selCount.size === 0 || modifyFrozen"
+        <n-button size="small" :disabled="selCount.size === 0"
                   title="标记选中条目待删除，随后在「修改归档」窗口应用"
                   @click="deleteSelected">删除选中</n-button>
         <span class="vsep"></span>

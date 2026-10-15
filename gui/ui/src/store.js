@@ -3,6 +3,7 @@
 import { reactive, computed } from 'vue'
 import * as ipc from './ipc'
 import * as U from './utils'
+import { toast } from './toast'
 
 export const ARCHIVE_FILTERS = [
   { name: 'MPQ 归档', extensions: ['mpq', 'w3x', 'w3m', 'w3n', 'scx', 'sc2map', 's2ma', 'rep'] },
@@ -25,7 +26,7 @@ export const S = reactive({
   selected: new Set(),   // 条目 key "classic:12" / "bet:3"
   preview: null,         // { name, text } — 浮动预览窗
   repair: null,          // { issues, applied, note }
-  modify: null,          // { additions, deletions, reencrypt, applied, note }
+  modify: null,          // { additions, deletions, reencrypt, busy }
   create: null,          // { version, hashSize, note } — 新建归档弹窗
   convert: null,         // { target, applied, note } — 版本转换弹窗
   settingsOpen: false,
@@ -39,7 +40,6 @@ export const S = reactive({
 
 export const needle = computed(() => S.appliedFilter.trim().toLowerCase())
 export const searching = computed(() => needle.value !== '')
-export const modifyFrozen = computed(() => !!S.modify && !!S.modify.applied)
 
 /** key → entry 的扁平映射（按需构建，info 变化时自动重建）。 */
 export const entryByKey = computed(() => {
@@ -135,6 +135,7 @@ function applyOpenResult(res, pathIfLoaded, { keepNav = false } = {}) {
     }
     log(`打开失败：${res.error}`)
     log('可以尝试「工具 → 修复头信息」。')
+    toast.error(`打开失败：${res.error}`)
   }
 }
 
@@ -150,12 +151,13 @@ export async function openArchivePath(path) {
     applyOpenResult(res, path)
   } catch (e) {
     log(String(e)) // e.g. 读取失败：…
+    toast.error(String(e))
   }
 }
 
 export async function reloadArchive() {
   if (!S.openPath) return
-  const hadPending = !!S.modify && !S.modify.applied &&
+  const hadPending = !!S.modify &&
     (S.modify.additions.length > 0 || S.modify.deletions.length > 0)
   const cwd = S.cwd, expanded = S.expanded, filter = S.filter
   try {
@@ -173,6 +175,7 @@ export async function reloadArchive() {
     }
   } catch (e) {
     log(String(e)) // 刷新失败：…（当前仍显示已载入的内容）
+    toast.error(String(e))
   }
 }
 
@@ -193,6 +196,7 @@ export async function handleDrop(paths) {
     }
   } catch (e) {
     log(String(e))
+    toast.error(String(e))
   }
 }
 
@@ -208,6 +212,7 @@ export async function previewFile(name) {
     S.preview = { name: `${name} ${note}`, text: p.text }
   } catch (e) {
     log(`预览失败 ${name}: ${e}`)
+    toast.error(`预览失败 ${name}: ${e}`)
   }
 }
 
@@ -220,7 +225,7 @@ async function pickFolder(title) {
 }
 
 export async function extractSelected() {
-  if (S.selected.size === 0) { log('未选择任何文件。'); return }
+  if (S.selected.size === 0) { toast.info('未选择任何文件。'); return }
   const dir = await pickFolder('选择输出目录')
   if (!dir) return
   await runExtract([...S.selected], dir)
@@ -237,8 +242,11 @@ async function runExtract(keys, dir) {
     const r = await ipc.invoke('extract', { keys, dir })
     for (const m of r.messages) log(m)
     log(`提取完成：${U.fmtBytes(r.ok)} 成功，${U.fmtBytes(r.failed)} 失败 → ${dir}`)
+    if (r.failed > 0) toast.error(`提取完成：${U.fmtBytes(r.ok)} 成功，${U.fmtBytes(r.failed)} 失败`)
+    else toast.success(`提取完成：${U.fmtBytes(r.ok)} 个文件 → ${dir}`)
   } catch (e) {
     log(String(e))
+    toast.error(String(e))
   }
 }
 
@@ -294,7 +302,7 @@ export function toggleSelectAll(on) {
 // 导入 / 删除（「修改归档」窗口）
 
 function defaultModify() {
-  return { additions: [], deletions: [], reencrypt: true, applied: null, note: '' }
+  return { additions: [], deletions: [], reencrypt: true, busy: false }
 }
 
 export async function importFilesDialog() {
@@ -305,10 +313,6 @@ export async function importFilesDialog() {
 
 export async function queueImports(paths) {
   if (!paths.length) return
-  if (modifyFrozen.value) {
-    log('已有应用过的修改待保存或关闭，请先处理「修改归档」窗口。')
-    return
-  }
   S.modify ??= defaultModify()
 
   let stats
@@ -316,6 +320,7 @@ export async function queueImports(paths) {
     stats = await ipc.invoke('stat_imports', { paths })
   } catch (e) {
     log(String(e))
+    toast.error(String(e))
     return
   }
 
@@ -325,6 +330,7 @@ export async function queueImports(paths) {
     if (!st) return
     if (st.error) {
       log(`读取失败 ${path}: ${st.error}`)
+      toast.error(`读取失败 ${path}: ${st.error}`)
       return
     }
     // 同名后导入的取代先排队的；替换已有条目或已排队项。
@@ -338,12 +344,12 @@ export async function queueImports(paths) {
   })
   if (queued > 0) {
     log(`已加入导入队列（${U.fmtBytes(queued)} 项），在「修改归档」窗口中应用。`)
+    toast.info(`已加入导入队列（${U.fmtBytes(queued)} 项），在「修改归档」窗口中确认。`)
   }
 }
 
 export function deleteSelected() {
-  if (S.selected.size === 0) { log('未选择任何文件。'); return }
-  if (modifyFrozen.value) return
+  if (S.selected.size === 0) { toast.info('未选择任何文件。'); return }
   S.modify ??= defaultModify()
 
   // 与 egui 一致：按 (source, block_index) 排序 —— classic 在前、下标升序。
@@ -365,50 +371,38 @@ export function deleteSelected() {
   }
   if (queued > 0) {
     log(`已标记 ${U.fmtBytes(queued)} 项待删除，在「修改归档」窗口中应用。`)
+    toast.info(`已标记 ${U.fmtBytes(queued)} 项待删除，在「修改归档」窗口中确认。`)
   }
 }
 
-export async function applyModify() {
+/** 「修改归档」确认：选保存位置 → 应用修改 → 写盘 → 自动重新载入。 */
+export async function confirmModify() {
   const m = S.modify
+  if (!m || m.busy) return
+  const suggested = U.basenameOf(S.openPath || '')
+  const out = await ipc.dialogSave({ title: '保存修改后的归档', defaultPath: suggested })
+  if (!out) return
+  m.busy = true
   try {
     const r = await ipc.invoke('apply_modify', {
       additions: m.additions.map((a) => ({ name: a.name, path: a.path })),
       deletions: m.deletions.map((d) => ({ name: d.name, key: d.name ? null : d.key })),
       reencrypt: m.reencrypt,
     })
-    m.applied = r.note
-    m.note = r.note
-  } catch (e) {
-    m.note = `修改失败：${e}`
-  }
-}
-
-export async function saveModified() {
-  const suggested = U.basenameOf(S.openPath || '')
-  const out = await ipc.dialogSave({ title: '保存修改后的归档', defaultPath: suggested })
-  if (!out) return
-  try {
     const res = await ipc.invoke('save_modified', { path: out })
-    log(`修改已保存到 ${out}`)
+    log(`修改已保存到 ${out}（${r.note}）`)
+    toast.success(`修改已保存到 ${out}（${r.note}）`)
     S.modify = null
     ipc.invoke('discard_modify').catch(() => {})
     applyOpenResult(res)
   } catch (e) {
-    S.modify.note = String(e) // 保存失败：…
+    log(String(e)) // 修改失败：… / 保存失败：…
+    toast.error(String(e))
+    m.busy = false
   }
 }
 
-export async function openModified() {
-  try {
-    const res = await ipc.invoke('open_modified')
-    S.modify = null
-    ipc.invoke('discard_modify').catch(() => {})
-    applyOpenResult(res)
-  } catch (e) {
-    log(String(e))
-  }
-}
-
+/** 「修改归档」取消：丢弃待办与已应用结果，不写盘。 */
 export function closeModify() {
   S.modify = null
   ipc.invoke('discard_modify').catch(() => {})
@@ -437,7 +431,7 @@ export async function createArchive() {
     const res = await ipc.invoke('create_archive', {
       path: out,
       version: c.version,
-      hash_table_size: c.hashSize,
+      hashTableSize: c.hashSize, // Tauri 命令参数为 camelCase → Rust hash_table_size
     })
     S.create = null
     applyOpenResult(res)
@@ -458,7 +452,7 @@ function defaultConvertTarget(from) {
 }
 
 export function startConvert() {
-  if (!S.info) { log('请先打开一个可解析的归档。'); return }
+  if (!S.info) { toast.info('请先打开一个可解析的归档。'); return }
   S.convert = { target: defaultConvertTarget(S.info.version), applied: null, note: '' }
 }
 
@@ -510,7 +504,7 @@ export function closeConvert() {
 // 修复（「修复头信息」窗口）
 
 export async function startRepair() {
-  if (!S.openPath) { log('请先打开一个归档。'); return }
+  if (!S.openPath) { toast.info('请先打开一个归档。'); return }
   try {
     const r = await ipc.invoke('diagnose_archive')
     S.repair = {
@@ -520,6 +514,7 @@ export async function startRepair() {
     }
   } catch (e) {
     log(`诊断失败：${e}`)
+    toast.error(`诊断失败：${e}`)
   }
 }
 

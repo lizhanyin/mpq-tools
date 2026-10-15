@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { NDropdown, NButton } from 'naive-ui'
 import {
-  S, modifyFrozen,
+  S,
   openArchiveDialog, extractAll, importFilesDialog, reloadArchive,
   startRepair, startCreate, startConvert,
 } from '../store'
@@ -20,7 +20,7 @@ const fileOptions = computed(() => [
   { label: '新建归档…', key: 'create' },
   { label: '打开归档…', key: 'open' },
   { label: '提取全部…', key: 'extract-all', disabled: !hasArchive.value },
-  { label: '导入文件到归档…', key: 'import', disabled: !hasArchive.value || modifyFrozen.value },
+  { label: '导入文件到归档…', key: 'import', disabled: !hasArchive.value },
   { label: '重新载入归档\u2003F5', key: 'reload', disabled: !hasPath.value },
   { type: 'divider', key: 'd1' },
   { label: '退出', key: 'quit' },

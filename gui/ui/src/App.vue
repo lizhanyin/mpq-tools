@@ -50,8 +50,12 @@ onMounted(async () => {
   try {
     offDrop = await ipc.onDragDropEvent((event) => {
       const p = event.payload
-      if (p.type === 'enter' || p.type === 'over') {
+      if (p.type === 'enter') {
+        // 只有 enter/drop 事件携带 paths；over 仅有 position，
+        // 不能用它重算数量（否则一移动鼠标就变成 0 个文件）。
         S.dropping = { count: (p.paths || []).length }
+      } else if (p.type === 'over') {
+        S.dropping ??= { count: 0 }
       } else if (p.type === 'drop') {
         S.dropping = null
         handleDrop(p.paths || [])

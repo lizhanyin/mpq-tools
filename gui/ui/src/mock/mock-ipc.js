@@ -100,12 +100,12 @@ const MOCKS = {
     return r
   },
   discard_modify: () => null,
-  create_archive: ({ path, version }) => {
+  create_archive: ({ path, version, hashTableSize }) => {
     const info = {
       ...MOCK_INFO,
       path,
       version,
-      hash_table_size: 1024,
+      hash_table_size: hashTableSize ?? 1024,
       block_table_size: 1,
       het_bet: false,
       listfile_count: 0,

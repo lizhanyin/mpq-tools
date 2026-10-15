@@ -1,12 +1,12 @@
 <script setup>
 import { computed } from 'vue'
 import { NModal, NButton, NTag, NCheckbox, NTooltip } from 'naive-ui'
-import { S, applyModify, saveModified, openModified, closeModify } from '../store'
+import { S, confirmModify, closeModify } from '../store'
 import { fmtBytes } from '../utils'
 
-const frozen = computed(() => !!S.modify?.applied)
-const empty = computed(() => S.modify.additions.length === 0 && S.modify.deletions.length === 0)
-const noteIsError = computed(() => (S.modify?.note || '').includes('失败'))
+const empty = computed(() =>
+  (S.modify?.additions.length ?? 0) === 0 && (S.modify?.deletions.length ?? 0) === 0)
+const busy = computed(() => !!S.modify?.busy)
 </script>
 
 <template>
@@ -17,7 +17,7 @@ const noteIsError = computed(() => (S.modify?.note || '').includes('失败'))
     :style="{ width: '640px', maxWidth: '94vw', borderRadius: '12px' }"
     :mask-closable="false"
     :bordered="false"
-    @update:show="(v) => { if (!v) closeModify() }"
+    @update:show="(v) => { if (!v && !busy) closeModify() }"
   >
     <template v-if="S.modify">
       <div class="dialog-body">
@@ -44,8 +44,9 @@ const noteIsError = computed(() => (S.modify?.note || '').includes('失败'))
                   </n-tag>
                   <span class="name">{{ a.name }}</span>
                   <span class="meta">{{ fmtBytes(a.size) }} 字节</span>
-                  <n-button v-if="!frozen" size="tiny" quaternary type="error" class="remove"
-                            title="移除该项" @click="S.modify.additions.splice(i, 1)">✕</n-button>
+                  <n-button size="tiny" quaternary type="error" class="remove"
+                            :disabled="busy" title="移除该项"
+                            @click="S.modify.additions.splice(i, 1)">✕</n-button>
                 </div>
               </div>
             </div>
@@ -64,17 +65,18 @@ const noteIsError = computed(() => (S.modify?.note || '').includes('失败'))
                 <div v-for="(d, i) in S.modify.deletions" :key="d.key + i" class="pending-row">
                   <n-tag size="small" round :bordered="false" type="error">删除</n-tag>
                   <span class="name">{{ d.display }}</span>
-                  <n-button v-if="!frozen" size="tiny" quaternary type="error" class="remove"
-                            title="移除该项" @click="S.modify.deletions.splice(i, 1)">✕</n-button>
+                  <n-button size="tiny" quaternary type="error" class="remove"
+                            :disabled="busy" title="移除该项"
+                            @click="S.modify.deletions.splice(i, 1)">✕</n-button>
                 </div>
               </div>
             </div>
           </div>
         </div>
 
-        <div class="hint-text">应用时保留文件将原样拷贝；(listfile) 重建，(attributes)/(signature) 自动移除。</div>
+        <div class="hint-text">确认时保留文件将原样拷贝；(listfile) 重建，(attributes)/(signature) 自动移除。</div>
 
-        <n-checkbox v-if="!frozen" v-model:checked="S.modify.reencrypt" size="small">
+        <n-checkbox v-model:checked="S.modify.reencrypt" size="small" :disabled="busy">
           key-v2 文件按新偏移重新加密
           <n-tooltip trigger="hover" placement="top" :style="{ maxWidth: '320px' }">
             <template #trigger>
@@ -90,20 +92,12 @@ const noteIsError = computed(() => (S.modify?.note || '').includes('失败'))
 
     <template v-if="S.modify" #action>
       <div class="dialog-actions">
-        <n-button size="small" quaternary @click="closeModify">关闭</n-button>
         <div class="grow"></div>
-        <n-button size="small" :disabled="!frozen"
-                  @click="openModified">在界面中打开结果</n-button>
-        <n-button size="small" :disabled="!frozen"
-                  title="选择保存位置（默认覆盖原文件）后自动重新载入"
-                  @click="saveModified">保存到文件…</n-button>
-        <n-button size="small" type="primary" :disabled="frozen || empty"
-                  @click="applyModify">应用修改</n-button>
+        <n-button size="small" quaternary :disabled="busy" @click="closeModify">取消</n-button>
+        <n-button size="small" type="primary" :disabled="empty" :loading="busy"
+                  title="选择保存位置（默认覆盖原文件），应用修改并自动重新载入"
+                  @click="confirmModify">确认</n-button>
       </div>
-    </template>
-
-    <template v-if="S.modify && S.modify.note" #footer>
-      <div class="dialog-note" :class="{ error: noteIsError }">{{ S.modify.note }}</div>
     </template>
   </n-modal>
 </template>
