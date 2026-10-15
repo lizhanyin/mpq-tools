@@ -25,6 +25,7 @@ function dir(name, files, dirs) {
 
 const MOCK_TREE = dir('', [
   entry('war3map.j', 'classic:0', 48213, 9120, 'EKC', 0, 'classic', '2023-01-01 08:00'),
+  entry('war3map.lua', 'classic:13', 12040, 9100, 'EKC', 0, 'classic', '2023-01-01 08:00'),
   entry('war3map.w3e', 'classic:1', 12045, 8990, 'EKC#', 0, 'classic', '2023-01-01 08:00'),
 ], [
   dir('(系统文件)', [
@@ -56,17 +57,29 @@ const MOCK_INFO = {
   version: 1,
   sector_size: 4096,
   hash_table_size: 1024,
-  block_table_size: 13,
+  block_table_size: 14,
   het_bet: false,
   listfile_count: 11,
   warnings: ['archive_size 0x2200 与实际 0x22ac 不符，已按实际值处理'],
   tree: MOCK_TREE,
-  entry_count: 13,
+  entry_count: 14,
   protected: false,
   locked: false,
 }
 
 const MOCK_TEXT = `function config takes nothing returns nothing\n    call SetMapName("TRIGSTR_1")\nendfunction\n\n// 中文内容预览测试\n// war3map.j`
+
+/* Lua 预览样例:刻意覆盖多版本语法(长字符串、goto 标签、<const>、
+ * 位运算、整除、十六进制、长注释),用于验证 5.0+ 并集词法。 */
+const MOCK_LUA = `local limit <const> = 0x7F
+local name = [==[war3map lua 长字符串]==]
+::retry::
+if (a & 0xFF) // 2 ~= 0 then
+    goto retry
+end
+print(string.format("%s %d", name, math.max(1, 2)))
+--[[ 多行
+注释 ]]`
 
 /* 图片预览 mock：canvas 画一张渐变卡片当 data URL；tga/blp 模拟
  * 「已转换为 PNG」的解码路径。 */
@@ -112,6 +125,15 @@ function mockPreview(name) {
       text: '', size: 40960 + name.length, truncated: false,
       encoding: 'UTF-8', binary: false,
       image: { url: mockImageUrl(ext), mime: MOCK_IMAGE_MIME[ext], converted: false },
+    }
+  }
+  if (ext === 'lua') {
+    return {
+      text: `--- ${name} ---\n` + MOCK_LUA,
+      size: name.length + MOCK_LUA.length + 120,
+      truncated: false,
+      encoding: 'UTF-8',
+      binary: false,
     }
   }
   return {
