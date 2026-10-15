@@ -1,43 +1,3 @@
-<script setup>
-import { computed, ref, watch } from 'vue'
-import { NModal, NButton, NSelect, NSlider } from 'naive-ui'
-import { S, setFontSize, FONT_MIN, FONT_MAX, FONT_DEFAULT } from '../store'
-
-const CUSTOM = 'custom'
-
-const PRESETS = [
-  { text: '小', size: 11 },
-  { text: '中（默认）', size: 13 },
-  { text: '大', size: 16 },
-  { text: '特大', size: 19 },
-  { text: '超大', size: 24 },
-]
-
-const options = [
-  ...PRESETS.map((p) => ({ label: `${p.text} — ${p.size} px`, value: p.size })),
-  { label: '自定义', value: CUSTOM },
-]
-
-/** 用户显式选择「自定义」后保持该状态，直到从下拉切回某个预设。 */
-const customMode = ref(false)
-const matchedPreset = computed(() => PRESETS.find((p) => Math.abs(S.fontSize - p.size) < 0.01))
-const selectValue = computed(() => (customMode.value || !matchedPreset.value) ? CUSTOM : matchedPreset.value.size)
-
-function onSelect(v) {
-  if (v === CUSTOM) {
-    customMode.value = true
-  } else {
-    customMode.value = false
-    setFontSize(v)
-  }
-}
-
-// 每次打开弹窗时按当前字号重置：命中预设则显示预设，否则显示「自定义」。
-watch(() => S.settingsOpen, (open) => {
-  if (open) customMode.value = !matchedPreset.value
-})
-</script>
-
 <template>
   <n-modal
     :show="S.settingsOpen"
@@ -96,3 +56,43 @@ watch(() => S.settingsOpen, (open) => {
     </template>
   </n-modal>
 </template>
+
+<script setup>
+  import { computed, ref, watch } from 'vue'
+  import { NModal, NButton, NSelect, NSlider } from 'naive-ui'
+  import { S, setFontSize, FONT_MIN, FONT_MAX, FONT_DEFAULT } from '../store'
+
+  const CUSTOM = 'custom'
+
+  const PRESETS = [
+    { text: '小', size: 11 },
+    { text: '中（默认）', size: 13 },
+    { text: '大', size: 16 },
+    { text: '特大', size: 19 },
+    { text: '超大', size: 24 },
+  ]
+
+  const options = [
+    ...PRESETS.map((p) => ({ label: `${p.text} — ${p.size} px`, value: p.size })),
+    { label: '自定义', value: CUSTOM },
+  ]
+
+  /** 用户显式选择「自定义」后保持该状态，直到从下拉切回某个预设。 */
+  const customMode = ref(false)
+  const matchedPreset = computed(() => PRESETS.find((p) => Math.abs(S.fontSize - p.size) < 0.01))
+  const selectValue = computed(() => (customMode.value || !matchedPreset.value) ? CUSTOM : matchedPreset.value.size)
+
+  function onSelect(v) {
+    if (v === CUSTOM) {
+      customMode.value = true
+    } else {
+      customMode.value = false
+      setFontSize(v)
+    }
+  }
+
+  // 每次打开弹窗时按当前字号重置：命中预设则显示预设，否则显示「自定义」。
+  watch(() => S.settingsOpen, (open) => {
+    if (open) customMode.value = !matchedPreset.value
+  })
+</script>

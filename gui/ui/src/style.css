@@ -249,12 +249,10 @@ body {
   padding: 14px 26px;
 }
 
-/* -- floating preview window --------------------------------------------------- */
+/* -- floating preview window (Monaco 编辑器) ----------------------------------- */
 
 .fwindow {
   position: fixed;
-  width: 640px;
-  height: 480px;
   min-width: 320px;
   min-height: 200px;
   background: var(--panel);
@@ -264,6 +262,7 @@ body {
   display: flex;
   flex-direction: column;
   z-index: 200;
+  overflow: hidden; /* 编辑器直角贴边，靠外层圆角裁剪 */
 }
 .fwindow .fwin-title {
   display: flex;
@@ -276,22 +275,48 @@ body {
   flex: none;
 }
 .fwindow .fwin-title .spacer { margin-left: auto; }
-.fwindow .fwin-body {
-  flex: 1;
-  overflow: auto;
-  padding: 8px 10px;
+.fwindow .fwin-title .dirty-dot { color: var(--warn); font-size: 0.9em; }
+.fwindow .fwin-head {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-height: 0;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.92em;
+  flex: none;
+  min-width: 0;
 }
-.fwindow pre {
-  margin: 0;
+.fwindow .fwin-head strong {
   font-family: var(--mono);
-  font-size: 0.9em;
-  white-space: pre-wrap;
   word-break: break-all;
-  user-select: text;
+}
+.fwindow .fwin-editor {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+.fwindow .editor-host {
+  position: absolute;
+  inset: 0;
+}
+.fwindow .editor-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-weak);
+  background: #fafbfd;
+  z-index: 1;
+}
+.fwindow .fwin-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  z-index: 2;
 }
 
 /* -- 对话框内部布局（n-modal preset=card，内容区/操作区/状态行） ------------------- */

@@ -43,31 +43,31 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Io(e) => write!(f, "i/o error: {e}"),
-            Error::NotAnArchive => write!(f, "no MPQ archive header found in this file"),
+            Error::Io(e) => write!(f, "I/O 错误：{e}"),
+            Error::NotAnArchive => write!(f, "文件中找不到 MPQ 归档头部"),
             Error::UnsupportedVersion(v) => {
-                write!(f, "unsupported MPQ format version field: {v}")
+                write!(f, "无法支持的 MPQ 格式版本字段：{v}")
             }
-            Error::Corrupt(what) => write!(f, "corrupt archive: {what}"),
-            Error::InvalidData(msg) => write!(f, "invalid data: {msg}"),
-            Error::FileNotFound(name) => write!(f, "file not found in archive: {name}"),
-            Error::FileDeleted => write!(f, "file is marked as deleted"),
+            Error::Corrupt(what) => write!(f, "归档损坏：{what}"),
+            Error::InvalidData(msg) => write!(f, "无效数据：{msg}"),
+            Error::FileNotFound(name) => write!(f, "归档中找不到文件：{name}"),
+            Error::FileDeleted => write!(f, "文件已被标记为删除"),
             Error::UnsupportedCompression(m) => {
-                write!(f, "unsupported compression method 0x{m:02x}")
+                write!(f, "无法支持的压缩方法 0x{m:02x}")
             }
-            Error::UnknownFileKey => write!(f, "file is encrypted and the key could not be derived"),
-            Error::ChecksumMismatch(msg) => write!(f, "checksum mismatch: {msg}"),
+            Error::UnknownFileKey => write!(f, "文件已加密，且无法推导出解密密钥"),
+            Error::ChecksumMismatch(msg) => write!(f, "校验和不匹配：{msg}"),
             Error::PasswordRequired => write!(
                 f,
-                "archive is password-protected; supply the password first"
+                "归档受密码保护，请先提供密码"
             ),
             Error::PasswordMismatch => {
-                write!(f, "password verification failed (wrong password?)")
+                write!(f, "密码验证失败（密码错误？）")
             }
-            Error::Crypto(msg) => write!(f, "crypto error: {msg}"),
+            Error::Crypto(msg) => write!(f, "加密错误：{msg}"),
             Error::UnsupportedScheme(v) => write!(
                 f,
-                "unsupported password-encryption scheme version: {v}"
+                "无法支持的密码加密方案版本：{v}"
             ),
         }
     }

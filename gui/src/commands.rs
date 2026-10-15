@@ -44,6 +44,13 @@ pub fn reload_archive(state: St) -> Result<OpenResult, String> {
     Ok(s.load(path, bytes))
 }
 
+/// 关闭当前归档（文件菜单）：释放后端保存的字节、主密钥与
+/// 修复 / 修改 / 转换的中间结果。
+#[tauri::command]
+pub fn close_archive(state: St) {
+    *lock(&state) = GuiState::default();
+}
+
 // -- 密码保护（自定义 AEAD 扩展）---------------------------------
 
 /// 针对 `(password)` 保管库校验密码，并把主密钥保存在状态中，
@@ -65,29 +72,26 @@ pub fn unlock_archive(password: String, state: St) -> Result<NoteDto, String> {
     })
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PasswordOpSpec {
-    /// 取值："set" | "change" | "remove"
-    pub op: String,
-    pub password: String,
-    pub new_password: Option<String>,
-}
-
-/// 对已载入的原始字节应用密码操作；结果（与 apply_modify 一样）
-/// 保留在状态中，直到保存 / 打开 / 丢弃。
+/// 对已载入的原始字节应用密码操作（`op` 取值 "set" | "change" |
+/// "remove"）；结果（与 apply_modify 一样）保留在状态中，直到保存 /
+/// 打开 / 丢弃。
 #[tauri::command]
-pub fn apply_password_op(spec: PasswordOpSpec, state: St) -> Result<NoteDto, String> {
+pub fn apply_password_op(
+    op: String,
+    password: String,
+    new_password: Option<String>,
+    state: St,
+) -> Result<NoteDto, String> {
     let mut s = lock(&state);
     if s.raw.is_empty() {
         return Err("请先打开一个归档。".to_string());
     }
-    let note = match spec.op.as_str() {
+    let note = match op.as_str() {
         "set" => {
-            if spec.password.is_empty() {
+            if password.is_empty() {
                 return Err("密码不能为空。".to_string());
             }
-            let outcome = mpq::protect(&s.raw, &spec.password, &mpq::Argon2Params::default())
+            let outcome = mpq::protect(&s.raw, &password, &mpq::Argon2Params::default())
                 .map_err(|e| format!("设置密码失败：{e}"))?;
             // 保留新生成的主密钥，这样保存后重新载入仍保持解锁状态。
             s.master_key = outcome.master_key;
@@ -106,8 +110,7 @@ pub fn apply_password_op(spec: PasswordOpSpec, state: St) -> Result<NoteDto, Str
             note
         }
         "change" => {
-            let new = spec
-                .new_password
+            let new = new_password
                 .as_deref()
                 .ok_or("缺少新密码。")?
                 .to_string();
@@ -115,7 +118,7 @@ pub fn apply_password_op(spec: PasswordOpSpec, state: St) -> Result<NoteDto, Str
                 return Err("新密码不能为空。".to_string());
             }
             let bytes =
-                mpq::change_password(&s.raw, &spec.password, &new, &mpq::Argon2Params::default())
+                mpq::change_password(&s.raw, &password, &new, &mpq::Argon2Params::default())
                     .map_err(|e| format!("修改密码失败：{e}"))?;
             // 主密钥未变；s.master_key 依然有效。
             let note = "已更换密码（仅重新包装主密钥，数据未重写）。".to_string();
@@ -123,7 +126,7 @@ pub fn apply_password_op(spec: PasswordOpSpec, state: St) -> Result<NoteDto, Str
             note
         }
         "remove" => {
-            let outcome = mpq::unprotect(&s.raw, &spec.password)
+            let outcome = mpq::unprotect(&s.raw, &password)
                 .map_err(|e| format!("解除密码保护失败：{e}"))?;
             s.master_key = None;
             let note = format!(
@@ -138,6 +141,67 @@ pub fn apply_password_op(spec: PasswordOpSpec, state: St) -> Result<NoteDto, Str
     Ok(NoteDto { note })
 }
 
+/// 密码记录文本文档中用于自我标识的标记行（删除前据此确认文件
+/// 确实是本工具生成的记录，而不是碰巧同名的无关文件）。
+const PASSWORD_NOTE_MARK: &str = "的打开密码";
+
+/// 在归档同目录维护一份密码记录文本文档（`<主名>.txt`）：
+/// `password` 为 `Some` 时写入（设置 / 修改密码保存后调用），
+/// `None` 时删除（解除密码保护后调用，且只删除带标记的记录文件）。
+/// 密码以明文保存，仅作备忘。
+#[tauri::command]
+pub fn write_password_note(
+    archive_path: String,
+    password: Option<String>,
+) -> Result<NoteDto, String> {
+    let path = Path::new(&archive_path);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .ok_or_else(|| format!("无法从路径取得文件名 {archive_path}"))?;
+    let mut note_path = path.to_path_buf();
+    note_path.set_file_name(format!("{stem}.txt"));
+
+    match password {
+        Some(pw) => {
+            let file_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| archive_path.clone());
+            // UTF-8 BOM + CRLF：Windows 记事本双击打开不乱码。
+            let text = format!(
+                "\u{FEFF}「{file_name}」{PASSWORD_NOTE_MARK}：\r\n{pw}\r\n\r\n\
+                 （本文件以明文记录密码，请妥善保管或及时删除）\r\n"
+            );
+            std::fs::write(&note_path, text).map_err(|e| format!("写入密码记录失败：{e}"))?;
+            Ok(NoteDto {
+                note: format!("密码已记录到 {}", note_path.display()),
+            })
+        }
+        None => {
+            if !note_path.exists() {
+                return Ok(NoteDto {
+                    note: format!("未发现密码记录 {}", note_path.display()),
+                });
+            }
+            let existing = std::fs::read_to_string(&note_path)
+                .map_err(|e| format!("读取密码记录失败：{e}"))?;
+            if !existing.contains(PASSWORD_NOTE_MARK) {
+                return Ok(NoteDto {
+                    note: format!(
+                        "未删除 {}：同名文件不是本工具生成的密码记录",
+                        note_path.display()
+                    ),
+                });
+            }
+            std::fs::remove_file(&note_path).map_err(|e| format!("删除密码记录失败：{e}"))?;
+            Ok(NoteDto {
+                note: format!("已删除密码记录 {}", note_path.display()),
+            })
+        }
+    }
+}
+
 // -- 预览 / 提取 ------------------------------------------------------------
 
 #[derive(Serialize)]
@@ -145,9 +209,77 @@ pub struct PreviewDto {
     pub text: String,
     pub size: usize,
     pub truncated: bool,
+    /// 实际使用的文本编码（"UTF-8" / "GBK" / "UTF-16LE" / "UTF-16BE"）。
+    pub encoding: String,
+    /// 内容按有损 UTF-8 回退（多半是二进制）——前端据此禁止编辑。
+    pub binary: bool,
 }
 
-/// 为预览窗口读取一个具名文件（前 256 KiB，按有损 UTF-8 解码）。
+struct Decoded {
+    text: String,
+    encoding: &'static str,
+    /// 走了有损 UTF-8 回退（无法可靠还原原字节）。
+    lossy: bool,
+}
+
+/// 预览文本解码：BOM → 严格 UTF-8 → GBK（中文 MPQ 文本最常见的本地编码）。
+/// GBK 解码结果含汉字（或完全无解码错误）就按 GBK 采用；既无汉字又有
+/// 非法序列的多半是二进制数据，退回有损 UTF-8 以保留 ASCII 部分。
+fn decode_preview(slice: &[u8]) -> Decoded {
+    if slice.starts_with(&[0xFF, 0xFE]) {
+        let (s, _, _) = encoding_rs::UTF_16LE.decode(slice);
+        return Decoded { text: s.into_owned(), encoding: "UTF-16LE", lossy: false };
+    }
+    if slice.starts_with(&[0xFE, 0xFF]) {
+        let (s, _, _) = encoding_rs::UTF_16BE.decode(slice);
+        return Decoded { text: s.into_owned(), encoding: "UTF-16BE", lossy: false };
+    }
+    if let Ok(s) = std::str::from_utf8(slice) {
+        return Decoded { text: s.to_string(), encoding: "UTF-8", lossy: false };
+    }
+    let (s, _, had_errors) = encoding_rs::GBK.decode(slice);
+    let s = s.into_owned();
+    let has_cjk = s.chars().any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c));
+    if has_cjk || !had_errors {
+        Decoded { text: s, encoding: "GBK", lossy: false }
+    } else {
+        Decoded {
+            text: String::from_utf8_lossy(slice).into_owned(),
+            encoding: "UTF-8",
+            lossy: true,
+        }
+    }
+}
+
+/// 把编辑后的文本按预览时识别的编码写回字节（UTF-16 保留 BOM），
+/// 保证归档里的其它字节不被改动。无法映射的字符按 WHATWG 标准以
+/// 数字字符引用（如 `&#128512;`）写入。
+///
+/// 注意 UTF-16 必须手动按 code unit 序列化：encoding_rs 的
+/// `UTF_16xx.encode()` 遵循 WHATWG 规范，实际输出 UTF-8 字节。
+fn encode_text(text: &str, encoding: &str) -> Result<Vec<u8>, String> {
+    match encoding {
+        "UTF-8" | "" => Ok(text.as_bytes().to_vec()),
+        "GBK" => Ok(encoding_rs::GBK.encode(text).0.into_owned()),
+        "UTF-16LE" => {
+            let mut out = vec![0xFF, 0xFE];
+            for u in text.encode_utf16() {
+                out.extend_from_slice(&u.to_le_bytes());
+            }
+            Ok(out)
+        }
+        "UTF-16BE" => {
+            let mut out = vec![0xFE, 0xFF];
+            for u in text.encode_utf16() {
+                out.extend_from_slice(&u.to_be_bytes());
+            }
+            Ok(out)
+        }
+        other => Err(format!("未知编码 {other}")),
+    }
+}
+
+/// 为预览窗口读取一个具名文件（前 256 KiB）。
 #[tauri::command]
 pub fn preview_file(name: String, state: St) -> Result<PreviewDto, String> {
     const LIMIT: usize = 256 * 1024;
@@ -158,10 +290,56 @@ pub fn preview_file(name: String, state: St) -> Result<PreviewDto, String> {
     let data = archive.read_file(&name).map_err(|e| e.to_string())?;
     let truncated = data.len() > LIMIT;
     let slice = &data[..data.len().min(LIMIT)];
+    let d = decode_preview(slice);
     Ok(PreviewDto {
-        text: String::from_utf8_lossy(slice).to_string(),
+        text: d.text,
         size: data.len(),
         truncated,
+        encoding: d.encoding.to_string(),
+        binary: d.lossy,
+    })
+}
+
+#[derive(Serialize)]
+pub struct StagedDto {
+    /// 归档内的条目名（含子目录路径，原样传入的名字）。
+    pub name: String,
+    /// 临时文件路径；「应用修改」时从这里读取字节。
+    pub path: String,
+    pub size: usize,
+    /// 是否存在同名的归档条目（保存将替换它）。
+    pub replaces: bool,
+}
+
+/// 把预览窗中编辑后的文本按原编码写入临时文件，返回其路径，
+/// 供前端作为「修改归档 → 待导入」条目排队（保存回到归档的流程）。
+#[tauri::command]
+pub fn stage_edited_file(
+    name: String,
+    text: String,
+    encoding: String,
+    state: St,
+) -> Result<StagedDto, String> {
+    let bytes = encode_text(&text, &encoding)?;
+    let dir = std::env::temp_dir().join("mpqtool-edit");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    // 临时文件名：全路径名净化（\ / 等替换为 _），同名条目的多次编辑后者覆盖前者。
+    let sanitized: String = name
+        .chars()
+        .map(|c| matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_').then_some(c).unwrap_or('_'))
+        .collect();
+    let file = dir.join(sanitized);
+    std::fs::write(&file, &bytes).map_err(|e| format!("写入临时文件失败：{e}"))?;
+    let s = lock(&state);
+    let replaces = s
+        .archive
+        .as_ref()
+        .is_some_and(|a| a.find_file(&name).is_some());
+    Ok(StagedDto {
+        name,
+        path: file.to_string_lossy().to_string(),
+        size: bytes.len(),
+        replaces,
     })
 }
 
@@ -288,6 +466,81 @@ pub fn open_repaired(state: St) -> Result<OpenResult, String> {
         .map(|p| tasks::repaired_path(p))
         .unwrap_or_else(|| PathBuf::from("repaired.mpq"));
     Ok(s.load(path, fixed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_preview, encode_text};
+
+    #[test]
+    fn gbk_text_decodes_as_gbk() {
+        // “中文测试” 的 GBK 编码
+        let d = decode_preview(&[0xD6, 0xD0, 0xCE, 0xC4, 0xB2, 0xE2, 0xCA, 0xD4]);
+        assert_eq!((d.text.as_str(), d.encoding, d.lossy), ("中文测试", "GBK", false));
+    }
+
+    #[test]
+    fn utf8_stays_utf8() {
+        let d = decode_preview("中文 ASCII".as_bytes());
+        assert_eq!((d.text.as_str(), d.encoding, d.lossy), ("中文 ASCII", "UTF-8", false));
+    }
+
+    #[test]
+    fn utf16_bom_sniffed() {
+        let mut le = vec![0xFF, 0xFE];
+        for u in "中文".encode_utf16() {
+            le.extend_from_slice(&u.to_le_bytes());
+        }
+        let d = decode_preview(&le);
+        assert_eq!((d.text.as_str(), d.encoding, d.lossy), ("中文", "UTF-16LE", false));
+    }
+
+    #[test]
+    fn binary_falls_back_to_lossy_utf8() {
+        // 0xFF 在 GBK 中非法且无汉字：应触发有损 UTF-8 回退（禁止编辑）。
+        let d = decode_preview(&[0xFFu8; 64]);
+        assert_eq!((d.encoding, d.lossy), ("UTF-8", true));
+    }
+
+    #[test]
+    fn gbk_truncated_at_boundary_still_gbk() {
+        // “中文测试” 截断在最后一个字符中间：仅一个替换符，仍按 GBK 展示。
+        let d = decode_preview(&[0xD6, 0xD0, 0xCE, 0xC4, 0xB2, 0xE2, 0xCA]);
+        assert_eq!(d.encoding, "GBK");
+        assert!(d.text.starts_with("中文测"));
+        assert!(d.text.ends_with('\u{FFFD}'));
+    }
+
+    /// 解码 → 编辑 → 按原编码回写，字节应与原文件一致（无丢失字符时）。
+    fn roundtrip(bytes: &[u8]) {
+        let d = decode_preview(bytes);
+        let back = encode_text(&d.text, d.encoding).unwrap();
+        assert_eq!(back, bytes);
+    }
+
+    #[test]
+    fn gbk_roundtrip() {
+        roundtrip(&[0xD6, 0xD0, 0xCE, 0xC4, 0xB2, 0xE2, 0xCA, 0xD4]);
+    }
+
+    #[test]
+    fn utf16_roundtrip() {
+        let mut le = vec![0xFF, 0xFE];
+        for u in "中文 edited!".encode_utf16() {
+            le.extend_from_slice(&u.to_le_bytes());
+        }
+        roundtrip(&le);
+    }
+
+    #[test]
+    fn utf8_roundtrip() {
+        roundtrip("中文 mixed\ntext\r\n".as_bytes());
+    }
+
+    #[test]
+    fn encode_rejects_unknown_encoding() {
+        assert!(encode_text("x", "latin1").is_err());
+    }
 }
 
 /// 丢弃待处理的修复结果（窗口已关闭）。

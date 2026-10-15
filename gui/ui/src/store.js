@@ -28,7 +28,7 @@ export const S = reactive({
   repair: null,          // { issues, applied, note }
   modify: null,          // { additions, deletions, reencrypt, busy }
   create: null,          // { version, hashSize, note } — 新建归档弹窗
-  convert: null,         // { target, applied, note } — 版本转换弹窗
+  convert: null,         // { target, running, note } — 版本转换弹窗
   pw: null,              // 密码弹窗：{ mode: 'unlock'|'set'|'change'|'remove', … }
   settingsOpen: false,
   logs: [],
@@ -194,6 +194,30 @@ export async function reloadArchive() {
   }
 }
 
+/** 文件菜单「关闭归档」：清空前端状态，并让后端释放归档字节、
+ *  主密钥与修复 / 修改 / 转换的中间结果。未保存的「修改归档」
+ *  待办一并丢弃。 */
+export function closeArchive() {
+  if (!S.openPath) return
+  const hadPending = !!S.modify &&
+    (S.modify.additions.length > 0 || S.modify.deletions.length > 0)
+  log(`已关闭 ${S.openPath}`)
+  if (hadPending) log('（关闭归档清空了未保存的「修改归档」待办）')
+  S.info = null
+  S.openPath = null
+  S.cwd = []
+  S.expanded = []
+  S.selected.clear()
+  S.filter = ''
+  S.appliedFilter = ''
+  S.preview = null
+  S.modify = null
+  S.convert = null
+  S.repair = null
+  S.pw = null
+  ipc.invoke('close_archive').catch(() => {})
+}
+
 export async function handleDrop(paths) {
   if (S.info) {
     log(`（通过拖拽导入 ${U.fmtBytes(paths.length)} 个文件）`)
@@ -221,10 +245,19 @@ export async function handleDrop(paths) {
 export async function previewFile(name) {
   try {
     const p = await ipc.invoke('preview_file', { name })
-    const note = p.truncated
-      ? `（仅显示前 256 字节，共 ${U.fmtBytes(p.size)} 字节）`
-      : `（${U.fmtBytes(p.size)} 字节）`
-    S.preview = { name: `${name} ${note}`, text: p.text }
+    S.preview = {
+      name,                         // 归档内条目名（编辑保存时也用它）
+      text: p.text,
+      size: p.size,
+      encoding: p.encoding || 'UTF-8',
+      truncated: !!p.truncated,
+      binary: !!p.binary,
+      // 截断（后半未加载）或二进制回退时只读，避免保存出损坏内容。
+      editable: !p.truncated && !p.binary,
+      dirty: false,                 // Monaco 里是否改过
+      saving: false,
+      armed: false,                 // 有未保存修改时关闭需二次确认
+    }
   } catch (e) {
     log(`预览失败 ${name}: ${e}`)
     toast.error(`预览失败 ${name}: ${e}`)
@@ -235,21 +268,57 @@ export function closePreview() {
   S.preview = null
 }
 
+/** 预览窗「保存」：按原编码写临时文件（后端），再把该文件排队到
+ * 「修改归档 → 待导入」，由用户在弹窗中确认应用/写盘。 */
+export async function savePreviewEdit(text) {
+  const p = S.preview
+  if (!p || !p.editable || p.saving) return
+  p.saving = true
+  try {
+    const st = await ipc.invoke('stage_edited_file', {
+      name: p.name, text, encoding: p.encoding,
+    })
+    S.modify ??= defaultModify()
+    const dupIdx = S.modify.additions.findIndex((a) => a.name.toLowerCase() === p.name.toLowerCase())
+    const item = {
+      name: p.name,
+      path: st.path,
+      size: st.size,
+      replaces: st.replaces || dupIdx >= 0,
+    }
+    if (dupIdx >= 0) S.modify.additions[dupIdx] = item
+    else S.modify.additions.push(item)
+    p.dirty = false
+    p.armed = false
+    log(`已保存编辑 ${p.name}（${U.fmtBytes(st.size)} 字节，${item.replaces ? '替换已有文件' : '新增'}），在「修改归档」窗口中应用`)
+    toast.success(`已保存编辑：${p.name}（在「修改归档」中确认写入）`)
+  } catch (e) {
+    log(String(e))
+    toast.error(String(e))
+  }
+  p.saving = false
+}
+
 async function pickFolder(title) {
   return ipc.dialogOpen({ title, directory: true })
 }
 
 export async function extractSelected() {
-  if (S.selected.size === 0) { toast.info('未选择任何文件。'); return }
-  const dir = await pickFolder('选择输出目录')
-  if (!dir) return
-  await runExtract([...S.selected], dir)
+  await extractKeys([...S.selected])
 }
 
 export async function extractAll() {
   const dir = await pickFolder('选择输出目录')
   if (!dir) return
   await runExtract([], dir)
+}
+
+/** 提取指定的一组条目（右键菜单「提取该文件」等入口）。 */
+export async function extractKeys(keys) {
+  if (keys.length === 0) { toast.info('未选择任何文件。'); return }
+  const dir = await pickFolder('选择输出目录')
+  if (!dir) return
+  await runExtract(keys, dir)
 }
 
 async function runExtract(keys, dir) {
@@ -359,14 +428,20 @@ export async function queueImports(paths) {
 
 export function deleteSelected() {
   if (S.selected.size === 0) { toast.info('未选择任何文件。'); return }
+  markDeletions([...S.selected])
+}
+
+/** 标记一组条目待删除（右键菜单「删除该文件」等入口）。 */
+export function markDeletions(keys) {
+  if (keys.length === 0) { toast.info('未选择任何文件。'); return }
   S.modify ??= defaultModify()
 
   // 与 egui 一致：按 (source, block_index) 排序 —— classic 在前、下标升序。
-  const sorted = [...S.selected].sort((a, b) => {
+  const sorted = [...keys].sort((a, b) => {
     const [sa, ia] = a.split(':'), [sb, ib] = b.split(':')
     return sa === sb ? (+ia) - (+ib) : sa.localeCompare(sb)
   })
-  let queued = 0
+
   for (const key of sorted) {
     if (S.modify.deletions.some((d) => d.key === key)) continue
     const entry = entryByKey.value.get(key)
@@ -376,11 +451,6 @@ export function deleteSelected() {
       name: entry.name || null,
       key,
     })
-    queued++
-  }
-  if (queued > 0) {
-    log(`已标记 ${U.fmtBytes(queued)} 项待删除，在「修改归档」窗口中应用。`)
-    toast.info(`已标记 ${U.fmtBytes(queued)} 项待删除，在「修改归档」窗口中确认。`)
   }
 }
 
@@ -467,45 +537,37 @@ function defaultConvertTarget(from) {
 
 export function startConvert() {
   if (!S.info) { toast.info('请先打开一个可解析的归档。'); return }
-  S.convert = { target: defaultConvertTarget(S.info.version), applied: null, note: '' }
+  S.convert = { target: defaultConvertTarget(S.info.version), running: false, note: '' }
 }
 
-export async function applyConvert() {
+/** 「开始转换」：先弹系统保存框选输出位置（默认文件名带目标版本号，
+ *  位于当前归档所在目录），再转换、写盘并重新载入。 */
+export async function runConvert() {
   const c = S.convert
+  if (!c || c.running) return
+  const out = await ipc.dialogSave({
+    title: '保存转换后的归档',
+    defaultPath: suggestedPath(markedName(`v${c.target}`)),
+  })
+  if (!out) return
+  c.running = true
+  c.note = '正在转换…'
   try {
     const r = await ipc.invoke('apply_convert', { target: c.target })
-    c.note = r.note
-    c.applied = r.applied ? r.note : null
-  } catch (e) {
-    c.note = `转换失败：${e}`
-  }
-}
-
-export async function saveConverted() {
-  const base = basenameOf(S.openPath || '')
-  const m = base.match(/^(.*?)(\.[^.]*)?$/)
-  const suggested = `${m[1]}.v${S.convert.target}${m[2] || '.mpq'}`
-  const out = await ipc.dialogSave({ title: '保存转换后的归档', defaultPath: suggested })
-  if (!out) return
-  try {
+    if (!r.applied) {
+      c.note = r.note
+      return
+    }
+    log(r.note)
     const res = await ipc.invoke('save_converted', { path: out })
     log(`转换结果已保存到 ${out}`)
     S.convert = null
     ipc.invoke('discard_convert').catch(() => {})
     applyOpenResult(res)
   } catch (e) {
-    S.convert.note = String(e) // 保存失败：…
-  }
-}
-
-export async function openConverted() {
-  try {
-    const res = await ipc.invoke('open_converted')
-    S.convert = null
-    ipc.invoke('discard_convert').catch(() => {})
-    applyOpenResult(res)
-  } catch (e) {
-    log(String(e))
+    c.note = `转换失败：${e}`
+  } finally {
+    c.running = false
   }
 }
 
@@ -525,7 +587,9 @@ function startPwModal(mode) {
     confirm: '',          // set / change 的确认输入
     busy: false,
     error: '',
-    applied: null,        // 应用成功后的说明文本
+  }
+  if (mode === 'unlock') {
+    toast.info('文件名无需密码即可浏览；读取、提取和修改文件内容需要密码。')
   }
 }
 
@@ -566,10 +630,26 @@ export async function submitUnlock() {
   }
 }
 
-/** 密码操作确认（set / change / remove）：应用到已载入字节，结果待保存。 */
+/** 在当前归档所在目录生成建议输出路径（name 为完整文件名）；
+ *  没有磁盘来源时退化为纯文件名，由保存对话框采用默认目录。 */
+function suggestedPath(name) {
+  const full = S.openPath || ''
+  const i = Math.max(full.lastIndexOf('\\'), full.lastIndexOf('/'))
+  return i >= 0 ? full.slice(0, i + 1) + name : name
+}
+
+/** 在原文件名的扩展名前插入标记：demo.w3x → demo.<marker>.w3x。 */
+function markedName(marker) {
+  const m = U.basenameOf(S.openPath || '').match(/^(.*?)(\.[^.]*)?$/)
+  return `${m[1]}.${marker}${m[2] || '.mpq'}`
+}
+
+/** 密码操作确认（set / change / remove）：先选保存位置，再应用到已
+ *  载入字节、写盘并重新载入。设置密码默认输出「原名.protected.扩展名」，
+ *  修改 / 解除默认沿用原文件名（对话框中均可改）。 */
 export async function confirmPwOp() {
   const p = S.pw
-  if (!p || p.busy || p.applied) return
+  if (!p || p.busy) return
   if (p.mode === 'set') {
     if (!p.password) { p.error = '请输入密码。'; return }
     if (p.password !== p.confirm) { p.error = '两次输入的密码不一致。'; return }
@@ -580,6 +660,10 @@ export async function confirmPwOp() {
   } else if (!p.password) {
     p.error = '请输入当前密码。'; return
   }
+  const suggested = suggestedPath(
+    p.mode === 'set' ? markedName('protected') : U.basenameOf(S.openPath || ''))
+  const out = await ipc.dialogSave({ title: '保存密码操作后的归档', defaultPath: suggested })
+  if (!out) return
   p.busy = true
   p.error = ''
   try {
@@ -587,8 +671,22 @@ export async function confirmPwOp() {
       ? { op: 'change', password: p.password, newPassword: p.newPassword }
       : { op: p.mode, password: p.password }
     const r = await ipc.invoke('apply_password_op', args)
-    p.applied = r.note
     log(r.note)
+    const res = await ipc.invoke('save_modified', { path: out })
+    S.pw = null
+    ipc.invoke('discard_modify').catch(() => {})
+    // 在生成的归档旁维护「同名 .txt」密码记录：set/change 写入，
+    // remove 删除。失败只记日志，不影响已保存的归档。
+    const password = p.mode === 'remove' ? null
+      : p.mode === 'change' ? p.newPassword : p.password
+    try {
+      const r2 = await ipc.invoke('write_password_note', { archivePath: out, password })
+      if (r2?.note) log(r2.note)
+    } catch (e) {
+      log(`（密码记录文件更新失败：${e}）`)
+    }
+    applyOpenResult(res)
+    log(`密码操作结果已保存到 ${out}`)
     toast.success(r.note)
   } catch (e) {
     p.error = String(e)
@@ -596,40 +694,12 @@ export async function confirmPwOp() {
   p.busy = false
 }
 
-/** 保存密码操作结果（复用修改归档的保存/重载通道）。 */
-export async function savePwResult() {
-  const p = S.pw
-  if (!p?.applied) return
-  const suggested = U.basenameOf(S.openPath || '')
-  const out = await ipc.dialogSave({ title: '保存密码操作后的归档', defaultPath: suggested })
-  if (!out) return
-  try {
-    const res = await ipc.invoke('save_modified', { path: out })
-    S.pw = null
-    ipc.invoke('discard_modify').catch(() => {})
-    applyOpenResult(res)
-    log(`密码操作结果已保存到 ${out}`)
-  } catch (e) {
-    if (p) p.error = String(e) // 保存失败：结果仍在，可重试
-  }
-}
-
-/** 在界面中打开密码操作结果（不写盘）。 */
-export async function openPwResult() {
-  try {
-    const res = await ipc.invoke('open_modified')
-    S.pw = null
-    ipc.invoke('discard_modify').catch(() => {})
-    applyOpenResult(res)
-  } catch (e) {
-    log(String(e))
-  }
-}
-
 /** 关闭密码弹窗（未保存的已应用结果一并丢弃）。 */
 export function closePw() {
+  const wasUnlock = S.pw?.mode === 'unlock'
   S.pw = null
   ipc.invoke('discard_modify').catch(() => {})
+  if (wasUnlock) toast.info('仍可浏览文件列表；读取、提取和修改内容时会提示需要密码。')
 }
 
 // ---------------------------------------------------------------------------

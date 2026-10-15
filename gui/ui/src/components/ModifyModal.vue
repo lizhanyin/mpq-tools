@@ -1,19 +1,3 @@
-<script setup>
-import { computed } from 'vue'
-import { NModal, NButton, NTag, NCheckbox, NTooltip } from 'naive-ui'
-import { S, confirmModify, closeModify } from '../store'
-import { fmtBytes } from '../utils'
-
-const adds = computed(() => S.modify?.additions.length ?? 0)
-const dels = computed(() => S.modify?.deletions.length ?? 0)
-const empty = computed(() => adds.value === 0 && dels.value === 0)
-const busy = computed(() => !!S.modify?.busy)
-// 常态（先排队一类再打开弹窗）只显示有待办的一列；
-// 两类都有（弹窗开着时拖入文件）才同时显示两列。
-const showImports = computed(() => adds.value > 0 || dels.value === 0)
-const showDeletes = computed(() => dels.value > 0)
-</script>
-
 <template>
   <n-modal
     :show="!!S.modify"
@@ -117,3 +101,19 @@ const showDeletes = computed(() => dels.value > 0)
     </template>
   </n-modal>
 </template>
+
+<script setup>
+  import { computed } from 'vue'
+  import { NModal, NButton, NTag, NCheckbox, NTooltip } from 'naive-ui'
+  import { S, confirmModify, closeModify } from '../store'
+  import { fmtBytes } from '../utils'
+
+  const adds = computed(() => S.modify?.additions.length ?? 0)
+  const dels = computed(() => S.modify?.deletions.length ?? 0)
+  const empty = computed(() => adds.value === 0 && dels.value === 0)
+  const busy = computed(() => !!S.modify?.busy)
+  // 常态（先排队一类再打开弹窗）只显示有待办的一列；
+  // 两类都有（弹窗开着时拖入文件）才同时显示两列。
+  const showImports = computed(() => adds.value > 0 || dels.value === 0)
+  const showDeletes = computed(() => dels.value > 0)
+</script>

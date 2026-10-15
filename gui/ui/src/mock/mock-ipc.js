@@ -69,19 +69,33 @@ const MOCK_TEXT = `function config takes nothing returns nothing\n    call SetMa
 const MOCKS = {
   open_archive: () => okOpen(),
   reload_archive: () => okOpen(),
+  close_archive: () => null,
   unlock_archive: ({ password }) => {
     if (password === 'wrong') throw new Error('密码错误。')
     return { note: '已解锁：可以读取、提取和修改加密文件。' }
   },
+  write_password_note: ({ archivePath, password }) => ({
+    note: password
+      ? `密码已记录到 ${archivePath.replace(/\.[^.\/]+$/, '')}.txt`
+      : '未发现密码记录 …',
+  }),
   apply_password_op: ({ op }) => ({
     note: op === 'set'
-      ? '已启用密码保护（9 个文件已按扇区密封，容器转为 v4）。注意：第三方 MPQ 工具将无法打开该文件。'
-      : op === 'change' ? '已更换密码（仅重新包装主密钥，数据未重写）。' : '已解除密码保护（9 个文件已解密）。',
+      ? '已启用密码保护（9 个文件已按扇区密封，容器转为 v4）。'
+      : op === 'change' ? '已更换密码。' : '已解除密码保护（9 个文件已解密）。',
   }),
   preview_file: ({ name }) => ({
     text: `--- ${name} ---\n` + MOCK_TEXT,
-    size: name.length + MOCK_TEXT.length + 300000,
-    truncated: true,
+    size: name.length + MOCK_TEXT.length + 120,
+    truncated: false,
+    encoding: 'UTF-8',
+    binary: false,
+  }),
+  stage_edited_file: ({ name, text }) => ({
+    name,
+    path: `C:\\Users\\dev\\AppData\\Local\\Temp\\mpqtool-edit\\${name.replace(/[\\/]/g, '_')}`,
+    size: text.length,
+    replaces: name === 'war3map.j',
   }),
   extract: ({ keys, dir }) => ({
     ok: keys.length || 9,
@@ -165,7 +179,9 @@ export function dialogOpen(opts) {
 }
 
 export function dialogSave(opts) {
-  return Promise.resolve(`D:\\maps\\${(opts && opts.defaultPath) || 'out.w3x'}`)
+  const p = (opts && opts.defaultPath) || 'out.w3x'
+  // 绝对路径原样返回（建议路径现在带目录）；纯文件名落到 mock 目录。
+  return Promise.resolve(/^[A-Za-z]:[\\/]/.test(p) ? p : `D:\\maps\\${p}`)
 }
 
 export function closeWindow() {

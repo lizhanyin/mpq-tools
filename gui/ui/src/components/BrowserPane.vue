@@ -1,45 +1,3 @@
-<script setup>
-import { ref, computed } from 'vue'
-import { NButton, NInput } from 'naive-ui'
-import FileTree from './FileTree.vue'
-import FileTable from './FileTable.vue'
-import {
-  S, searching, searchResults,
-  setFilter, reloadArchive, navigate,
-  extractSelected, deleteSelected,
-} from '../store'
-import { fmtBytes, nodeAt } from '../utils'
-
-// -- 目录树宽度（可拖动分隔条） ------------------------------------------------
-
-const browserEl = ref(null)
-const treeWidth = ref(230)
-const dragging = ref(false)
-
-function startSplit(ev) {
-  dragging.value = true
-  const move = (e) => {
-    const rect = browserEl.value.getBoundingClientRect()
-    const w = Math.min(Math.max(e.clientX - rect.left, 150), Math.max(200, rect.width * 0.6))
-    treeWidth.value = w
-  }
-  const up = () => {
-    dragging.value = false
-    window.removeEventListener('pointermove', move)
-    window.removeEventListener('pointerup', up)
-  }
-  window.addEventListener('pointermove', move)
-  window.addEventListener('pointerup', up)
-}
-
-// -- 工具栏 / 面包屑 ------------------------------------------------------------
-
-const selCount = S.selected // 模板中直接读 S.selected.size
-
-const cwdNode = computed(() => (S.info && !searching.value) ? nodeAt(S.info.tree, S.cwd) : null)
-const matchCount = computed(() => searching.value ? searchResults.value.length : 0)
-</script>
-
 <template>
   <div ref="browserEl" class="browser">
     <div class="tree-panel" :style="{ width: treeWidth + 'px' }">
@@ -50,6 +8,9 @@ const matchCount = computed(() => searching.value ? searchResults.value.length :
 
     <div class="files-panel">
       <div class="toolbar">
+        <n-button size="small"
+                  title="选择文件加入「修改归档」的待导入列表"
+                  @click="importFilesDialog">导入文件</n-button>
         <n-button size="small" :disabled="selCount.size === 0" @click="extractSelected">提取选中</n-button>
         <n-button size="small" :disabled="selCount.size === 0"
                   title="标记选中条目待删除，随后在「修改归档」窗口应用"
@@ -89,3 +50,45 @@ const matchCount = computed(() => searching.value ? searchResults.value.length :
     </div>
   </div>
 </template>
+
+<script setup>
+  import { ref, computed } from 'vue'
+  import { NButton, NInput } from 'naive-ui'
+  import FileTree from './FileTree.vue'
+  import FileTable from './FileTable.vue'
+  import {
+    S, searching, searchResults,
+    setFilter, reloadArchive, navigate,
+    extractSelected, deleteSelected, importFilesDialog,
+  } from '../store'
+  import { fmtBytes, nodeAt } from '../utils'
+
+  // -- 目录树宽度（可拖动分隔条） ------------------------------------------------
+
+  const browserEl = ref(null)
+  const treeWidth = ref(230)
+  const dragging = ref(false)
+
+  function startSplit(ev) {
+    dragging.value = true
+    const move = (e) => {
+      const rect = browserEl.value.getBoundingClientRect()
+      const w = Math.min(Math.max(e.clientX - rect.left, 150), Math.max(200, rect.width * 0.6))
+      treeWidth.value = w
+    }
+    const up = () => {
+      dragging.value = false
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
+  // -- 工具栏 / 面包屑 ------------------------------------------------------------
+
+  const selCount = S.selected // 模板中直接读 S.selected.size
+
+  const cwdNode = computed(() => (S.info && !searching.value) ? nodeAt(S.info.tree, S.cwd) : null)
+  const matchCount = computed(() => searching.value ? searchResults.value.length : 0)
+</script>

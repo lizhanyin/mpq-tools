@@ -7,6 +7,10 @@ import { installIpc } from './ipc'
 import { initStore } from './store'
 import './style.css'
 
+/* 屏蔽 webview 默认右键菜单。只在 document 层 preventDefault、不拦截
+ * 传播，Monaco 等组件内部的右键菜单仍照常工作。 */
+document.addEventListener('contextmenu', (e) => e.preventDefault())
+
 async function boot() {
   await installIpc()
   initStore()

@@ -1,15 +1,3 @@
-<script setup>
-import { computed } from 'vue'
-import { NModal, NButton, NTag, NEmpty } from 'naive-ui'
-import { S, applyRepair, saveRepaired, openRepaired, closeRepair } from '../store'
-
-const fixable = computed(() =>
-  S.repair ? S.repair.issues.filter((i) => i.action).length : 0)
-const fatal = computed(() =>
-  S.repair ? S.repair.issues.length - fixable.value : 0)
-const noteIsError = computed(() => (S.repair?.note || '').includes('失败'))
-</script>
-
 <template>
   <n-modal
     :show="!!S.repair"
@@ -63,3 +51,15 @@ const noteIsError = computed(() => (S.repair?.note || '').includes('失败'))
     </template>
   </n-modal>
 </template>
+
+<script setup>
+  import { computed } from 'vue'
+  import { NModal, NButton, NTag, NEmpty } from 'naive-ui'
+  import { S, applyRepair, saveRepaired, openRepaired, closeRepair } from '../store'
+
+  const fixable = computed(() =>
+    S.repair ? S.repair.issues.filter((i) => i.action).length : 0)
+  const fatal = computed(() =>
+    S.repair ? S.repair.issues.length - fixable.value : 0)
+  const noteIsError = computed(() => (S.repair?.note || '').includes('失败'))
+</script>

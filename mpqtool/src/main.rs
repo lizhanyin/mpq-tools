@@ -659,8 +659,7 @@ fn cmd_encrypt(path: &Path, password: &str, output: Option<PathBuf>) -> i32 {
         Err(e) => return fail(e),
     };
     println!(
-        "已启用密码保护：{} 个文件按扇区密封（ChaCha20-Poly1305），\
-         容器为 MPQ v4。注意：第三方 MPQ 工具将无法打开该文件。",
+        "已启用密码保护：{} 个文件按扇区密封，容器为v4。",
         outcome.report.encrypted
     );
     for w in &outcome.report.dropped {
@@ -700,7 +699,7 @@ fn cmd_passwd(
         Ok(o) => o,
         Err(e) => return fail(e),
     };
-    println!("已更换密码（仅重新包装主密钥，数据未重写）。");
+    println!("已更换密码。");
     write_outcome(path, output, &out)
 }
 

@@ -1,33 +1,3 @@
-<script setup>
-import { computed } from 'vue'
-import { NModal, NButton, NRadioGroup, NRadio, NTag } from 'naive-ui'
-import { S, applyConvert, saveConverted, openConverted, closeConvert } from '../store'
-import { fmtBytes } from '../utils'
-
-const VERSIONS = [
-  { value: 1, label: 'v1' },
-  { value: 2, label: 'v2' },
-  { value: 3, label: 'v3' },
-  { value: 4, label: 'v4' },
-]
-
-const frozen = computed(() => !!S.convert?.applied)
-const noteIsError = computed(() => (S.convert?.note || '').includes('失败'))
-const from = computed(() => S.info?.version ?? 0)
-
-/** 转换后果提示；无法转换的情况由后端在「应用转换」时给出理由。 */
-const hints = computed(() => {
-  if (!S.convert) return []
-  const out = []
-  if (S.convert.target !== from.value && S.info?.het_bet) {
-    out.push('HET/BET 表将改为经典表（文件内容不变，名字取自 (listfile)）')
-  }
-  out.push('(attributes)/(signature) 将自动移除（其校验数据重写后失效）')
-  if (S.convert.target === 4) out.push('v4：将写入头部与各表的 MD5 校验')
-  return out
-})
-</script>
-
 <template>
   <n-modal
     :show="!!S.convert"
@@ -55,7 +25,7 @@ const hints = computed(() => {
         </div>
 
         <div class="field-label">目标版本</div>
-        <n-radio-group v-model:value="S.convert.target" name="convert-target" :disabled="frozen">
+        <n-radio-group v-model:value="S.convert.target" name="convert-target" :disabled="running">
           <div class="version-list">
             <div v-for="v in VERSIONS" :key="v.value" class="version-row">
               <n-radio :value="v.value" :disabled="v.value === from">
@@ -77,15 +47,10 @@ const hints = computed(() => {
 
     <template v-if="S.convert" #action>
       <div class="dialog-actions">
-        <n-button size="small" quaternary @click="closeConvert">关闭</n-button>
         <div class="grow"></div>
-        <n-button size="small" :disabled="!frozen"
-                  @click="openConverted">在界面中打开结果</n-button>
-        <n-button size="small" :disabled="!frozen"
-                  title="选择保存位置后自动重新载入"
-                  @click="saveConverted">保存到文件…</n-button>
-        <n-button size="small" type="primary" :disabled="frozen"
-                  @click="applyConvert">应用转换</n-button>
+        <n-button size="small" type="primary" :loading="running" @click="runConvert">
+          开始转换
+        </n-button>
       </div>
     </template>
 
@@ -94,3 +59,33 @@ const hints = computed(() => {
     </template>
   </n-modal>
 </template>
+
+<script setup>
+  import { computed } from 'vue'
+  import { NModal, NButton, NRadioGroup, NRadio, NTag } from 'naive-ui'
+  import { S, runConvert, closeConvert } from '../store'
+  import { fmtBytes } from '../utils'
+
+  const VERSIONS = [
+    { value: 1, label: 'v1' },
+    { value: 2, label: 'v2' },
+    { value: 3, label: 'v3' },
+    { value: 4, label: 'v4' },
+  ]
+
+  const running = computed(() => !!S.convert?.running)
+  const noteIsError = computed(() => (S.convert?.note || '').includes('失败'))
+  const from = computed(() => S.info?.version ?? 0)
+
+  /** 转换后果提示；无法转换的情况由后端在「应用转换」时给出理由。 */
+  const hints = computed(() => {
+    if (!S.convert) return []
+    const out = []
+    if (S.convert.target !== from.value && S.info?.het_bet) {
+      out.push('HET/BET 表将改为经典表（文件内容不变，名字取自 (listfile)）')
+    }
+    out.push('(attributes)/(signature) 将自动移除（其校验数据重写后失效）')
+    if (S.convert.target === 4) out.push('v4：将写入头部与各表的 MD5 校验')
+    return out
+  })
+</script>

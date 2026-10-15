@@ -1,23 +1,3 @@
-<script setup>
-import { computed } from 'vue'
-import { NModal, NButton, NRadioGroup, NRadio, NSelect } from 'naive-ui'
-import { S, createArchive, closeCreate } from '../store'
-
-const VERSIONS = [
-  { value: 1, label: 'v1', hint: '经典格式，兼容性最好（魔兽争霸 III 等）' },
-  { value: 2, label: 'v2', hint: 'v1 + hi-block 表（64 位文件偏移）' },
-  { value: 3, label: 'v3', hint: 'v2 + 64 位归档大小与 HET/BET 表' },
-  { value: 4, label: 'v4', hint: 'v3 + 头部与各表的 MD5 校验' },
-]
-
-const HASH_SIZES = [64, 256, 1024, 4096].map((n) => ({
-  label: `${n.toLocaleString('en-US')} 槽`,
-  value: n,
-}))
-
-const noteIsError = computed(() => (S.create?.note || '').includes('失败'))
-</script>
-
 <template>
   <n-modal
     :show="!!S.create"
@@ -64,3 +44,23 @@ const noteIsError = computed(() => (S.create?.note || '').includes('失败'))
     </template>
   </n-modal>
 </template>
+
+<script setup>
+  import { computed } from 'vue'
+  import { NModal, NButton, NRadioGroup, NRadio, NSelect } from 'naive-ui'
+  import { S, createArchive, closeCreate } from '../store'
+
+  const VERSIONS = [
+    { value: 1, label: 'v1', hint: '经典格式，兼容性最好' },
+    { value: 2, label: 'v2', hint: 'v1 + hi-block 表（64 位文件偏移）' },
+    { value: 3, label: 'v3', hint: 'v2 + 64 位归档大小与 HET/BET 表' },
+    { value: 4, label: 'v4', hint: 'v3 + 头部与各表的 MD5 校验' },
+  ]
+
+  const HASH_SIZES = [64, 256, 1024, 4096].map((n) => ({
+    label: `${n.toLocaleString('en-US')} 槽`,
+    value: n,
+  }))
+
+  const noteIsError = computed(() => (S.create?.note || '').includes('失败'))
+</script>
