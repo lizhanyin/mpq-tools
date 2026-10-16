@@ -223,7 +223,19 @@ export function closeArchive() {
 export async function handleDrop(paths) {
   if (S.info) {
     log(`（通过拖拽导入 ${U.fmtBytes(paths.length)} 项文件/文件夹）`)
-    await queueImports(paths)
+    const snapshot = (S.modify?.additions ?? []).map((a) => ({ ...a }))
+    const added = await queueImports(paths)
+    const m = S.modify
+    // 拖入内容含文件夹时按「导入文件夹」处理（可用「只导入子项」）。
+    // 判定：有条目的磁盘路径位于 `该拖入路径\` 之下即为文件夹内容；
+    // 空文件夹没有任何条目，无从切换导入方式，不识别也不影响结果。
+    if (m && !m.folderImport && added?.length) {
+      const hasFolder = paths.some((p) => {
+        const norm = String(p).replace(/[\\/]+$/, '').toLowerCase()
+        return added.some((a) => a.path.toLowerCase().startsWith(norm + '\\'))
+      })
+      if (hasFolder) m.folderImport = { paths, childrenOnly: false, snapshot }
+    }
     return
   }
   try {
@@ -392,8 +404,10 @@ export function toggleSelectAll(on) {
 function defaultModify() {
   return {
     additions: [], deletions: [], reencrypt: true, saveAs: false, busy: false,
-    // 「导入文件夹」会话信息：{ path, childrenOnly, snapshot }，
-    // snapshot 是入队前的待导入快照，供切换「只导入子项」时还原。
+    // 「导入文件夹」会话信息：{ paths, childrenOnly, snapshot }——
+    // paths 是本次导入的源路径（菜单选的文件夹，或拖入的文件/文件夹
+    // 混合列表），snapshot 是入队前的待导入快照，供切换「只导入子项」
+    // 时还原。
     folderImport: null,
   }
 }
@@ -409,10 +423,16 @@ export async function importFilesDialog() {
 export async function importFolderDialog() {
   const dir = await ipc.dialogOpen({ title: '选择要导入的文件夹', directory: true })
   if (!dir) return
+  await queueImportsAsFolder([dir])
+}
+
+/** 按文件夹导入会话入队：记录快照与来源，让「修改归档」里的
+ *  「只导入子项」与「导入到」可用（拖拽导入同样走这里）。 */
+async function queueImportsAsFolder(paths) {
   const snapshot = (S.modify?.additions ?? []).map((a) => ({ ...a }))
-  await queueImports([dir])
-  if (S.modify) {
-    S.modify.folderImport = { path: dir, childrenOnly: false, snapshot }
+  const added = await queueImports(paths)
+  if (S.modify && added?.length) {
+    S.modify.folderImport = { paths, childrenOnly: false, snapshot }
   }
 }
 
@@ -426,7 +446,7 @@ export async function setImportChildrenOnly(on) {
   fi.switching = true
   let stats
   try {
-    stats = await fetchStats([fi.path], { childrenOnly: !!on })
+    stats = await fetchStats(fi.paths, { childrenOnly: !!on })
   } catch (e) {
     log(String(e))
     toast.error(String(e))
@@ -440,15 +460,15 @@ export async function setImportChildrenOnly(on) {
 }
 
 /** 「修改归档」的「导入到」：本次待导入条目落地的归档内目录。
- *  文件夹导入默认落在 `前缀\文件夹名` 下，勾选「只导入子项」后
- *  落在前缀本身（当前浏览目录）；普通文件导入也落在前缀。 */
+ *  单个文件夹以文件夹为根时落在 `前缀\文件夹名` 下；勾选「只导入
+ *  子项」、多个文件夹/混合拖入或普通文件导入落在前缀本身。 */
 export const importTargetDir = computed(() => {
   const m = S.modify
   if (!m) return ''
   const prefix = importPrefix() || ''
   const fi = m.folderImport
-  if (fi && !fi.childrenOnly) {
-    const base = U.basenameOf(fi.path)
+  if (fi && !fi.childrenOnly && fi.paths.length === 1) {
+    const base = U.basenameOf(fi.paths[0])
     return prefix ? `${prefix}\\${base}` : base
   }
   return prefix
@@ -496,17 +516,19 @@ function mergeStats(stats) {
 
   if (added.length === 0) {
     toast.info('没有可导入的文件（所选内容为空或全部读取失败）。')
-    return
+    return []
   }
   added.slice(0, IMPORT_LOG_MAX).forEach((it) =>
     log(`待导入 ${it.name}（${U.fmtBytes(it.size)} 字节，${it.replaces ? '替换已有文件' : '新增'}）`))
   if (added.length > IMPORT_LOG_MAX) {
     log(`（其余 ${added.length - IMPORT_LOG_MAX} 项已加入待导入队列）`)
   }
+  return added
 }
 
+/** 统计并入队待导入；返回本次入队的条目（供拖拽判定文件夹用）。 */
 export async function queueImports(paths, opts = {}) {
-  if (!paths.length) return
+  if (!paths.length) return []
   S.modify ??= defaultModify()
 
   let stats
@@ -515,9 +537,9 @@ export async function queueImports(paths, opts = {}) {
   } catch (e) {
     log(String(e))
     toast.error(String(e))
-    return
+    return []
   }
-  mergeStats(stats)
+  return mergeStats(stats)
 }
 
 // ---------------------------------------------------------------------------
