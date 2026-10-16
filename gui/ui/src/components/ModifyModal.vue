@@ -6,6 +6,8 @@
     :style="{ width: showImports && showDeletes ? '640px' : '480px', maxWidth: '94vw', borderRadius: '12px' }"
     :mask-closable="false"
     :bordered="false"
+    :auto-focus="false"
+    @after-enter="focusConfirm"
     @update:show="(v) => { if (!v && !busy) closeModify() }"
   >
     <template v-if="S.modify">
@@ -92,9 +94,12 @@
 
     <template v-if="S.modify" #action>
       <div class="dialog-actions">
+        <n-button v-if="S.modify.importBack" size="small" quaternary :disabled="busy"
+                  title="撤掉本次文件夹导入的待办，返回「导入文件夹」确认窗口"
+                  @click="stepBackImportFolder">上一步</n-button>
         <div class="grow"></div>
         <n-button size="small" quaternary :disabled="busy" @click="closeModify">取消</n-button>
-        <n-button size="small" type="primary" :disabled="empty" :loading="busy"
+        <n-button ref="confirmBtn" size="small" type="primary" :disabled="empty" :loading="busy"
                   title="应用修改并自动重新载入；勾选「另存为」后改为选择保存位置"
                   @click="confirmModify">确认</n-button>
       </div>
@@ -103,9 +108,9 @@
 </template>
 
 <script setup>
-  import { computed } from 'vue'
+  import { computed, ref } from 'vue'
   import { NModal, NButton, NTag, NCheckbox, NTooltip } from 'naive-ui'
-  import { S, confirmModify, closeModify } from '../store'
+  import { S, confirmModify, closeModify, stepBackImportFolder } from '../store'
   import { fmtBytes } from '../utils'
 
   const adds = computed(() => S.modify?.additions.length ?? 0)
@@ -116,4 +121,15 @@
   // 两类都有（弹窗开着时拖入文件）才同时显示两列。
   const showImports = computed(() => adds.value > 0 || dels.value === 0)
   const showDeletes = computed(() => dels.value > 0)
+
+  // 弹窗过渡结束后聚焦「确认」，回车可直接应用修改。naive-ui 按钮
+  // 实例没有 focus 方法，取底层 <button> 元素调用原生 focus。
+  const confirmBtn = ref(null)
+  function focusConfirm() {
+    const el = confirmBtn.value?.$el
+    if (!el) return
+    el.focus()
+    // 前一个弹窗（如导入确认窗）关闭归还焦点可能发生在此之后，补一次。
+    setTimeout(() => el.focus(), 150)
+  }
 </script>

@@ -412,12 +412,29 @@ export function closeImportFolder() {
   S.importFolder = null
 }
 
-/** 「导入文件夹」弹窗确认：按「只导入子项」与否入队。 */
+/** 「导入文件夹」弹窗确认：按「只导入子项」与否入队。入队前的待导入
+ *  快照与来源记入 importBack，供「修改归档」的「上一步」撤回并返回。 */
 export async function confirmImportFolder() {
   const f = S.importFolder
   if (!f) return
   S.importFolder = null
+  const snapshot = (S.modify?.additions ?? []).map((a) => ({ ...a }))
   await queueImports([f.path], { childrenOnly: f.childrenOnly })
+  if (S.modify) {
+    S.modify.importBack = { path: f.path, childrenOnly: !!f.childrenOnly, snapshot }
+  }
+}
+
+/** 「修改归档」的「上一步」：撤掉这次文件夹导入排队的条目（恢复到
+ *  入队前的快照），回到「导入文件夹」确认弹窗并保留原勾选状态。 */
+export function stepBackImportFolder() {
+  const m = S.modify
+  const b = m?.importBack
+  if (!m || !b || m.busy) return
+  m.additions = b.snapshot
+  m.importBack = null
+  if (!m.additions.length && !m.deletions.length) S.modify = null
+  S.importFolder = { path: b.path, childrenOnly: b.childrenOnly }
 }
 
 /** 导入到当前浏览的目录：浏览到子目录时待导入名称带该前缀。
