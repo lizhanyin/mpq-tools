@@ -192,24 +192,30 @@
     if (!row) return []
     if (row.type === 'dir') {
       return [
-        { label: '进入文件夹', key: 'enter' },
+        { label: '打开', key: 'enter' },
         {
-          label: dirAllSelected(row.node) ? '取消勾选此文件夹下全部文件' : '勾选此文件夹下全部文件',
+          label: dirAllSelected(row.node) ? '取消选中' : '选中',
           key: 'dir-select',
         },
-        { label: '提取此文件夹下全部文件…', key: 'dir-extract' },
+        { label: '提取…', key: 'dir-extract' },
         { type: 'divider', key: 'd1' },
         { label: '复制文件夹名', key: 'copy-name' },
+        { type: 'divider', key: 'd2' },
+        {
+          label: '删除',
+          key: 'dir-delete',
+          disabled: row.node.file_count === 0,
+        },
       ]
     }
     const e = row.entry
     return [
       { label: '预览', key: 'preview', disabled: !e.name },
-      { label: '提取该文件…', key: 'extract' },
-      { label: S.selected.has(e.key) ? '取消勾选' : '勾选', key: 'toggle' },
-      { label: '复制名称', key: 'copy-name' },
+      { label: '提取…', key: 'extract' },
+      { label: S.selected.has(e.key) ? '取消选中' : '选中', key: 'toggle' },
+      { label: '复制文件名', key: 'copy-name' },
       { type: 'divider', key: 'd1' },
-      { label: '删除该文件（标记待删除）', key: 'delete' },
+      { label: '删除', key: 'delete' },
     ]
   })
 
@@ -222,6 +228,7 @@
       else if (key === 'dir-select') toggleDirSelected(row.node, !dirAllSelected(row.node))
       else if (key === 'dir-extract') extractKeys(collectKeys(row.node))
       else if (key === 'copy-name') copyText(row.node.name)
+      else if (key === 'dir-delete') markDeletions(collectKeys(row.node))
       return
     }
     const e = row.entry

@@ -28,7 +28,6 @@ export const S = reactive({
   repair: null,          // { issues, applied }
   modify: null,          // { additions, deletions, reencrypt, busy }
   newFolder: null,       // 新建文件夹弹窗：{ name }
-  importFolder: null,    // 导入文件夹弹窗：{ path, childrenOnly }
   create: null,          // { version, hashSize } — 新建归档弹窗
   convert: null,         // { target, running } — 版本转换弹窗
   pw: null,              // 密码弹窗：{ mode: 'unlock'|'set'|'change'|'remove', … }
@@ -51,7 +50,7 @@ export const lockedArchive = computed(() => !!S.info?.locked)
 
 /** 是否有任意弹窗/浮窗打开（此时拖拽导入被忽略，见 App.vue）。 */
 export const anyModalOpen = computed(() =>
-  !!(S.modify || S.create || S.convert || S.pw || S.repair || S.preview || S.newFolder || S.importFolder || S.settingsOpen))
+  !!(S.modify || S.create || S.convert || S.pw || S.repair || S.preview || S.newFolder || S.settingsOpen))
 
 /** key → entry 的扁平映射（按需构建，info 变化时自动重建）。 */
 export const entryByKey = computed(() => {
@@ -215,7 +214,6 @@ export function closeArchive() {
   S.preview = null
   S.modify = null
   S.newFolder = null
-  S.importFolder = null
   S.convert = null
   S.repair = null
   S.pw = null
@@ -392,7 +390,12 @@ export function toggleSelectAll(on) {
 // 导入 / 删除（「修改归档」窗口）
 
 function defaultModify() {
-  return { additions: [], deletions: [], reencrypt: true, saveAs: false, busy: false }
+  return {
+    additions: [], deletions: [], reencrypt: true, saveAs: false, busy: false,
+    // 「导入文件夹」会话信息：{ path, childrenOnly, snapshot }，
+    // snapshot 是入队前的待导入快照，供切换「只导入子项」时还原。
+    folderImport: null,
+  }
 }
 
 export async function importFilesDialog() {
@@ -401,41 +404,55 @@ export async function importFilesDialog() {
   await queueImports(Array.isArray(paths) ? paths : [paths])
 }
 
-/** 「导入文件夹」：选完目录后弹窗确认导入方式（是否只导入子项）。 */
+/** 「导入文件夹」：选完目录直接入队（以文件夹为根）。「只导入子项」
+ *  在「修改归档」里切换，不再经过确认弹窗。 */
 export async function importFolderDialog() {
   const dir = await ipc.dialogOpen({ title: '选择要导入的文件夹', directory: true })
   if (!dir) return
-  S.importFolder = { path: dir, childrenOnly: false }
-}
-
-export function closeImportFolder() {
-  S.importFolder = null
-}
-
-/** 「导入文件夹」弹窗确认：按「只导入子项」与否入队。入队前的待导入
- *  快照与来源记入 importBack，供「修改归档」的「上一步」撤回并返回。 */
-export async function confirmImportFolder() {
-  const f = S.importFolder
-  if (!f) return
-  S.importFolder = null
   const snapshot = (S.modify?.additions ?? []).map((a) => ({ ...a }))
-  await queueImports([f.path], { childrenOnly: f.childrenOnly })
+  await queueImports([dir])
   if (S.modify) {
-    S.modify.importBack = { path: f.path, childrenOnly: !!f.childrenOnly, snapshot }
+    S.modify.folderImport = { path: dir, childrenOnly: false, snapshot }
   }
 }
 
-/** 「修改归档」的「上一步」：撤掉这次文件夹导入排队的条目（恢复到
- *  入队前的快照），回到「导入文件夹」确认弹窗并保留原勾选状态。 */
-export function stepBackImportFolder() {
+/** 「修改归档」里切换「只导入子项」。先按新模式完成统计，成功后才
+ *  一次性替换：勾选状态、导入到地址、待导入列表同帧切换，不经过
+ *  清空→重填的中间态（否则弹窗内容会闪动）。统计失败则保持原样。 */
+export async function setImportChildrenOnly(on) {
   const m = S.modify
-  const b = m?.importBack
-  if (!m || !b || m.busy) return
-  m.additions = b.snapshot
-  m.importBack = null
-  if (!m.additions.length && !m.deletions.length) S.modify = null
-  S.importFolder = { path: b.path, childrenOnly: b.childrenOnly }
+  const fi = m?.folderImport
+  if (!m || !fi || m.busy || fi.switching || !!on === fi.childrenOnly) return
+  fi.switching = true
+  let stats
+  try {
+    stats = await fetchStats([fi.path], { childrenOnly: !!on })
+  } catch (e) {
+    log(String(e))
+    toast.error(String(e))
+    return
+  } finally {
+    fi.switching = false
+  }
+  fi.childrenOnly = !!on
+  m.additions = fi.snapshot.map((a) => ({ ...a }))
+  mergeStats(stats)
 }
+
+/** 「修改归档」的「导入到」：本次待导入条目落地的归档内目录。
+ *  文件夹导入默认落在 `前缀\文件夹名` 下，勾选「只导入子项」后
+ *  落在前缀本身（当前浏览目录）；普通文件导入也落在前缀。 */
+export const importTargetDir = computed(() => {
+  const m = S.modify
+  if (!m) return ''
+  const prefix = importPrefix() || ''
+  const fi = m.folderImport
+  if (fi && !fi.childrenOnly) {
+    const base = U.basenameOf(fi.path)
+    return prefix ? `${prefix}\\${base}` : base
+  }
+  return prefix
+})
 
 /** 导入到当前浏览的目录：浏览到子目录时待导入名称带该前缀。
  *  （系统文件）/(未命名) 是视图伪目录，不作为前缀。 */
@@ -447,24 +464,18 @@ function importPrefix() {
 /** 单条待导入日志的上限；文件夹导入超过此数只记一条汇总。 */
 const IMPORT_LOG_MAX = 50
 
-export async function queueImports(paths, opts = {}) {
-  if (!paths.length) return
-  S.modify ??= defaultModify()
+/** 调 stat_imports 检查待导入内容（不发任何 UI 变更）。 */
+async function fetchStats(paths, opts = {}) {
+  return ipc.invoke('stat_imports', {
+    paths,
+    prefix: importPrefix(),
+    // Tauri 命令参数为 camelCase → Rust children_only
+    ...(opts.childrenOnly ? { childrenOnly: true } : {}),
+  })
+}
 
-  let stats
-  try {
-    stats = await ipc.invoke('stat_imports', {
-      paths,
-      prefix: importPrefix(),
-      // Tauri 命令参数为 camelCase → Rust children_only
-      ...(opts.childrenOnly ? { childrenOnly: true } : {}),
-    })
-  } catch (e) {
-    log(String(e))
-    toast.error(String(e))
-    return
-  }
-
+/** 把 stat 结果合并进待导入列表（同名后者取代前者）并记日志。 */
+function mergeStats(stats) {
   // 同名（大小写不敏感）后导入的取代先排队的。
   const idxByName = new Map(S.modify.additions.map((a, i) => [a.name.toLowerCase(), i]))
   const added = []
@@ -492,6 +503,21 @@ export async function queueImports(paths, opts = {}) {
   if (added.length > IMPORT_LOG_MAX) {
     log(`（其余 ${added.length - IMPORT_LOG_MAX} 项已加入待导入队列）`)
   }
+}
+
+export async function queueImports(paths, opts = {}) {
+  if (!paths.length) return
+  S.modify ??= defaultModify()
+
+  let stats
+  try {
+    stats = await fetchStats(paths, opts)
+  } catch (e) {
+    log(String(e))
+    toast.error(String(e))
+    return
+  }
+  mergeStats(stats)
 }
 
 // ---------------------------------------------------------------------------

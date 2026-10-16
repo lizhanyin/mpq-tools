@@ -11,7 +11,6 @@ import RepairModal from './components/RepairModal.vue'
 import ModifyModal from './components/ModifyModal.vue'
 import NewArchiveModal from './components/NewArchiveModal.vue'
 import NewFolderModal from './components/NewFolderModal.vue'
-import ImportFolderModal from './components/ImportFolderModal.vue'
 import ConvertModal from './components/ConvertModal.vue'
 import PasswordModal from './components/PasswordModal.vue'
 import SettingsModal from './components/SettingsModal.vue'
@@ -105,7 +104,6 @@ onUnmounted(() => {
       <ModifyModal />
       <NewArchiveModal />
       <NewFolderModal />
-      <ImportFolderModal />
       <ConvertModal />
       <PasswordModal />
       <SettingsModal />

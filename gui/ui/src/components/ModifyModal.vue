@@ -17,6 +17,14 @@
           <span class="meta-value">{{ S.openPath || '（未保存）' }}</span>
         </div>
 
+        <!-- 「导入到」只在有待导入（添加模式）时显示 -->
+        <div v-if="adds > 0" class="dialog-meta">
+          <span class="meta-label">导入到</span>
+          <span class="meta-value" :title="importTargetDir || '（归档根目录）'">
+            {{ importTargetDir || '（归档根目录）' }}
+          </span>
+        </div>
+
         <!-- 单列时自动占满整行 -->
         <div class="modify-columns">
           <div v-if="showImports" class="modify-col">
@@ -33,7 +41,7 @@
                   <n-tag size="small" round :bordered="false" :type="a.replaces ? 'warning' : 'success'">
                     {{ a.replaces ? '替换' : '新增' }}
                   </n-tag>
-                  <span class="name">{{ a.name }}</span>
+                  <span class="name" :title="a.name">{{ baseNameOf(a.name) }}</span>
                   <span class="meta">{{ fmtBytes(a.size) }} 字节</span>
                   <n-button size="tiny" quaternary type="error" class="remove"
                             :disabled="busy" title="移除该项"
@@ -65,8 +73,6 @@
           </div>
         </div>
 
-        <div class="hint-text">确认时保留文件将原样拷贝；(listfile) 重建，(attributes)/(signature) 自动移除。</div>
-
         <n-checkbox v-model:checked="S.modify.reencrypt" size="small" :disabled="busy">
           key-v2 文件按新偏移重新加密
           <n-tooltip trigger="hover" placement="top" :style="{ maxWidth: '320px' }">
@@ -89,14 +95,18 @@
             不勾：修改直接写回当前打开的文件
           </n-tooltip>
         </n-checkbox>
+
+        <!-- 文件夹导入才显示；勾选后待导入名称与「导入到」地址同步变化 -->
+        <n-checkbox v-if="adds > 0 && S.modify.folderImport" size="small" :disabled="busy"
+                    :checked="S.modify.folderImport.childrenOnly"
+                    @update:checked="setImportChildrenOnly">
+          只导入子项
+        </n-checkbox>
       </div>
     </template>
 
     <template v-if="S.modify" #action>
       <div class="dialog-actions">
-        <n-button v-if="S.modify.importBack" size="small" quaternary :disabled="busy"
-                  title="撤掉本次文件夹导入的待办，返回「导入文件夹」确认窗口"
-                  @click="stepBackImportFolder">上一步</n-button>
         <div class="grow"></div>
         <n-button size="small" quaternary :disabled="busy" @click="closeModify">取消</n-button>
         <n-button ref="confirmBtn" size="small" type="primary" :disabled="empty" :loading="busy"
@@ -110,8 +120,8 @@
 <script setup>
   import { computed, ref } from 'vue'
   import { NModal, NButton, NTag, NCheckbox, NTooltip } from 'naive-ui'
-  import { S, confirmModify, closeModify, stepBackImportFolder } from '../store'
-  import { fmtBytes } from '../utils'
+  import { S, confirmModify, closeModify, setImportChildrenOnly, importTargetDir } from '../store'
+  import { fmtBytes, basenameOf } from '../utils'
 
   const adds = computed(() => S.modify?.additions.length ?? 0)
   const dels = computed(() => S.modify?.deletions.length ?? 0)
@@ -121,6 +131,9 @@
   // 两类都有（弹窗开着时拖入文件）才同时显示两列。
   const showImports = computed(() => adds.value > 0 || dels.value === 0)
   const showDeletes = computed(() => dels.value > 0)
+
+  // 待导入列表只显示文件名（添加模式）；悬停可见完整归档内路径。
+  const baseNameOf = basenameOf
 
   // 弹窗过渡结束后聚焦「确认」，回车可直接应用修改。naive-ui 按钮
   // 实例没有 focus 方法，取底层 <button> 元素调用原生 focus。
