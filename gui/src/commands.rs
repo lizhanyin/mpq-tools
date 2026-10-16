@@ -587,6 +587,54 @@ mod tests {
     fn encode_rejects_unknown_encoding() {
         assert!(encode_text("x", "latin1").is_err());
     }
+
+    /// 文件夹导入：递归收集的归档名以文件夹自身为根、用 `\` 连接，
+    /// 且包含隐藏文件（用户选了整个文件夹，不做筛选）。
+    #[test]
+    fn folder_import_walk_collects_relative_paths() {
+        let base = std::env::temp_dir().join("mpqtool-gui-test-walk");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("img/ui")).unwrap();
+        std::fs::write(base.join("img/a.png"), b"a").unwrap();
+        std::fs::write(base.join("img/ui/b.png"), b"bb").unwrap();
+        std::fs::write(base.join("img/.hidden"), b"h").unwrap();
+
+        let s = crate::state::GuiState::default();
+        let mut out = Vec::new();
+        super::walk_import_dir(&base.join("img"), "img", &s, &mut out);
+
+        let mut names: Vec<&str> = out.iter().map(|o| o.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["img\\.hidden", "img\\a.png", "img\\ui\\b.png"]);
+        assert!(out.iter().all(|o| o.error.is_none() && !o.replaces));
+
+        // 「只导入子项」在归档根目录：前缀为空，不能出现前导 `\`。
+        let mut out = Vec::new();
+        super::walk_import_dir(&base.join("img"), "", &s, &mut out);
+        let mut names: Vec<&str> = out.iter().map(|o| o.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec![".hidden", "a.png", "ui\\b.png"]);
+
+        // 不同子目录下的同名文件：名字必须互相独立，不能串。
+        std::fs::create_dir_all(base.join("dup/dirA")).unwrap();
+        std::fs::create_dir_all(base.join("dup/dirB")).unwrap();
+        std::fs::write(base.join("dup/file.txt"), b"root").unwrap();
+        std::fs::write(base.join("dup/dirA/file.txt"), b"A").unwrap();
+        std::fs::write(base.join("dup/dirB/file.txt"), b"B").unwrap();
+        let mut out = Vec::new();
+        super::walk_import_dir(&base.join("dup"), "", &s, &mut out);
+        let mut names: Vec<&str> = out.iter().map(|o| o.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["dirA\\file.txt", "dirB\\file.txt", "file.txt"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn join_arc_omits_leading_separator() {
+        assert_eq!(super::join_arc("", "a.png"), "a.png");
+        assert_eq!(super::join_arc("pre", "a.png"), "pre\\a.png");
+        assert_eq!(super::join_arc("pre\\sub", "a.png"), "pre\\sub\\a.png");
+    }
 }
 
 /// 丢弃待处理的修复结果（窗口已关闭）。
@@ -599,8 +647,12 @@ pub fn discard_repair(state: St) {
 
 #[derive(Serialize)]
 pub struct ImportStatDto {
-    /// 归档内名称（源文件的基名）。
+    /// 归档内名称（普通文件为基名；文件夹导入为
+    /// `文件夹名\相对路径` 或「只导入子项」时的 `相对路径`，
+    /// 可能还带前端传入的前缀）。
     pub name: String,
+    /// 源文件在磁盘上的完整路径；应用修改时从这里读取字节。
+    pub path: String,
     pub size: u64,
     /// 是否存在同名的归档条目。
     pub replaces: bool,
@@ -608,35 +660,105 @@ pub struct ImportStatDto {
     pub error: Option<String>,
 }
 
-/// 检查待导入的文件：名称、大小，以及是否会替换已有条目。
-/// 文件内容在应用修改时才读取。
+/// 检查待导入的文件 / 文件夹：名称、大小，以及是否会替换已有条目。
+/// 文件内容在应用修改时才读取。路径是文件夹时递归展开其中的全部
+/// 文件，归档名以文件夹自身为根（如选 `D:\img` 会得到
+/// `img\a.png`、`img\ui\b.png`）；`children_only` 为真时只导入其
+/// 子项（得到 `a.png`、`ui\b.png`）。`prefix` 非空时（前端浏览到
+/// 子目录时导入）加在每项名称之前。符号链接目录不跟随，避免循环。
 #[tauri::command]
-pub fn stat_imports(paths: Vec<String>, state: St) -> Vec<ImportStatDto> {
+pub fn stat_imports(
+    paths: Vec<String>,
+    prefix: Option<String>,
+    children_only: Option<bool>,
+    state: St,
+) -> Vec<ImportStatDto> {
     let s = lock(&state);
-    paths
-        .iter()
-        .map(|p| {
-            let path = Path::new(p);
+    let mut out = Vec::new();
+    let pre = prefix.as_deref().unwrap_or("");
+    for p in &paths {
+        let path = Path::new(p);
+        if path.is_dir() {
+            let root = if children_only.unwrap_or(false) {
+                pre.to_string()
+            } else {
+                let base = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                join_arc(pre, &base)
+            };
+            walk_import_dir(path, &root, &s, &mut out);
+        } else {
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let (size, error) = match std::fs::metadata(path) {
-                Ok(m) => (m.len(), None),
-                Err(e) => (0, Some(e.to_string())),
-            };
-            let replaces = s
-                .archive
-                .as_ref()
-                .is_some_and(|a| a.find_file(&name).is_some());
-            ImportStatDto {
-                name,
-                size,
-                replaces,
-                error,
-            }
-        })
-        .collect()
+            out.push(stat_one(path, join_arc(pre, &name), &s));
+        }
+    }
+    out
+}
+
+/// `\` 连接归档内路径；`a` 为空时直接返回 `b`（避免前导 `\`）。
+fn join_arc(a: &str, b: &str) -> String {
+    if a.is_empty() {
+        b.to_string()
+    } else {
+        format!("{a}\\{b}")
+    }
+}
+
+/// 单个文件（或读取失败的路径）的导入信息。
+fn stat_one(path: &Path, name: String, s: &GuiState) -> ImportStatDto {
+    let (size, error) = match std::fs::metadata(path) {
+        Ok(m) => (m.len(), None),
+        Err(e) => (0, Some(e.to_string())),
+    };
+    let replaces = s
+        .archive
+        .as_ref()
+        .is_some_and(|a| a.find_file(&name).is_some());
+    ImportStatDto {
+        name,
+        path: path.to_string_lossy().to_string(),
+        size,
+        replaces,
+        error,
+    }
+}
+
+/// 递归收集 `dir` 下的文件，归档名前缀为 `arc_prefix`（已含文件夹
+/// 自身名与可能的导入前缀）。读取失败只影响对应条目，不中断整体。
+fn walk_import_dir(dir: &Path, arc_prefix: &str, s: &GuiState, out: &mut Vec<ImportStatDto>) {
+    let read = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        Err(e) => {
+            out.push(ImportStatDto {
+                name: arc_prefix.to_string(),
+                path: dir.to_string_lossy().to_string(),
+                size: 0,
+                replaces: false,
+                error: Some(format!("读取文件夹失败：{e}")),
+            });
+            return;
+        }
+    };
+    // 按名称排序，保证待导入列表的顺序稳定。
+    let mut children: Vec<std::fs::DirEntry> = read.filter_map(|e| e.ok()).collect();
+    children.sort_by_key(|e| e.file_name());
+    for child in children {
+        // DirEntry::file_type 不穿透符号链接：链接目录直接跳过。
+        let Ok(ft) = child.file_type() else { continue };
+        let path = child.path();
+        if ft.is_dir() {
+            let sub = join_arc(arc_prefix, &child.file_name().to_string_lossy());
+            walk_import_dir(&path, &sub, s, out);
+        } else if ft.is_file() {
+            let name = join_arc(arc_prefix, &child.file_name().to_string_lossy());
+            out.push(stat_one(&path, name, s));
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -796,7 +918,7 @@ pub fn create_archive(
     let mut s = lock(&state);
     let mut result = s.load(PathBuf::from(&path), bytes);
     if result.ok {
-        result.note = Some("（新建空归档，用「文件 → 导入文件到归档…」添加内容）".to_string());
+        result.note = Some("（新建空归档，用「操作 → 导入文件 / 导入文件夹」添加内容）".to_string());
     }
     Ok(result)
 }

@@ -24,7 +24,7 @@
             </div>
             <div class="modify-col-body">
               <div v-if="S.modify.additions.length === 0" class="col-empty">
-                （无）— 用「文件 → 导入文件到归档…」添加
+                （无）— 用「操作 → 导入文件 / 导入文件夹」或拖拽添加
               </div>
               <div v-else class="pending-list">
                 <div v-for="(a, i) in S.modify.additions" :key="a.name + i" class="pending-row">

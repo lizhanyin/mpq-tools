@@ -24,7 +24,7 @@
   import { computed, ref } from 'vue'
   import { NDropdown, NButton } from 'naive-ui'
   import {
-    S, openArchiveDialog, extractAll, importFilesDialog, reloadArchive, closeArchive, startRepair, startCreate, startConvert, startUnlock, startPwOp, protectedArchive, lockedArchive,
+    S, openArchiveDialog, extractAll, importFilesDialog, importFolderDialog, startNewFolder, reloadArchive, closeArchive, startRepair, startCreate, startConvert, startUnlock, startPwOp, protectedArchive, lockedArchive,
   } from '../store'
   import * as ipc from '../ipc'
 
@@ -49,6 +49,8 @@
   const opsOptions = computed(() => [
     { label: '提取全部…', key: 'extract-all', disabled: !hasArchive.value },
     { label: '导入文件到归档…', key: 'import', disabled: !hasArchive.value },
+    { label: '导入文件夹到归档…', key: 'import-folder', disabled: !hasArchive.value },
+    { label: '新建文件夹…', key: 'new-folder', disabled: !hasArchive.value },
   ])
 
   const toolsOptions = computed(() => [
@@ -82,6 +84,8 @@
     opsShow.value = false
     if (key === 'extract-all') extractAll()
     else if (key === 'import') importFilesDialog()
+    else if (key === 'import-folder') importFolderDialog()
+    else if (key === 'new-folder') startNewFolder()
   }
 
   function onToolsSelect(key) {

@@ -10,6 +10,8 @@ import PreviewWindow from './components/PreviewWindow.vue'
 import RepairModal from './components/RepairModal.vue'
 import ModifyModal from './components/ModifyModal.vue'
 import NewArchiveModal from './components/NewArchiveModal.vue'
+import NewFolderModal from './components/NewFolderModal.vue'
+import ImportFolderModal from './components/ImportFolderModal.vue'
 import ConvertModal from './components/ConvertModal.vue'
 import PasswordModal from './components/PasswordModal.vue'
 import SettingsModal from './components/SettingsModal.vue'
@@ -102,13 +104,15 @@ onUnmounted(() => {
       <RepairModal />
       <ModifyModal />
       <NewArchiveModal />
+      <NewFolderModal />
+      <ImportFolderModal />
       <ConvertModal />
       <PasswordModal />
       <SettingsModal />
 
       <div v-if="S.dropping" class="drop-overlay">
         <div class="banner">{{
-          S.info ? `📥 松开鼠标以导入 ${S.dropping.count} 个文件到当前归档`
+          S.info ? `📥 松开鼠标以导入 ${S.dropping.count} 项文件/文件夹到当前归档`
                  : '📂 松开鼠标以打开归档'
         }}</div>
       </div>

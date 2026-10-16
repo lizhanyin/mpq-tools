@@ -9,8 +9,14 @@
     <div class="files-panel">
       <div class="toolbar">
         <n-button size="small"
-                  title="选择文件加入「修改归档」的待导入列表"
+                  title="选择文件加入「修改归档」的待导入列表（导入到当前文件夹）"
                   @click="importFilesDialog">导入文件</n-button>
+        <n-button size="small"
+                  title="递归导入所选文件夹的全部内容，归档内以该文件夹为根"
+                  @click="importFolderDialog">导入文件夹</n-button>
+        <n-button size="small"
+                  title="在当前文件夹下新建（导入文件后保存才会写入归档）"
+                  @click="startNewFolder">新建文件夹</n-button>
         <n-button size="small" :disabled="selCount.size === 0" @click="extractSelected">提取选中</n-button>
         <n-button size="small" :disabled="selCount.size === 0"
                   title="标记选中条目待删除，随后在「修改归档」窗口应用"
@@ -59,7 +65,7 @@
   import {
     S, searching, searchResults,
     setFilter, reloadArchive, navigate,
-    extractSelected, deleteSelected, importFilesDialog,
+    extractSelected, deleteSelected, importFilesDialog, importFolderDialog, startNewFolder,
   } from '../store'
   import { fmtBytes, nodeAt } from '../utils'
 

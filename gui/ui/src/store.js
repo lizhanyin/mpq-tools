@@ -27,6 +27,8 @@ export const S = reactive({
   preview: null,         // { name, text } — 浮动预览窗
   repair: null,          // { issues, applied }
   modify: null,          // { additions, deletions, reencrypt, busy }
+  newFolder: null,       // 新建文件夹弹窗：{ name }
+  importFolder: null,    // 导入文件夹弹窗：{ path, childrenOnly }
   create: null,          // { version, hashSize } — 新建归档弹窗
   convert: null,         // { target, running } — 版本转换弹窗
   pw: null,              // 密码弹窗：{ mode: 'unlock'|'set'|'change'|'remove', … }
@@ -49,7 +51,7 @@ export const lockedArchive = computed(() => !!S.info?.locked)
 
 /** 是否有任意弹窗/浮窗打开（此时拖拽导入被忽略，见 App.vue）。 */
 export const anyModalOpen = computed(() =>
-  !!(S.modify || S.create || S.convert || S.pw || S.repair || S.preview || S.settingsOpen))
+  !!(S.modify || S.create || S.convert || S.pw || S.repair || S.preview || S.newFolder || S.importFolder || S.settingsOpen))
 
 /** key → entry 的扁平映射（按需构建，info 变化时自动重建）。 */
 export const entryByKey = computed(() => {
@@ -212,6 +214,8 @@ export function closeArchive() {
   S.appliedFilter = ''
   S.preview = null
   S.modify = null
+  S.newFolder = null
+  S.importFolder = null
   S.convert = null
   S.repair = null
   S.pw = null
@@ -220,7 +224,7 @@ export function closeArchive() {
 
 export async function handleDrop(paths) {
   if (S.info) {
-    log(`（通过拖拽导入 ${U.fmtBytes(paths.length)} 个文件）`)
+    log(`（通过拖拽导入 ${U.fmtBytes(paths.length)} 项文件/文件夹）`)
     await queueImports(paths)
     return
   }
@@ -397,35 +401,144 @@ export async function importFilesDialog() {
   await queueImports(Array.isArray(paths) ? paths : [paths])
 }
 
-export async function queueImports(paths) {
+/** 「导入文件夹」：选完目录后弹窗确认导入方式（是否只导入子项）。 */
+export async function importFolderDialog() {
+  const dir = await ipc.dialogOpen({ title: '选择要导入的文件夹', directory: true })
+  if (!dir) return
+  S.importFolder = { path: dir, childrenOnly: false }
+}
+
+export function closeImportFolder() {
+  S.importFolder = null
+}
+
+/** 「导入文件夹」弹窗确认：按「只导入子项」与否入队。 */
+export async function confirmImportFolder() {
+  const f = S.importFolder
+  if (!f) return
+  S.importFolder = null
+  await queueImports([f.path], { childrenOnly: f.childrenOnly })
+}
+
+/** 导入到当前浏览的目录：浏览到子目录时待导入名称带该前缀。
+ *  （系统文件）/(未命名) 是视图伪目录，不作为前缀。 */
+function importPrefix() {
+  if (!S.cwd.length || S.cwd[0] === SYSTEM_DIR || S.cwd[0] === UNNAMED_DIR) return null
+  return S.cwd.join('\\')
+}
+
+/** 单条待导入日志的上限；文件夹导入超过此数只记一条汇总。 */
+const IMPORT_LOG_MAX = 50
+
+export async function queueImports(paths, opts = {}) {
   if (!paths.length) return
   S.modify ??= defaultModify()
 
   let stats
   try {
-    stats = await ipc.invoke('stat_imports', { paths })
+    stats = await ipc.invoke('stat_imports', {
+      paths,
+      prefix: importPrefix(),
+      // Tauri 命令参数为 camelCase → Rust children_only
+      ...(opts.childrenOnly ? { childrenOnly: true } : {}),
+    })
   } catch (e) {
     log(String(e))
     toast.error(String(e))
     return
   }
 
-  paths.forEach((path, i) => {
-    const st = stats[i]
-    if (!st) return
+  // 同名（大小写不敏感）后导入的取代先排队的。
+  const idxByName = new Map(S.modify.additions.map((a, i) => [a.name.toLowerCase(), i]))
+  const added = []
+  for (const st of stats) {
     if (st.error) {
-      log(`读取失败 ${path}: ${st.error}`)
-      toast.error(`读取失败 ${path}: ${st.error}`)
-      return
+      log(`读取失败 ${st.path}: ${st.error}`)
+      toast.error(`读取失败 ${st.name}: ${st.error}`)
+      continue
     }
-    // 同名后导入的取代先排队的；替换已有条目或已排队项。
-    const dupIdx = S.modify.additions.findIndex((a) => a.name.toLowerCase() === st.name.toLowerCase())
-    const replaces = st.replaces || dupIdx >= 0
-    log(`待导入 ${st.name}（${U.fmtBytes(st.size)} 字节，${replaces ? '替换已有文件' : '新增'}）`)
-    const item = { name: st.name, path, size: st.size, replaces }
+    const lower = st.name.toLowerCase()
+    const dupIdx = idxByName.get(lower) ?? -1
+    const item = { name: st.name, path: st.path, size: st.size, replaces: st.replaces || dupIdx >= 0 }
     if (dupIdx >= 0) S.modify.additions[dupIdx] = item
     else S.modify.additions.push(item)
-  })
+    idxByName.set(lower, dupIdx >= 0 ? dupIdx : S.modify.additions.length - 1)
+    added.push(item)
+  }
+
+  if (added.length === 0) {
+    toast.info('没有可导入的文件（所选内容为空或全部读取失败）。')
+    return
+  }
+  added.slice(0, IMPORT_LOG_MAX).forEach((it) =>
+    log(`待导入 ${it.name}（${U.fmtBytes(it.size)} 字节，${it.replaces ? '替换已有文件' : '新增'}）`))
+  if (added.length > IMPORT_LOG_MAX) {
+    log(`（其余 ${added.length - IMPORT_LOG_MAX} 项已加入待导入队列）`)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 新建文件夹（虚拟目录）
+
+/** 弹出「新建文件夹」；浏览到子目录时在其中创建。MPQ 无法保存空
+ *  文件夹——先在视图中建出目录，把文件导入其中并应用修改后，
+ *  该目录才随文件真正写入归档。 */
+export function startNewFolder() {
+  if (!S.info) { toast.info('请先打开一个归档。'); return }
+  S.newFolder = { name: '' }
+}
+
+export function closeNewFolder() {
+  S.newFolder = null
+}
+
+/** 拆分并校验输入的文件夹名（可用 `\` `/` 一次建多级）；非法时提示
+ *  并返回 null。 */
+function splitFolderName(input) {
+  const segs = input.split(/[\\/]+/).map((s) => s.trim()).filter(Boolean)
+  if (!segs.length) { toast.error('请输入文件夹名。'); return null }
+  for (const s of segs) {
+    if (s === '.' || s === '..') { toast.error(`文件夹名不能是「${s}」。`); return null }
+    if (/[:*?"<>|]/.test(s)) { toast.error(`文件夹名不能包含 : * ? " < > |（${s}）`); return null }
+    if (/[. ]$/.test(s)) { toast.error(`文件夹名不能以点或空格结尾（${s}）`); return null }
+  }
+  return segs
+}
+
+/** 「新建文件夹」确认：沿当前目录逐级补齐缺失的目录节点（大小写
+ *  不敏感复用已有），成功后进入该目录并展开树的祖先分支。 */
+export function createFolder() {
+  const f = S.newFolder
+  if (!f) return
+  const segs = splitFolderName(f.name)
+  if (!segs) return
+  const base = (S.cwd[0] === SYSTEM_DIR || S.cwd[0] === UNNAMED_DIR) ? [] : S.cwd
+  let node = U.nodeAt(S.info.tree, base)
+  if (!node) { S.newFolder = null; return }
+
+  let created = 0
+  const full = [...base]
+  for (const seg of segs) {
+    const lower = seg.toLowerCase()
+    let next = node.dirs.find((d) => d.name.toLowerCase() === lower)
+    if (!next) {
+      next = { name: seg, dirs: [], files: [], file_count: 0, total_size: 0, total_csize: 0 }
+      node.dirs.push(next)
+      // 与后端 build_tree 一致按小写名排序，保持目录顺序稳定。
+      node.dirs.sort((a, b) =>
+        a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0)
+      created++
+      S.expanded.push(U.folderKey(full))
+    }
+    full.push(seg)
+    node = next
+  }
+  S.newFolder = null
+  setFilter('') // 退出搜索视图，让新文件夹可见
+  navigate(full)
+  if (!created) { toast.info('文件夹已存在，已进入该文件夹。'); return }
+  log(`已新建文件夹 ${full.join('\\')}——空文件夹不会写入归档，导入文件到其中并应用修改后生效`)
+  toast.success(`已新建文件夹：${full.join('\\')}（导入文件后保存才会写入归档）`)
 }
 
 export function deleteSelected() {

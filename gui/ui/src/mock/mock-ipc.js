@@ -186,10 +186,31 @@ const MOCKS = {
   save_repaired: ({ path }) => ({ note: `已保存 ${path}` }),
   open_repaired: () => okOpen('D:\\maps\\demo.fixed.w3x'),
   discard_repair: () => null,
-  stat_imports: ({ paths }) => paths.map((p) => {
-    const name = p.split(/[\\/]/).pop()
-    return { name, size: 12345, replaces: name === 'war3map.j', error: null }
-  }),
+  stat_imports: ({ paths, prefix, childrenOnly }) => {
+    const pre = prefix ? `${prefix}\\` : ''
+    const out = []
+    for (const p of paths) {
+      // 文件夹导入：展开为递归文件列表（默认以文件夹自身为根，
+      // childrenOnly 时只导入子项；键名与真实 Tauri 调用一致用 camelCase）。
+      if (/war3mapImported$/i.test(p)) {
+        const root = childrenOnly ? pre : `${pre}war3mapImported\\`
+        out.push(
+          { name: `${root}icon.blp`, path: `${p}\\icon.blp`, size: 8192, replaces: false, error: null },
+          { name: `${root}ui\\panel.tga`, path: `${p}\\ui\\panel.tga`, size: 4096, replaces: false, error: null },
+        )
+        continue
+      }
+      const name = p.split(/[\\/]/).pop()
+      out.push({
+        name: pre + name,
+        path: p,
+        size: 12345,
+        replaces: (pre + name).toLowerCase() === 'war3map.j',
+        error: null,
+      })
+    }
+    return out
+  },
   apply_modify: () => ({ note: '新增 1；替换 1；删除 1；自动移除 (attributes)；重新编码 1（key-v2 已按新偏移重新加密）。' }),
   save_modified: ({ path }) => okOpen(path),
   open_modified: () => {
@@ -211,7 +232,7 @@ const MOCKS = {
       tree: dir('', []),
       entry_count: 0,
     }
-    return { ok: true, note: '（新建空归档，用「文件 → 导入文件到归档…」添加内容）', info, error: null }
+    return { ok: true, note: '（新建空归档，用「操作 → 导入文件 / 导入文件夹」添加内容）', info, error: null }
   },
   apply_convert: ({ target }) => ({
     note: `已从 v${MOCK_INFO.version} 转换为 v${target}（11 个条目）；自动移除 (attributes)。`,
@@ -246,7 +267,10 @@ export function invoke(cmd, args) {
 }
 
 export function dialogOpen(opts) {
-  if (opts && opts.directory) return Promise.resolve('D:\\out')
+  if (opts && opts.directory) {
+    // 「导入文件夹」返回带内容的目录，提取等其它用途保持原样。
+    return Promise.resolve(opts.title && opts.title.includes('导入') ? 'D:\\import\\war3mapImported' : 'D:\\out')
+  }
   if (opts && opts.multiple) return Promise.resolve(['D:\\import\\war3map.j', 'D:\\import\\newfile.txt'])
   return Promise.resolve('D:\\maps\\demo.w3x')
 }
