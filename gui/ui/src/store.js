@@ -11,7 +11,9 @@ export const ARCHIVE_FILTERS = [
 ]
 export const SYSTEM_DIR = '(系统文件)'
 export const UNNAMED_DIR = '(未命名)'
-export const MAX_ROWS = 5000
+// 表格已启用虚拟滚动（渲染成本只与可见行相关），此上限仅作为
+// 极端情况（如巨型 listfile）的保险，超过时提示用过滤缩小范围。
+export const MAX_ROWS = 50000
 export const FONT_MIN = 10, FONT_MAX = 28, FONT_DEFAULT = 13
 
 export const S = reactive({
@@ -636,6 +638,37 @@ export function markDeletions(keys) {
 
 /** 「修改归档」确认：勾选「另存为」时选保存位置，否则直接写回原文件；
  * 应用修改 → 写盘 → 自动重新载入。 */
+/** 应用删除后：内容被删空的目录在重载的树里已消失（MPQ 存不了空
+ *  目录），把它们重新挂回上级之下作为虚拟目录——与「新建文件夹」
+ *  一致：不写入归档，重新载入后消失，导入文件并应用后成为真实目录。
+ *  names 为本次删除的条目名（未命名条目没有名字，跳过）。 */
+function keepEmptiedDirsVirtual(names) {
+  if (!S.info) return
+  let kept = 0
+  for (const name of names) {
+    const segs = String(name).split('\\')
+    segs.pop()                    // 去掉文件名，剩下目录链
+    if (!segs.length) continue    // 根目录下的文件没有目录链
+    let node = S.info.tree
+    for (const seg of segs) {
+      const lower = seg.toLowerCase()
+      let next = node.dirs.find((d) => d.name.toLowerCase() === lower)
+      if (!next) {
+        next = { name: seg, dirs: [], files: [], file_count: 0, total_size: 0, total_csize: 0 }
+        node.dirs.push(next)
+        // 与后端 build_tree 一致按小写名排序，保持目录顺序稳定。
+        node.dirs.sort((a, b) =>
+          a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0)
+        kept++
+      }
+      node = next
+    }
+  }
+  if (kept) {
+    log(`（内容被删空的 ${U.fmtBytes(kept)} 个目录已保留为空文件夹——不会写入归档，重新载入归档后消失）`)
+  }
+}
+
 export async function confirmModify() {
   const m = S.modify
   if (!m || m.busy) return
@@ -656,9 +689,11 @@ export async function confirmModify() {
     const verb = out === S.openPath ? '修改已直接写入' : '修改已保存到'
     log(`${verb} ${out}（${r.note}）`)
     toast.success(`${verb} ${out}（${r.note}）`)
+    const deletedNames = m.deletions.map((d) => d.name).filter(Boolean)
     S.modify = null
     ipc.invoke('discard_modify').catch(() => {})
     applyOpenResult(res)
+    keepEmptiedDirsVirtual(deletedNames)
   } catch (e) {
     log(String(e)) // 修改失败：… / 保存失败：…
     toast.error(String(e))

@@ -146,7 +146,13 @@ function mockPreview(name) {
 }
 
 const MOCKS = {
-  open_archive: () => okOpen(),
+  open_archive: () => {
+    pendingDeletedNames = []
+    pendingDeletedKeys = []
+    appliedDeletedNames = []
+    appliedDeletedKeys = []
+    return okOpen()
+  },
   reload_archive: () => okOpen(),
   close_archive: () => null,
   unlock_archive: ({ password }) => {
@@ -211,14 +217,29 @@ const MOCKS = {
     }
     return out
   },
-  apply_modify: () => ({ note: '新增 1；替换 1；删除 1；自动移除 (attributes)；重新编码 1（key-v2 已按新偏移重新加密）。' }),
-  save_modified: ({ path }) => okOpen(path),
+  apply_modify: ({ deletions }) => {
+    pendingDeletedNames = (deletions || []).map((d) => d.name).filter(Boolean)
+    pendingDeletedKeys = (deletions || []).filter((d) => !d.name && d.key).map((d) => d.key)
+    const del = pendingDeletedNames.length + pendingDeletedKeys.length
+    return { note: del ? `删除 ${del}` : '新增 1；替换 1' }
+  },
+  save_modified: ({ path }) => {
+    appliedDeletedNames = [...appliedDeletedNames, ...pendingDeletedNames]
+    appliedDeletedKeys = [...appliedDeletedKeys, ...pendingDeletedKeys]
+    pendingDeletedNames = []
+    pendingDeletedKeys = []
+    return okOpen(path)
+  },
   open_modified: () => {
     const r = okOpen('D:\\maps\\demo.w3x')
     r.note = '已载入修改结果（新增 1；替换 1；删除 1。）'
     return r
   },
-  discard_modify: () => null,
+  discard_modify: () => {
+    pendingDeletedNames = []
+    pendingDeletedKeys = []
+    return null
+  },
   create_archive: ({ path, version, hashTableSize }) => {
     const info = {
       ...MOCK_INFO,
@@ -248,8 +269,45 @@ const MOCKS = {
 }
 
 function okOpen(path) {
-  const info = { ...MOCK_INFO, tree: MOCK_TREE, path: path || MOCK_INFO.path }
+  const tree = appliedDeletedNames.length || appliedDeletedKeys.length
+    ? filterTree(MOCK_TREE) : MOCK_TREE
+  const info = { ...MOCK_INFO, tree, path: path || MOCK_INFO.path }
+  if (tree !== MOCK_TREE) {
+    let named = 0
+    ;(function walk(n) {
+      for (const d of n.dirs) walk(d)
+      named += n.files.filter((f) => f.name).length
+    })(tree)
+    info.listfile_count = named
+    info.entry_count = (function count(n) {
+      return n.files.length + n.dirs.reduce((s, d) => s + count(d), 0)
+    })(tree)
+  }
   return { ok: true, note: null, info, error: null }
+}
+
+/* 删除流程模拟：apply_modify 记录待删除名单（会话内替换），取消即
+ * 丢弃；save_modified 把名单并入已应用集合并返回过滤后的树（模拟
+ * 后端行为：文件消失、空目录不保留）。 */
+let pendingDeletedNames = []
+let pendingDeletedKeys = []
+let appliedDeletedNames = []
+let appliedDeletedKeys = []
+
+function filterTree(node) {
+  const files = node.files.filter(
+    (f) => !appliedDeletedKeys.includes(f.key)
+      && !(f.name && appliedDeletedNames.some((n) => n.toLowerCase() === f.name.toLowerCase())),
+  )
+  const dirs = node.dirs.map(filterTree).filter((d) => d.file_count > 0)
+  return {
+    ...node,
+    files,
+    dirs,
+    file_count: files.length + dirs.reduce((n, d) => n + d.file_count, 0),
+    total_size: files.reduce((n, f) => n + f.size, 0) + dirs.reduce((n, d) => n + d.total_size, 0),
+    total_csize: files.reduce((n, f) => n + f.csize, 0) + dirs.reduce((n, d) => n + d.total_csize, 0),
+  }
 }
 
 export function invoke(cmd, args) {

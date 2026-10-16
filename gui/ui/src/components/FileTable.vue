@@ -4,6 +4,7 @@
       size="small"
       striped
       flex-height
+      virtual-scroll
       :bordered="false"
       :single-line="false"
       :columns="columns"
@@ -76,8 +77,8 @@
         if (row.type === 'dir') {
           return h('span', {
             class: 'cdir',
-            title: '双击进入文件夹',
-          }, `📁 ${row.node.name}（${fmtBytes(row.node.file_count)} 项）`)
+            title: `双击进入文件夹（共 ${fmtBytes(row.node.file_count)} 个文件）`,
+          }, `📁 ${row.node.name}`)
         }
         const e = row.entry
         const named = !!e.name

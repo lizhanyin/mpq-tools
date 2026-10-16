@@ -16,6 +16,19 @@ export function basenameOf(path) {
   return parts[parts.length - 1] || path
 }
 
+/** 与后端 imagepreview 一致的图片扩展名（原生直读 + TGA/BLP 解码）。 */
+const IMAGE_EXTS = new Set([
+  'png', 'jpg', 'jpeg', 'jfif', 'gif', 'bmp', 'dib',
+  'webp', 'avif', 'ico', 'cur', 'svg', 'tga', 'blp',
+])
+
+/** 归档内条目是否是可预览的图片（用于图片预览的左右切换列表）。 */
+export function isImageName(name) {
+  const s = String(name)
+  const i = s.lastIndexOf('.')
+  return i >= 0 && IMAGE_EXTS.has(s.slice(i + 1).toLowerCase())
+}
+
 /** 文件夹 key：路径段小写后用 `\` 连接（大小写不敏感）。 */
 export function folderKey(path) {
   return path.map((s) => s.toLowerCase()).join('\\')

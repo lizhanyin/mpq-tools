@@ -340,6 +340,26 @@ body {
   border: 1px solid var(--border);
   border-radius: 6px;
 }
+/* 图片预览的左右切换按钮：挂在编辑区上（不随图片滚动） */
+.fwindow .fwin-editor .img-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 30px;
+  height: 44px;
+  border: none;
+  border-radius: 8px;
+  font-size: 22px;
+  line-height: 1;
+  color: #fff;
+  background: rgba(30, 32, 38, 0.45);
+  cursor: pointer;
+  z-index: 5;
+}
+.fwindow .img-nav:hover:not(:disabled) { background: rgba(30, 32, 38, 0.72); }
+.fwindow .img-nav:disabled { opacity: 0.25; cursor: default; }
+.fwindow .img-nav.prev { left: 10px; }
+.fwindow .img-nav.next { right: 10px; }
 .fwindow .fwin-resize {
   position: absolute;
   right: 0;

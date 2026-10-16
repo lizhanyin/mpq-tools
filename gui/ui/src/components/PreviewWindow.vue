@@ -25,6 +25,13 @@
              @load="onImgLoad" @error="imgFailed = true">
         <div v-else class="img-fallback">图片解码失败：文件可能不是有效的图片</div>
       </div>
+      <!-- 左右切换：视图中还有其它图片时显示（含搜索结果视图） -->
+      <template v-if="p?.image && imgCount > 1">
+        <button class="img-nav prev" :disabled="imgIndex <= 0"
+                title="上一张（←）" @click="switchImage(-1)">‹</button>
+        <button class="img-nav next" :disabled="imgIndex < 0 || imgIndex >= imgCount - 1"
+                title="下一张（→）" @click="switchImage(1)">›</button>
+      </template>
     </div>
     <div class="fwin-resize" @pointerdown="startResize"></div>
   </div>
@@ -33,9 +40,9 @@
 <script setup>
   import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
   import { NButton } from 'naive-ui'
-  import { S, closePreview, savePreviewEdit } from '../store'
+  import { S, rows, previewFile, closePreview, savePreviewEdit } from '../store'
   import { loadMonaco, languageFor } from '../monaco'
-  import { fmtBytes } from '../utils'
+  import { fmtBytes, isImageName } from '../utils'
   import { toast } from '../toast'
 
   // 非模态浮动窗口；标题栏拖动、右下角调整大小。Monaco 编辑器填充窗体。
@@ -59,6 +66,9 @@
     const bits = []
     if (!p.value) return ''
     if (p.value.image) {
+      if (imgCount.value > 1 && imgIndex.value >= 0) {
+        bits.push(`第 ${imgIndex.value + 1}/${imgCount.value} 张`)
+      }
       if (dims.value) bits.push(dims.value)
       bits.push(fmtBytes(p.value.size))
       if (p.value.image.converted) bits.push('已转换为 PNG')
@@ -70,6 +80,33 @@
     else bits.push(`${fmtBytes(p.value.size)} 字节`)
     return bits.join('，')
   })
+
+  // -- 图片左右切换 ---------------------------------------------------------------
+
+  /** 当前视图（含搜索视图）里的图片条目，按列表顺序切换。 */
+  const imgEntries = computed(() =>
+    rows.value.list.filter((r) => r.type === 'file' && r.entry.name && isImageName(r.entry.name)))
+  const imgIndex = computed(() =>
+    imgEntries.value.findIndex((r) => r.entry.name === p.value?.name))
+  const imgCount = computed(() => imgEntries.value.length)
+
+  function switchImage(dir) {
+    const i = imgIndex.value + dir
+    if (i < 0 || i >= imgEntries.value.length) return
+    previewFile(imgEntries.value[i].entry.name)
+  }
+
+  /** 图片预览时 ←/→ 切换；正在输入文本（过滤框等）时不抢按键。
+   *  注意不能用 anyModalOpen——它包含预览窗自身，会让本处理器
+   *  在预览打开时永远短路。 */
+  function onKey(ev) {
+    if (!S.preview?.image) return
+    if (S.modify || S.create || S.convert || S.pw || S.repair || S.newFolder || S.settingsOpen) return
+    const t = ev.target
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+    if (ev.key === 'ArrowLeft') { switchImage(-1); ev.preventDefault() }
+    else if (ev.key === 'ArrowRight') { switchImage(1); ev.preventDefault() }
+  }
 
   function onImgLoad(ev) {
     imgFailed.value = false
@@ -179,7 +216,10 @@
     closePreview()
   }
 
-  onMounted(syncModel)
+  onMounted(() => {
+    syncModel()
+    window.addEventListener('keydown', onKey)
+  })
   // 切换预览目标时重置图片视图状态；syncModel 负责文本装载。
   watch(() => S.preview?.name, () => {
     fit.value = true
@@ -193,5 +233,6 @@
     editor?.dispose()
     editor = null
     window.__previewEditor = null
+    window.removeEventListener('keydown', onKey)
   })
 </script>
