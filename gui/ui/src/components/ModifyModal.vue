@@ -3,7 +3,7 @@
     :show="!!S.modify"
     preset="card"
     title="修改归档"
-    :style="{ width: showImports && showDeletes ? '640px' : '480px', maxWidth: '94vw', borderRadius: '12px' }"
+    :style="{ width: 'max-content', minWidth: showImports && showDeletes ? '640px' : '480px', maxWidth: '94vw', borderRadius: '12px' }"
     :mask-closable="false"
     :bordered="false"
     :auto-focus="false"

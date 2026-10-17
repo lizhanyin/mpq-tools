@@ -627,6 +627,8 @@ body {
 .settings-body { gap: 14px; }
 /* 现代设置风格：每个配置组一张圆角卡片，行内左标题右控件。 */
 .setting-card {
+
+.settings-preview {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 12px 14px;

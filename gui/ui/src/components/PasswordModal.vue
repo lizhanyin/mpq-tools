@@ -3,7 +3,7 @@
     :show="!!S.pw"
     preset="card"
     :title="TITLES[mode]"
-    :style="{ width: '460px', maxWidth: '94vw', borderRadius: '12px' }"
+    :style="{ width: 'max-content', minWidth: '460px', maxWidth: '94vw', borderRadius: '12px' }"
     :mask-closable="false"
     :bordered="false"
     @update:show="(v) => { if (!v) closePw() }"

@@ -3,7 +3,7 @@
     :show="!!S.repair"
     preset="card"
     title="修复头信息"
-    :style="{ width: '600px', maxWidth: '94vw', borderRadius: '12px' }"
+    :style="{ width: 'max-content', minWidth: '600px', maxWidth: '94vw', borderRadius: '12px' }"
     :mask-closable="false"
     :bordered="false"
     @update:show="(v) => { if (!v) closeRepair() }"

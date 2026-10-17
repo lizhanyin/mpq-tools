@@ -3,7 +3,7 @@
     :show="!!S.convert"
     preset="card"
     title="版本转换"
-    :style="{ width: '560px', maxWidth: '94vw', borderRadius: '12px' }"
+    :style="{ width: 'max-content', minWidth: '560px', maxWidth: '94vw', borderRadius: '12px' }"
     :mask-closable="false"
     :bordered="false"
     @update:show="(v) => { if (!v) closeConvert() }"

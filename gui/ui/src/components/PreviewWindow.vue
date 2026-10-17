@@ -90,10 +90,26 @@
   type Monaco = typeof import('monaco-editor')
 
   // 非模态浮动窗口；标题栏拖动、右下角调整大小。Monaco 编辑器填充窗体。
-  const x = ref(90)
-  const y = ref(70)
-  const w = ref(720)
-  const h = ref(520)
+  // 打开时在程序窗口内居中，初始大小取程序窗口的 70%，且不小于
+  // 720×520、不贴边（约留 48px 余量）；720×520 同时也是手动调整的下限。
+  const MIN_W = 720, MIN_H = 520
+
+  function initialRect() {
+    const vw = window.innerWidth, vh = window.innerHeight
+    const w0 = Math.min(Math.max(Math.round(vw * 0.7), MIN_W), Math.max(320, vw - 48))
+    const h0 = Math.min(Math.max(Math.round(vh * 0.7), MIN_H), Math.max(240, vh - 48))
+    return {
+      x: Math.round((vw - w0) / 2),
+      y: Math.round((vh - h0) / 2),
+      w: w0,
+      h: h0,
+    }
+  }
+  const init = initialRect()
+  const x = ref(init.x)
+  const y = ref(init.y)
+  const w = ref(init.w)
+  const h = ref(init.h)
   const maximized = ref(false)
   let savedRect: { x: number; y: number; w: number; h: number } | null = null // 最大化前的位置尺寸，还原时用
   const titleEl = ref<HTMLElement | null>(null)
@@ -493,8 +509,8 @@
     const sx = ev.clientX, sy = ev.clientY
     const ow = w.value, oh = h.value
     const move = (e: PointerEvent) => {
-      w.value = Math.max(320, ow + e.clientX - sx)
-      h.value = Math.max(200, oh + e.clientY - sy)
+      w.value = Math.max(MIN_W, ow + e.clientX - sx)
+      h.value = Math.max(MIN_H, oh + e.clientY - sy)
     }
     const up = () => {
       window.removeEventListener('pointermove', move)

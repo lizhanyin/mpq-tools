@@ -3,7 +3,7 @@
     :show="!!S.newFolder"
     preset="card"
     title="新建文件夹"
-    :style="{ width: '440px', maxWidth: '94vw', borderRadius: '12px' }"
+    :style="{ width: 'max-content', minWidth: '440px', maxWidth: '94vw', borderRadius: '12px' }"
     :mask-closable="false"
     :bordered="false"
     @update:show="(v) => { if (!v) closeNewFolder() }"
