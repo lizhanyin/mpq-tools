@@ -157,11 +157,11 @@
   const rotW = (z) => Math.round((rot.value % 180 ? natH.value : natW.value) * z)
   const rotH = (z) => Math.round((rot.value % 180 ? natW.value : natH.value) * z)
 
-  /** 完整显示（contain）所需缩放，小图会放大到贴满一边。 */
+  /** 完整显示（contain）所需缩放；小图放大封顶 200%，避免打开时过度放大。 */
   function fitZoom() {
     const el = imgBox.value
     if (!el || !natW.value) return 1
-    return Math.min(el.clientWidth / rotW(1), el.clientHeight / rotH(1))
+    return Math.min(2, el.clientWidth / rotW(1), el.clientHeight / rotH(1))
   }
 
   /** 以屏幕坐标 (cx,cy) 为锚点缩放：缩放后光标下的内容点保持不动。

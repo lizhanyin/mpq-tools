@@ -34,16 +34,22 @@ export function rowSelectedState(row) {
 let anchorIdx = -1
 watch(() => rows.value.list, () => { anchorIdx = -1 })
 
+/** 把 list[a..b]（含）的全部条目 key 设为选择集。 */
+function selectRange(a, b) {
+  const list = rows.value.list
+  const keys = []
+  for (let i = a; i <= b; i++) {
+    for (const k of rowKeys(list[i])) keys.push(k) // 不用 spread：大目录可能超参数上限
+  }
+  setSelectedKeys(keys)
+}
+
 export function activateRow(row, ev) {
   const list = rows.value.list
   const idx = list.indexOf(row)
   if (ev.shiftKey && anchorIdx >= 0 && anchorIdx < list.length && idx >= 0) {
     const [a, b] = anchorIdx <= idx ? [anchorIdx, idx] : [idx, anchorIdx]
-    const keys = []
-    for (let i = a; i <= b; i++) {
-      for (const k of rowKeys(list[i])) keys.push(k) // 不用 spread：大目录可能超参数上限
-    }
-    setSelectedKeys(keys)
+    selectRange(a, b)
     return
   }
   if (ev.ctrlKey || ev.metaKey) {
@@ -54,6 +60,23 @@ export function activateRow(row, ev) {
     setSelectedKeys(rowKeys(row))
   }
   anchorIdx = idx
+}
+
+/** 方向键导航（网格视图）：把选择移动到 rows.list[idx]。
+ * extend = Shift+方向键：从锚点扩选（与 Shift+单击一致）；
+ * 普通方向键单选该行并把锚点移过去。返回目标行（越界返回 null）。 */
+export function moveCursorTo(idx, extend) {
+  const list = rows.value.list
+  const row = list[idx]
+  if (!row) return null
+  if (extend && anchorIdx >= 0 && anchorIdx < list.length) {
+    const [a, b] = anchorIdx <= idx ? [anchorIdx, idx] : [idx, anchorIdx]
+    selectRange(a, b)
+  } else {
+    setSelectedKeys(rowKeys(row))
+    anchorIdx = idx
+  }
+  return row
 }
 
 /** 双击行：进入目录 / 预览文件。 */

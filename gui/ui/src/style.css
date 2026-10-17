@@ -160,6 +160,7 @@ body {
   background: var(--border);
   margin: 0 4px;
 }
+.toolbar .filter-box { display: flex; align-items: center; gap: 6px; }
 .toolbar .filter-label { color: var(--text-weak); }
 .toolbar .sel-count { margin-left: auto; color: var(--text-weak); font-size: 0.92em; }
 .toolbar .n-input { width: 180px; }
@@ -597,8 +598,45 @@ body {
 /* -- settings ------------------------------------------------------------------ */
 
 .settings-body { gap: 14px; }
-.settings-preview {
+/* 现代设置风格：每个配置组一张圆角卡片，行内左标题右控件。 */
+.setting-card {
   border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.setting-row { display: flex; align-items: flex-start; gap: 12px; }
+.setting-row > :last-child { flex: none; }
+.setting-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.setting-name { font-weight: 600; }
+.setting-desc { color: var(--text-weak); font-size: 0.92em; }
+.setting-value { color: var(--text-weak); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.setting-slider { display: flex; align-items: flex-start; gap: 10px; }
+.setting-slider .slider-wrap { flex: 1; min-width: 0; }
+.setting-slider .n-button { margin-top: 1px; }
+/* 预设刻度标签：按 (值-最小)/(最大-最小) 百分比与滑块把手位置对齐 */
+.slider-marks { position: relative; height: 18px; margin-top: 2px; }
+.slider-mark {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  padding: 0 3px;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 0.88em;
+  line-height: 18px;
+  color: var(--text-weak);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.slider-mark:hover,
+.slider-mark.active { color: var(--accent); }
+.slider-mark.active { font-weight: 600; }
+.settings-preview {
+  background: var(--bg);
   border-radius: 8px;
   padding: 8px 10px;
   display: flex;

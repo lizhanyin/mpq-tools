@@ -1,13 +1,13 @@
 <template>
   <div ref="wrapEl" class="grid-scroll" @click="onBlankClick">
-    <n-virtual-list v-if="cols > 0" :items="gridRows" :item-size="ROW_H">
+    <n-virtual-list v-if="cols > 0" ref="vlRef" :items="gridRows" :item-size="ROW_H">
       <template #default="{ item }">
         <div class="grid-row" :style="{ height: ROW_H + 'px' }">
           <div v-for="r in item.items" :key="rowKey(r)" class="grid-tile"
                :class="tileClass(r)" :title="tileTitle(r)"
-               @click="activateRow(r, $event)"
+               @click="onTileClick(r, $event)"
                @dblclick="openRow(r)"
-               @contextmenu="openContextMenu(r, $event)">
+               @contextmenu="onTileMenu(r, $event)">
             <div class="tile-icon" :class="{ warn: r.type === 'file' && !r.entry.name }">
               <img v-if="thumbUrl(r)" class="tile-thumb" :src="thumbUrl(r)" alt="">
               <template v-else>{{ tileIcon(r) }}</template>
@@ -28,14 +28,14 @@
 </template>
 
 <script setup>
-  import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+  import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
   import { NVirtualList, NDropdown } from 'naive-ui'
-  import { rows, selectNone, MAX_ROWS } from '../store'
+  import { rows, selectNone, anyModalOpen, MAX_ROWS } from '../store'
   import { fmtBytes, baseName, isImageName } from '../utils'
   import { thumbFor } from '../thumbs'
   import {
     ctx, ctxOptions, onCtxSelect,
-    activateRow, openRow, openContextMenu, rowSelectedState,
+    activateRow, openRow, openContextMenu, moveCursorTo, rowSelectedState,
   } from './entryActions'
 
   // 网格单元几何尺寸（px，固定）：列数随容器宽度自适应，行高固定，
@@ -62,8 +62,12 @@
       measure(e.contentBoxSize?.[0]?.inlineSize ?? e.contentRect.width)
     })
     ro.observe(wrapEl.value)
+    window.addEventListener('keydown', onKey)
   })
-  onBeforeUnmount(() => ro?.disconnect())
+  onBeforeUnmount(() => {
+    ro?.disconnect()
+    window.removeEventListener('keydown', onKey)
+  })
 
   /** 把行列表按列数切成「网格行」，每个虚拟项渲染一行。 */
   const gridRows = computed(() => {
@@ -118,5 +122,51 @@
   function onBlankClick(ev) {
     if (ev.target?.closest?.('.grid-tile')) return
     selectNone()
+  }
+
+  // -- 方向键导航（↑↓←→ 移动选择，Shift 扩选，Enter 打开） --------------------------
+
+  const vlRef = ref(null)
+  const cursor = ref(-1) // 光标在 rows.list 中的索引；-1 = 尚未定位
+
+  // 行列表变化（导航/过滤）后光标作废，方向键重新从头开始。
+  watch(() => rows.value.list, () => { cursor.value = -1 })
+
+  /** 单击 / 右键单元格时把光标同步到该格，方向键从它继续。 */
+  function onTileClick(r, ev) {
+    cursor.value = rows.value.list.indexOf(r)
+    activateRow(r, ev)
+  }
+
+  function onTileMenu(r, ev) {
+    cursor.value = rows.value.list.indexOf(r)
+    openContextMenu(r, ev)
+  }
+
+  function onKey(ev) {
+    if (anyModalOpen.value || ctx.show) return
+    const t = ev.target
+    if (t?.closest?.('input, textarea, [contenteditable="true"]')) return
+    const list = rows.value.list
+    if (list.length === 0) return
+    if (ev.key === 'Enter') {
+      if (cursor.value >= 0) { ev.preventDefault(); openRow(list[cursor.value]) }
+      return
+    }
+    // 图标流式布局：←→ 在整列表上 ±1，↑↓ 跨一整行（cols 列）。
+    const c = Math.max(1, cols.value)
+    const cur = cursor.value
+    let next = -1
+    if (ev.key === 'ArrowRight') next = cur < 0 ? 0 : Math.min(list.length - 1, cur + 1)
+    else if (ev.key === 'ArrowLeft') next = cur < 0 ? list.length - 1 : Math.max(0, cur - 1)
+    else if (ev.key === 'ArrowDown') next = cur < 0 ? 0 : (cur + c < list.length ? cur + c : -1)
+    else if (ev.key === 'ArrowUp') next = cur < 0 ? list.length - 1 : (cur - c >= 0 ? cur - c : -1)
+    else return
+    if (next < 0) return // 已在网格边缘（首行的↑/末行的↓），保留原生行为
+    ev.preventDefault()
+    cursor.value = next
+    moveCursorTo(next, ev.shiftKey)
+    // scrollTo({index}) 仅当目标行未完全可见时才滚动（vueuc 内部已判断）。
+    vlRef.value?.scrollTo({ index: Math.floor(next / c) })
   }
 </script>

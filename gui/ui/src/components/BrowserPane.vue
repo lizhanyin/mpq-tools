@@ -22,10 +22,12 @@
                   title="标记选中条目待删除，随后在「修改归档」窗口应用"
                   @click="deleteSelected">删除选中</n-button>
         <span class="vsep"></span>
-        <span class="filter-label">过滤：</span>
-        <n-input :value="S.filter" size="small" clearable spellcheck="false"
-                 placeholder="按全路径搜索"
-                 @update:value="setFilter" />
+        <div class="filter-box">
+          <span class="filter-label">过滤：</span>
+          <n-input :value="S.filter" size="small" clearable spellcheck="false"
+                   placeholder="按全路径搜索"
+                   @update:value="setFilter" />
+        </div>
         <span class="sel-count">已选 {{ fmtBytes(selCount.size) }} 项</span>
         <span class="vsep"></span>
         <n-button-group size="small">
