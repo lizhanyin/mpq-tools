@@ -26,6 +26,7 @@ export const S = reactive({
   filter: '',
   appliedFilter: '',     // 120ms 防抖后的过滤词
   selected: new Set(),   // 条目 key "classic:12" / "bet:3"
+  viewMode: 'table',     // 文件浏览视图：'table' 表格 | 'grid' 网格（localStorage 持久化）
   preview: null,         // { name, text } — 浮动预览窗
   repair: null,          // { issues, applied }
   modify: null,          // { additions, deletions, reencrypt, busy }
@@ -36,7 +37,8 @@ export const S = reactive({
   settingsOpen: false,
   logs: [],
   fontSize: FONT_DEFAULT,
-  dropping: null,        // 拖拽悬停时的 { count }
+  gridThumbs: false,   // 网格视图显示图片缩略图（localStorage 持久化，默认关闭）
+  dropping: null,      // 拖拽悬停时的 { count }
 })
 
 // ---------------------------------------------------------------------------
@@ -110,6 +112,18 @@ export function setFontSize(v) {
 export function initStore() {
   S.fontSize = loadFontSize()
   document.documentElement.style.fontSize = `${S.fontSize}px`
+  S.viewMode = localStorage.getItem('view_mode') === 'grid' ? 'grid' : 'table'
+  S.gridThumbs = localStorage.getItem('grid_thumbs') === '1'
+}
+
+export function setViewMode(v) {
+  S.viewMode = v === 'grid' ? 'grid' : 'table'
+  localStorage.setItem('view_mode', S.viewMode)
+}
+
+export function setGridThumbs(v) {
+  S.gridThumbs = !!v
+  localStorage.setItem('grid_thumbs', v ? '1' : '0')
 }
 
 // ---------------------------------------------------------------------------
@@ -365,6 +379,12 @@ export function toggleDirSelected(node, on) {
     if (on) S.selected.add(k)
     else S.selected.delete(k)
   }
+}
+
+/** 用一组 key 整体替换当前选择（行单击单选 / Shift 范围选共用）。 */
+export function setSelectedKeys(keys) {
+  S.selected.clear()
+  for (const k of keys) S.selected.add(k)
 }
 
 export function selectAll() {

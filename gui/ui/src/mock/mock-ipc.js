@@ -170,6 +170,11 @@ const MOCKS = {
       : op === 'change' ? '已更换密码。' : '已解除密码保护（11 个文件已解密）。',
   }),
   preview_file: ({ name }) => mockPreview(name),
+  // 缩略图 mock：图片扩展名返回 canvas 生成的 data URL，其余 null。
+  thumbnail: ({ name }) => {
+    const ext = (String(name).toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || ''
+    return (MOCK_IMAGE_MIME[ext] || ext === 'tga' || ext === 'blp') ? mockImageUrl(ext) : null
+  },
   stage_edited_file: ({ name, text }) => ({
     name,
     path: `C:\\Users\\dev\\AppData\\Local\\Temp\\mpqtool-edit\\${name.replace(/[\\/]/g, '_')}`,

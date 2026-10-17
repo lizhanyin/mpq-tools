@@ -326,6 +326,18 @@ pub fn preview_file(name: String, state: St) -> Result<PreviewDto, String> {
     })
 }
 
+/// 网格视图缩略图：解码并等比缩到 192px 内的 PNG data URL。
+/// 非图片或解码失败返回 None（前端回退到图标），不弹错误。
+#[tauri::command]
+pub fn thumbnail(name: String, state: St) -> Result<Option<String>, String> {
+    let s = lock(&state);
+    let Some(archive) = &s.archive else {
+        return Err("未打开归档".to_string());
+    };
+    let data = archive.read_file(&name).map_err(|e| e.to_string())?;
+    crate::imagepreview::thumbnail(&name, &data)
+}
+
 #[derive(Serialize)]
 pub struct StagedDto {
     /// 归档内的条目名（含子目录路径，原样传入的名字）。

@@ -27,6 +27,13 @@
                  placeholder="按全路径搜索"
                  @update:value="setFilter" />
         <span class="sel-count">已选 {{ fmtBytes(selCount.size) }} 项</span>
+        <span class="vsep"></span>
+        <n-button-group size="small">
+          <n-button :type="S.viewMode === 'table' ? 'primary' : 'default'"
+                    title="表格视图" @click="setViewMode('table')">☰ 列表</n-button>
+          <n-button :type="S.viewMode === 'grid' ? 'primary' : 'default'"
+                    title="网格视图（大图标，虚拟滚动）" @click="setViewMode('grid')">▦ 网格</n-button>
+        </n-button-group>
       </div>
 
       <div class="breadcrumb">
@@ -52,18 +59,20 @@
         </template>
       </div>
 
-      <FileTable />
+      <FileTable v-if="S.viewMode !== 'grid'" />
+      <FileGrid v-else />
     </div>
   </div>
 </template>
 
 <script setup>
   import { ref, computed } from 'vue'
-  import { NButton, NInput } from 'naive-ui'
+  import { NButton, NButtonGroup, NInput } from 'naive-ui'
   import FileTree from './FileTree.vue'
   import FileTable from './FileTable.vue'
+  import FileGrid from './FileGrid.vue'
   import {
-    S, searching, searchResults,
+    S, searching, searchResults, setViewMode,
     setFilter, reloadArchive, navigate,
     extractSelected, deleteSelected, importFilesDialog, importFolderDialog, startNewFolder,
   } from '../store'

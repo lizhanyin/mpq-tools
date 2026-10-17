@@ -42,6 +42,19 @@
         <div class="mono">预览（等宽）：war3map.j  SECTOR=4096</div>
       </div>
 
+      <div class="section-head">
+        <span class="section-title">图片缩略图</span>
+        <span class="section-count">{{ S.gridThumbs ? '开' : '关' }}（默认关闭）</span>
+      </div>
+      <n-switch size="large" :value="S.gridThumbs" @update:value="setGridThumbs">
+        <template #checked>网格视图显示</template>
+        <template #unchecked>不显示</template>
+      </n-switch>
+      <div class="hint-text">
+        在网格视图中为图片文件（含 TGA / BLP）显示缩略图。需要逐个解码归档内容，
+        图片很多时首次滚动会稍慢；开关立即生效并自动保存。
+      </div>
+
       <div class="hint-text">字号立即应用于整个界面，并自动保存。</div>
     </div>
 
@@ -59,8 +72,8 @@
 
 <script setup>
   import { computed, ref, watch } from 'vue'
-  import { NModal, NButton, NSelect, NSlider } from 'naive-ui'
-  import { S, setFontSize, FONT_MIN, FONT_MAX, FONT_DEFAULT } from '../store'
+  import { NModal, NButton, NSelect, NSlider, NSwitch } from 'naive-ui'
+  import { S, setFontSize, setGridThumbs, FONT_MIN, FONT_MAX, FONT_DEFAULT } from '../store'
 
   const CUSTOM = 'custom'
 

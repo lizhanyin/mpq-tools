@@ -56,6 +56,79 @@ pub fn build(name: &str, data: &[u8]) -> Result<Option<ImageDto>, String> {
     }
 }
 
+// -- 网格视图缩略图 --------------------------------------------------------------
+
+/// 缩略图边长上限：网格单元图标区约 80px，按 2x 高分屏余量取 192。
+const THUMB_MAX: u32 = 192;
+/// 原生光栅格式解码的尺寸/内存上限（防止损坏的头声明超大尺寸）。
+const MAX_DIM: u32 = 8192;
+const MAX_ALLOC: u64 = 256 * 1024 * 1024;
+
+/// 网格视图缩略图：解码（原生光栅 / TGA / BLP，含 BLP 内嵌 JPEG）→
+/// 等比缩放到 THUMB_MAX 内 → PNG data URL。svg 矢量原样透传由浏览器
+/// 缩放；非图片返回 None；解码失败不报错（前端回退显示图标）。
+pub fn thumbnail(name: &str, data: &[u8]) -> Result<Option<String>, String> {
+    let ext = ext_of(name);
+    let pixels = match ext.as_str() {
+        "svg" => {
+            // 矢量交给浏览器缩放；过大（或超 16 MiB）就不出缩略图。
+            return Ok(if data.len() <= NATIVE_LIMIT {
+                Some(data_url_str("image/svg+xml", data))
+            } else {
+                None
+            });
+        }
+        "tga" => tga_pixels(data),
+        "blp" => blp_pixels(data),
+        "png" | "jpg" | "jpeg" | "jfif" | "gif" | "bmp" | "dib" | "webp" | "ico" => {
+            let mut reader = image::ImageReader::new(std::io::Cursor::new(data))
+                .with_guessed_format()
+                .map_err(|e| format!("识别图片格式失败：{e}"))?;
+            reader.limits(native_limits());
+            reader
+                .decode()
+                .map(|img| img.to_rgba8())
+                .map_err(|e| format!("图片解码失败：{e}"))
+        }
+        _ => return Ok(None),
+    };
+    // 单个条目解码失败只是不出缩略图，不影响网格其它内容。
+    let img = match pixels {
+        Ok(img) => img,
+        Err(_) => return Ok(None),
+    };
+    // 已小于上限的不再放大（thumbnail 会把小图拉大到目标尺寸）。
+    let dyn_img = DynamicImage::ImageRgba8(img);
+    let thumb = if dyn_img.width() <= THUMB_MAX && dyn_img.height() <= THUMB_MAX {
+        dyn_img
+    } else {
+        dyn_img.thumbnail(THUMB_MAX, THUMB_MAX)
+    };
+    let mut png = Vec::new();
+    thumb
+        .write_to(&mut std::io::Cursor::new(&mut png), ImageFormat::Png)
+        .map_err(|e| format!("PNG 编码失败：{e}"))?;
+    Ok(Some(data_url_str("image/png", &png)))
+}
+
+/// 按固定格式解码（BLP 内嵌 JPEG 用），带尺寸/内存上限。
+fn decode_with_limits(data: &[u8], format: ImageFormat) -> Result<RgbaImage, String> {
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(data), format);
+    reader.limits(native_limits());
+    reader
+        .decode()
+        .map(|img| img.to_rgba8())
+        .map_err(|e| format!("图片解码失败：{e}"))
+}
+
+fn native_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DIM);
+    limits.max_image_height = Some(MAX_DIM);
+    limits.max_alloc = Some(MAX_ALLOC);
+    limits
+}
+
 fn ext_of(name: &str) -> String {
     let lower = name.to_lowercase();
     match lower.rfind('.') {
@@ -66,13 +139,17 @@ fn ext_of(name: &str) -> String {
 
 fn data_url(mime: &str, data: &[u8]) -> ImageDto {
     ImageDto {
-        url: format!(
-            "data:{mime};base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(data)
-        ),
+        url: data_url_str(mime, data),
         mime: mime.to_string(),
         converted: false,
     }
+}
+
+fn data_url_str(mime: &str, data: &[u8]) -> String {
+    format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(data)
+    )
 }
 
 /// RGBA 像素编码成 PNG 的 data URL（converted = true）。
@@ -86,8 +163,8 @@ fn png_url(img: RgbaImage) -> Result<ImageDto, String> {
     Ok(dto)
 }
 
-fn decode_tga(data: &[u8]) -> Result<ImageDto, String> {
-    // 尺寸在固定偏移 12..16；先做像素数上限检查再交给 image 解码。
+/// 解码 TGA 为 RGBA 像素（尺寸头先做上限检查再交给 image）。
+fn tga_pixels(data: &[u8]) -> Result<RgbaImage, String> {
     if data.len() < 18 {
         return Err("TGA 文件头不完整".to_string());
     }
@@ -96,16 +173,27 @@ fn decode_tga(data: &[u8]) -> Result<ImageDto, String> {
     if w * h > MAX_PIXELS {
         return Err(format!("TGA 尺寸异常（{w}×{h}）"));
     }
-    let img = image::load_from_memory_with_format(data, ImageFormat::Tga)
-        .map_err(|e| format!("TGA 解码失败：{e}"))?;
-    png_url(img.to_rgba8())
+    image::load_from_memory_with_format(data, ImageFormat::Tga)
+        .map_err(|e| format!("TGA 解码失败：{e}"))
+        .map(|img| img.to_rgba8())
 }
 
-/// 解码 BLP2（Warcraft III 的贴图格式）。只取 mip 0（最高清一级）：
-/// - type 0：mip 数据是标准 JPEG，直接透传给浏览器；
-/// - type 1 + 压缩 1：调色板索引 → RGBA；
-/// - type 1 + 压缩 2：DXT1 / DXT3 / DXT5 块解码 → RGBA。
-fn decode_blp(data: &[u8]) -> Result<ImageDto, String> {
+fn decode_tga(data: &[u8]) -> Result<ImageDto, String> {
+    tga_pixels(data).and_then(png_url)
+}
+
+/// 解析后的 BLP2 mip 0：头字段 + 载荷切片（预览与缩略图共用）。
+struct BlpMip<'a> {
+    blp_type: u32,
+    compression: u8,
+    alpha_depth: u8,
+    width: u32,
+    height: u32,
+    mip: &'a [u8],
+}
+
+/// 校验 BLP2 头并取出 mip 0 载荷。
+fn blp_mip0(data: &[u8]) -> Result<BlpMip<'_>, String> {
     // 头 0x14 字节 + 两张 mip 表各 0x40 = 0x94；调色板变体在 0x94 处
     // 还有 1024 字节调色板（mip 数据因此从 0x494 起）。
     if data.len() < 0x94 {
@@ -131,12 +219,38 @@ fn decode_blp(data: &[u8]) -> Result<ImageDto, String> {
         .checked_add(mip_len)
         .filter(|&end| end <= data.len())
         .ok_or_else(|| "BLP mipmap 数据越界".to_string())?;
-    let mip = &data[mip_off..mip_end];
-    match (blp_type, compression) {
-        (0, _) => Ok(data_url("image/jpeg", mip)),
-        (1, 1) => blp_palette(data, mip, width, height, alpha_depth),
-        (1, 2) => blp_dxt(mip, width, height, alpha_depth),
-        _ => Err(format!("未知 BLP 类型 {blp_type}（压缩 {compression}）")),
+    Ok(BlpMip {
+        blp_type,
+        compression,
+        alpha_depth,
+        width,
+        height,
+        mip: &data[mip_off..mip_end],
+    })
+}
+
+/// 解码 BLP2（Warcraft III 的贴图格式）。只取 mip 0（最高清一级）：
+/// - type 0：mip 数据是标准 JPEG，直接透传给浏览器；
+/// - type 1 + 压缩 1：调色板索引 → RGBA；
+/// - type 1 + 压缩 2：DXT1 / DXT3 / DXT5 块解码 → RGBA。
+fn decode_blp(data: &[u8]) -> Result<ImageDto, String> {
+    let m = blp_mip0(data)?;
+    match (m.blp_type, m.compression) {
+        (0, _) => Ok(data_url("image/jpeg", m.mip)),
+        (1, 1) => blp_palette(data, m.mip, m.width, m.height, m.alpha_depth).and_then(png_url),
+        (1, 2) => blp_dxt(m.mip, m.width, m.height, m.alpha_depth).and_then(png_url),
+        _ => Err(format!("未知 BLP 类型 {}（压缩 {}）", m.blp_type, m.compression)),
+    }
+}
+
+/// BLP 解码为 RGBA 像素（缩略图用）：type 0 的 JPEG 也在此解码以便缩放。
+fn blp_pixels(data: &[u8]) -> Result<RgbaImage, String> {
+    let m = blp_mip0(data)?;
+    match (m.blp_type, m.compression) {
+        (0, _) => decode_with_limits(m.mip, ImageFormat::Jpeg),
+        (1, 1) => blp_palette(data, m.mip, m.width, m.height, m.alpha_depth),
+        (1, 2) => blp_dxt(m.mip, m.width, m.height, m.alpha_depth),
+        _ => Err(format!("未知 BLP 类型 {}（压缩 {}）", m.blp_type, m.compression)),
     }
 }
 
@@ -149,7 +263,7 @@ fn blp_palette(
     width: u32,
     height: u32,
     alpha_depth: u8,
-) -> Result<ImageDto, String> {
+) -> Result<RgbaImage, String> {
     if full.len() < 0x94 + 1024 {
         return Err("BLP 头不完整（缺调色板）".to_string());
     }
@@ -197,12 +311,12 @@ fn blp_palette(
             image::Rgba([r, g, b, a]),
         );
     }
-    png_url(img)
+    Ok(img)
 }
 
 /// DXT 压缩的 BLP：变体按 mip 数据量识别（DXT1 每块 8 字节，
 /// DXT3/5 每块 16 字节；同为 16 字节时 alphaDepth 4 → DXT3、其余 → DXT5）。
-fn blp_dxt(mip: &[u8], width: u32, height: u32, alpha_depth: u8) -> Result<ImageDto, String> {
+fn blp_dxt(mip: &[u8], width: u32, height: u32, alpha_depth: u8) -> Result<RgbaImage, String> {
     let blocks_x = width.div_ceil(4) as usize;
     let blocks_y = height.div_ceil(4) as usize;
     let blocks = blocks_x * blocks_y;
@@ -240,7 +354,7 @@ fn blp_dxt(mip: &[u8], width: u32, height: u32, alpha_depth: u8) -> Result<Image
             }
         }
     }
-    png_url(img)
+    Ok(img)
 }
 
 /// 565 两色展开成 4 色查找表。punchthrough = true（DXT1）且 c0 ≤ c1 的
@@ -496,5 +610,77 @@ mod tests {
         let mut b = blp_file(1, 1, 0, 2, 1, 0x494, &[0, 1]);
         b[0x14..0x18].copy_from_slice(&0xFFFF_u32.to_le_bytes());
         assert!(decode_blp(&b).is_err());
+    }
+
+    // -- 缩略图 -----------------------------------------------------------------
+
+    fn url_png_pixels(url: &str) -> RgbaImage {
+        let b64 = url.strip_prefix("data:image/png;base64,").unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
+        image::load_from_memory(&bytes).unwrap().to_rgba8()
+    }
+
+    /// 编码一张纯色图（无 alpha 通道的 RGB，JPEG 不支持透明）。
+    fn encoded(w: u32, h: u32, format: ImageFormat) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(w, h, image::Rgb([200, 60, 60]));
+        let mut out = Vec::new();
+        DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), format)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn thumbnail_non_image_none() {
+        assert!(thumbnail("war3map.j", b"function").unwrap().is_none());
+        assert!(thumbnail("readme", b"text").unwrap().is_none());
+    }
+
+    #[test]
+    fn thumbnail_png_is_resized() {
+        // 400×200 → 等比缩到 192×96。
+        let url = thumbnail("logo.png", &encoded(400, 200, ImageFormat::Png))
+            .unwrap()
+            .unwrap();
+        assert_eq!(url_png_pixels(&url).dimensions(), (192, 96));
+    }
+
+    #[test]
+    fn thumbnail_tga_decodes() {
+        // 复用 tga_decodes_to_png 的 2×1 构造（小于上限，不缩放）。
+        let mut b = vec![0u8; 18];
+        b[2] = 2;
+        b[12..14].copy_from_slice(&2u16.to_le_bytes());
+        b[14..16].copy_from_slice(&1u16.to_le_bytes());
+        b[16] = 32;
+        b[17] = 8;
+        b.extend_from_slice(&[0, 0, 255, 255]);
+        b.extend_from_slice(&[0, 255, 0, 128]);
+        let url = thumbnail("x.tga", &b).unwrap().unwrap();
+        assert_eq!(url_png_pixels(&url).dimensions(), (2, 1));
+    }
+
+    #[test]
+    fn thumbnail_blp_jpeg_is_decoded_and_resized() {
+        // 预览走 JPEG 透传；缩略图必须真正解码才能缩放：300×300 → 192×192。
+        let jpeg = encoded(300, 300, ImageFormat::Jpeg);
+        let b = blp_file(0, 0, 0, 300, 300, 0x94, &jpeg);
+        let url = thumbnail("tex.blp", &b).unwrap().unwrap();
+        assert_eq!(url_png_pixels(&url).dimensions(), (192, 192));
+    }
+
+    #[test]
+    fn thumbnail_svg_passthrough() {
+        let url = thumbnail("icon.svg", b"<svg/>").unwrap().unwrap();
+        assert!(url.starts_with("data:image/svg+xml;base64,"));
+    }
+
+    #[test]
+    fn thumbnail_corrupt_data_falls_back_to_none() {
+        // 损坏数据不报错，仅不出缩略图（前端回退图标）。
+        assert!(thumbnail("broken.png", b"\x89PNG garbage").unwrap().is_none());
+        assert!(thumbnail("broken.tga", b"xx").unwrap().is_none());
     }
 }

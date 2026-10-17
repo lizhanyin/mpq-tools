@@ -14,7 +14,7 @@ import NewFolderModal from './components/NewFolderModal.vue'
 import ConvertModal from './components/ConvertModal.vue'
 import PasswordModal from './components/PasswordModal.vue'
 import SettingsModal from './components/SettingsModal.vue'
-import { S, reloadArchive, handleDrop, anyModalOpen, log } from './store'
+import { S, reloadArchive, handleDrop, anyModalOpen, selectAll, log } from './store'
 import { toast } from './toast'
 import * as ipc from './ipc'
 
@@ -46,6 +46,15 @@ function onKeyDown(ev) {
   if (ev.key === 'F5') {
     ev.preventDefault()
     reloadArchive()
+    return
+  }
+  // Ctrl+A：文件列表全选（当前视图范围）。文本输入/编辑场景保留原生全选。
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'a') {
+    const t = ev.target
+    if (t?.closest?.('input, textarea, [contenteditable="true"], .monaco-editor, .log-body')) return
+    if (!S.info || anyModalOpen.value) return
+    ev.preventDefault()
+    selectAll()
   }
 }
 

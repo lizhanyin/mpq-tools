@@ -18,7 +18,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 encoding_rs = "0.8"
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["png", "tga"] }
+# 缩略图需要解码 jpeg/gif/bmp/ico/webp；tga/blp 为手写解码，png 用于再编码。
+image = { version = "0.25", default-features = false, features = ["png", "tga", "jpeg", "gif", "bmp", "ico", "webp"] }
 
 [[bin]]
 name = "mpqtool-gui"
