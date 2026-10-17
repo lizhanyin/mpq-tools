@@ -32,7 +32,19 @@ export function rowSelectedState(row) {
 
 // Shift 范围选的锚点（rows.list 中的索引）；行列表变化（导航/过滤）后作废。
 let anchorIdx = -1
-watch(() => rows.value.list, () => { anchorIdx = -1 })
+// 双击/回车进入文件夹时置位：列表更新后不沿用原选择（进入前点选目录=递归
+// 全选其文件），改为只选中第一项，锚点随之落到第一项。
+let enterSelectFirst = false
+watch(() => rows.value.list, () => {
+  if (enterSelectFirst) {
+    enterSelectFirst = false
+    const first = rows.value.list[0]
+    setSelectedKeys(first ? rowKeys(first) : [])
+    anchorIdx = first ? 0 : -1
+    return
+  }
+  anchorIdx = -1
+})
 
 /** 把 list[a..b]（含）的全部条目 key 设为选择集。 */
 function selectRange(a, b) {
@@ -79,9 +91,10 @@ export function moveCursorTo(idx, extend) {
   return row
 }
 
-/** 双击行：进入目录 / 预览文件。 */
+/** 双击行：进入目录 / 预览文件。进入目录后只选中第一项（见上方 watcher）。 */
 export function openRow(row) {
   if (row.type === 'dir') {
+    enterSelectFirst = true
     navigate(row.path)
   } else if (row.entry.name) {
     previewFile(row.entry.name)
@@ -165,7 +178,7 @@ export function onCtxSelect(key) {
   if (key === 'batch-copy') { copyText(selectedNames().join('\n'), `${S.selected.size} 个名称`); return }
   if (key === 'batch-delete') { markDeletions([...S.selected]); return }
   if (row.type === 'dir') {
-    if (key === 'enter') navigate(row.path)
+    if (key === 'enter') openRow(row)
     else if (key === 'dir-select') toggleDirSelected(row.node, !dirAllSelected(row.node))
     else if (key === 'dir-extract') extractKeys(collectKeys(row.node))
     else if (key === 'copy-name') copyText(row.node.name)

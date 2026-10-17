@@ -32,17 +32,24 @@
            title="滚轮缩放，拖动平移；点击在 100% 与完整显示间切换"
            @wheel.prevent="onWheel" @pointerdown="startPan" @click="onImgClick">
         <div v-if="!imgFailed" class="img-frame" :style="frameStyle">
-          <img :src="p.image.url" alt="" draggable="false" :style="imgStyle"
+          <img :src="shownUrl" alt="" draggable="false" :style="imgStyle"
                @load="onImgLoad" @error="imgFailed = true">
         </div>
         <div v-else class="img-fallback">图片解码失败：文件可能不是有效的图片</div>
       </div>
-      <!-- 左右切换：视图中还有其它图片时显示（含搜索结果视图） -->
+      <!-- 左右切换：视图中还有其它图片时显示（含搜索结果视图）。
+           点按翻一张；按住约 0.4s 后连翻，锁定 60 张/秒。 -->
       <template v-if="p?.image && imgCount > 1">
         <button class="img-nav prev" :disabled="imgIndex <= 0"
-                title="上一张（←）" @click="switchImage(-1)">‹</button>
+                title="上一张（←）· 按住连翻"
+                @pointerdown.prevent="pressNav(-1, $event)"
+                @pointerup="stopFlip" @pointercancel="stopFlip" @lostpointercapture="stopFlip"
+                @click="ev => ev.detail === 0 && switchImage(-1)">‹</button>
         <button class="img-nav next" :disabled="imgIndex < 0 || imgIndex >= imgCount - 1"
-                title="下一张（→）" @click="switchImage(1)">›</button>
+                title="下一张（→）· 按住连翻"
+                @pointerdown.prevent="pressNav(1, $event)"
+                @pointerup="stopFlip" @pointercancel="stopFlip" @lostpointercapture="stopFlip"
+                @click="ev => ev.detail === 0 && switchImage(1)">›</button>
       </template>
     </div>
     <div v-if="!maximized" class="fwin-resize" @pointerdown="startResize"></div>
@@ -78,6 +85,8 @@
   const natW = ref(0)        // 自然宽高（数值形式），供缩放 / 旋转计算
   const natH = ref(0)
   const imgFailed = ref(false)
+  const shownUrl = ref('') // 当前显示的图片 URL；先屏外解码再替换，切换时不闪白
+  let imgSeq = 0           // 快速连续切换时只认最后一次的结果
   const imgBox = ref(null)   // 图片滚动容器：平移 = 拖动它的滚动
   const panning = ref(false)
   let suppressClick = false  // 拖动平移后不再当作点击缩放
@@ -131,7 +140,68 @@
     previewFile(imgEntries.value[i].entry.name)
   }
 
-  /** 图片预览时 ←/→ 切换；正在输入文本（过滤框等）时不抢按键。
+  // -- 按住连翻（‹ › 按钮 / ←→ 方向键）--------------------------------------------
+  // 短按只翻一张；按住约 0.4s 后开始连翻，锁定最多 60 张/秒（rAF 驱动）。
+  // 每张都等上一张完成「提取 → 解码 → 上屏」才请求下一张：管线快时贴满
+  // 60fps，管线慢时降到管线速度，不跳张、不闪白。
+
+  const FLIP_DELAY_MS = 400    // 按住多久后进入连翻
+  const FLIP_MIN_MS = 1000 / 60 // 连翻最快间隔：锁 60 帧
+  let flipDir = 0              // 连翻方向；0 = 空闲
+  let flipRaf = 0              // 连翻 rAF 句柄
+  let flipHoldTimer = 0        // 起翻延时句柄
+  let flipInFlight = false     // previewFile 请求在途
+  let lastFlipReq = 0          // 上次发起请求的 rAF 时间戳（限速用）
+  let imgReady = true          // 当前图已解码上屏（或加载失败）
+
+  /** 尝试向 flipDir 翻一张；返回是否发起了请求。到达边界自动停。 */
+  function flipStep() {
+    const i = imgIndex.value + flipDir
+    if (i < 0 || i >= imgEntries.value.length) { stopFlip(); return false }
+    if (flipInFlight || !imgReady) return false
+    const name = imgEntries.value[i].entry.name
+    flipInFlight = true
+    imgReady = false
+    previewFile(name)
+      .then(() => {
+        // 预览没变成目标（提取失败等）：恢复节奏门并停翻，避免原地刷请求
+        if (S.preview?.name !== name) { imgReady = true; stopFlip() }
+      })
+      .finally(() => { flipInFlight = false })
+    return true
+  }
+
+  function flipTick(now) {
+    if (!flipDir) return
+    if (now - lastFlipReq >= FLIP_MIN_MS - 1 && flipStep()) lastFlipReq = now
+    flipRaf = requestAnimationFrame(flipTick)
+  }
+
+  /** 按下立刻翻一张；一直按住则延时后进入 60fps 连翻。 */
+  function startFlip(dir) {
+    if (flipDir === dir) return
+    stopFlip()
+    flipDir = dir
+    flipStep()
+    flipHoldTimer = setTimeout(() => {
+      lastFlipReq = 0
+      flipRaf = requestAnimationFrame(flipTick)
+    }, FLIP_DELAY_MS)
+  }
+
+  function stopFlip() {
+    flipDir = 0
+    clearTimeout(flipHoldTimer)
+    cancelAnimationFrame(flipRaf)
+  }
+
+  /** 指针按到 ‹/› 上：捕获指针，按住期间即使移出按钮也能收到抬起。 */
+  function pressNav(dir, ev) {
+    try { ev.currentTarget.setPointerCapture(ev.pointerId) } catch { /* 合成事件没有真实指针 */ }
+    startFlip(dir)
+  }
+
+  /** 图片预览时 ←/→ 切换，按住连翻；正在输入文本（过滤框等）时不抢按键。
    *  注意不能用 anyModalOpen——它包含预览窗自身，会让本处理器
    *  在预览打开时永远短路。 */
   function onKey(ev) {
@@ -139,8 +209,47 @@
     if (S.modify || S.create || S.convert || S.pw || S.repair || S.newFolder || S.settingsOpen) return
     const t = ev.target
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
-    if (ev.key === 'ArrowLeft') { switchImage(-1); ev.preventDefault() }
-    else if (ev.key === 'ArrowRight') { switchImage(1); ev.preventDefault() }
+    if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') {
+      ev.preventDefault()
+      // 系统按键重复不直接翻页：连翻节奏统一由按住的 rAF 循环控制
+      if (!ev.repeat) startFlip(ev.key === 'ArrowLeft' ? -1 : 1)
+    }
+  }
+
+  /** 松开方向键即停翻（按错方向重按也走这里的停→起）。 */
+  function onKeyUp(ev) {
+    if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') stopFlip()
+  }
+
+  /** 屏外解码新图，成功后才一次性替换 src 与视图状态：旧图保持可见
+   *  直到新位图可绘制，避免中间一帧露出白底。imgReady 供按住连翻掌握
+   *  解码节奏。 */
+  async function showImage(url) {
+    const seq = ++imgSeq
+    if (!url) { shownUrl.value = ''; imgReady = true; return }
+    imgReady = false
+    const im = new Image()
+    im.src = url
+    let ok = false
+    try { await im.decode(); ok = im.naturalWidth > 0 } catch { ok = false }
+    if (seq !== imgSeq) return // 解码期间又切了目标，丢弃本次结果
+    if (!ok) {
+      shownUrl.value = ''
+      natW.value = 0
+      natH.value = 0
+      dims.value = ''
+      imgFailed.value = true
+      imgReady = true
+      return
+    }
+    natW.value = im.naturalWidth
+    natH.value = im.naturalHeight
+    dims.value = `${natW.value}×${natH.value}`
+    rot.value = 0
+    imgFailed.value = false
+    zoom.value = fitZoom()
+    shownUrl.value = url // 位图已解码，与上面的状态同帧上屏
+    imgReady = true
   }
 
   function onImgLoad(ev) {
@@ -366,25 +475,37 @@
   onMounted(() => {
     syncModel()
     window.addEventListener('keydown', onKey)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', stopFlip) // 失焦收不到 keyup，防止连翻失控
     window.addEventListener('resize', onViewportResize)
   })
-  // 切换预览目标时重置图片视图状态；syncModel 负责文本装载。
+  // 切换预览目标时重置视图状态；syncModel 负责文本装载。图片的视图
+  // 状态不在此时清零——由 showImage 解码完成后统一重置，期间旧图保持
+  // 显示，避免旧图消失、新图未解码之间闪白。
   watch(() => S.preview?.name, () => {
-    zoom.value = 1
-    rot.value = 0
-    natW.value = 0
-    natH.value = 0
-    dims.value = ''
-    imgFailed.value = false
+    if (!S.preview?.image) {
+      zoom.value = 1
+      rot.value = 0
+      natW.value = 0
+      natH.value = 0
+      dims.value = ''
+      imgFailed.value = false
+    }
     syncModel()
   })
+  // 打开 / 切换图片：先屏外解码，再一次性上屏。也盯住 name——两张
+  // 内容相同的图片 data URL 相同，只看 url 不会触发重置。
+  watch(() => [S.preview?.name, S.preview?.image?.url], ([, url]) => showImage(url), { immediate: true })
   // 界面字号变化时同步编辑器。
   watch(() => S.fontSize, (v) => { editor?.updateOptions({ fontSize: v }) })
   onUnmounted(() => {
+    stopFlip()
     editor?.dispose()
     editor = null
     window.__previewEditor = null
     window.removeEventListener('keydown', onKey)
+    window.removeEventListener('keyup', onKeyUp)
+    window.removeEventListener('blur', stopFlip)
     window.removeEventListener('resize', onViewportResize)
   })
 </script>

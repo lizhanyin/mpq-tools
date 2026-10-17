@@ -72,10 +72,14 @@
 
   function nodeProps({ option }) {
     const props = {
-      // 每次点击行都导航（与旧版一致）；点展开箭头只切展开，不导航。
+      // 单击：进入目录；双击：展开/收缩；点展开箭头只切展开，不导航。
       onClick: (e) => {
         if (e.target.closest('.n-tree-node-switcher')) return
         selectNode(option)
+      },
+      onDblclick: (e) => {
+        if (e.target.closest('.n-tree-node-switcher')) return
+        toggleDir(option)
       },
     }
     // 根节点标签是文件名，悬停显示完整路径。
@@ -83,14 +87,14 @@
     return props
   }
 
-  /** 点击文件夹：进入目录；含子目录且不在搜索态时顺带切换展开（与 egui 一致）。 */
+  /** 点击文件夹：进入目录（不切展开，展开/收缩交给双击）。 */
   function selectNode(option) {
-    if (option.isRoot) {
-      navigate([])
-      return
-    }
-    navigate([...option.path])
-    if (option.node.dirs.length && !searching.value) toggleExpanded(option.key)
+    navigate(option.isRoot ? [] : [...option.path])
+  }
+
+  /** 双击文件夹：切换展开/收缩（搜索态下展开被强制，不切换）。 */
+  function toggleDir(option) {
+    if (!option.isRoot && option.node.dirs.length && !searching.value) toggleExpanded(option.key)
   }
 
   function onUpdateExpanded(keys) {

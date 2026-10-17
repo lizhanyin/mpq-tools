@@ -6,7 +6,7 @@
           <div v-for="r in item.items" :key="rowKey(r)" class="grid-tile"
                :class="tileClass(r)" :title="tileTitle(r)"
                @click="onTileClick(r, $event)"
-               @dblclick="openRow(r)"
+               @dblclick="onTileOpen(r)"
                @contextmenu="onTileMenu(r, $event)">
             <div class="tile-icon" :class="{ warn: r.type === 'file' && !r.entry.name }">
               <img v-if="thumbUrl(r)" class="tile-thumb" :src="thumbUrl(r)" alt="">
@@ -129,8 +129,19 @@
   const vlRef = ref(null)
   const cursor = ref(-1) // 光标在 rows.list 中的索引；-1 = 尚未定位
 
-  // 行列表变化（导航/过滤）后光标作废，方向键重新从头开始。
-  watch(() => rows.value.list, () => { cursor.value = -1 })
+  // 行列表变化（导航/过滤）后光标作废，方向键重新从头开始；
+  // 双击/回车进入文件夹除外：光标落到第一项，方向键从它继续。
+  let dirEnter = false
+  watch(() => rows.value.list, () => {
+    cursor.value = dirEnter ? 0 : -1
+    dirEnter = false
+  })
+
+  /** 双击 / 回车打开：进入文件夹时光标落到第一项。 */
+  function onTileOpen(r) {
+    dirEnter = r.type === 'dir'
+    openRow(r)
+  }
 
   /** 单击 / 右键单元格时把光标同步到该格，方向键从它继续。 */
   function onTileClick(r, ev) {
@@ -150,7 +161,7 @@
     const list = rows.value.list
     if (list.length === 0) return
     if (ev.key === 'Enter') {
-      if (cursor.value >= 0) { ev.preventDefault(); openRow(list[cursor.value]) }
+      if (cursor.value >= 0) { ev.preventDefault(); onTileOpen(list[cursor.value]) }
       return
     }
     // 图标流式布局：←→ 在整列表上 ±1，↑↓ 跨一整行（cols 列）。

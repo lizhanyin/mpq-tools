@@ -272,9 +272,13 @@ export async function handleDrop(paths) {
 // ---------------------------------------------------------------------------
 // 预览 / 提取
 
+let previewSeq = 0 // 并发预览时只认最后一次，防止慢的旧响应覆盖新预览
+
 export async function previewFile(name) {
+  const seq = ++previewSeq
   try {
     const p = await ipc.invoke('preview_file', { name })
+    if (seq !== previewSeq) return // 期间又预览了其它条目，丢弃过期响应
     S.preview = {
       name,                         // 归档内条目名（编辑保存时也用它）
       text: p.text,
@@ -291,6 +295,7 @@ export async function previewFile(name) {
       armed: false,                 // 有未保存修改时关闭需二次确认
     }
   } catch (e) {
+    if (seq !== previewSeq) return
     log(`预览失败 ${name}: ${e}`)
     toast.error(`预览失败 ${name}: ${e}`)
   }
