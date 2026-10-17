@@ -6,7 +6,8 @@
     </div>
     <div class="tree-splitter" :class="{ dragging }" @pointerdown="startSplit"></div>
 
-    <div class="files-panel">
+    <!-- 按下列表区任意位置 = 键盘焦点归列表（方向键导航网格，预览跟随选择） -->
+    <div class="files-panel" @pointerdown.capture="S.focusZone = 'list'">
       <div class="toolbar">
         <n-button size="small"
                   title="选择文件加入「修改归档」的待导入列表（导入到当前文件夹）"

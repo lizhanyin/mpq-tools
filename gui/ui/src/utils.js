@@ -4,6 +4,17 @@ export function fmtBytes(n) {
   return (n).toLocaleString('en-US')
 }
 
+/** 字节数带单位：33 KB / 1.5 MB；信息浮条等展示用。 */
+export function fmtSize(n) {
+  if (n < 1024) return `${n} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let v = n
+  for (const u of units) {
+    v /= 1024
+    if (v < 1024 || u === 'TB') return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${u}`
+  }
+}
+
 /** 路径（`\`/`/` 分隔）的最后一段。 */
 export function baseName(name) {
   const parts = String(name).split(/[\\/]/)

@@ -1,6 +1,6 @@
 /* 全局状态与动作：从原 app.js 迁移，界面组件只读状态并调用这里的动作。 */
 
-import { reactive, computed } from 'vue'
+import { reactive, computed, watch } from 'vue'
 import * as ipc from './ipc'
 import * as U from './utils'
 import { toast } from './toast'
@@ -39,6 +39,12 @@ export const S = reactive({
   fontSize: FONT_DEFAULT,
   gridThumbs: false,   // 网格视图显示图片缩略图（localStorage 持久化，默认关闭）
   dropping: null,      // 拖拽悬停时的 { count }
+  /** 键盘焦点区：'list' 文件列表（表格/网格）| 'preview' 预览浮窗。
+   *  方向键归谁：列表有焦点 → 网格导航、预览跟随选择；
+   *  预览有焦点 → 预览切图、选择反向跟随预览。 */
+  focusZone: 'list',
+  /** 预览窗请求网格把光标/滚动定位到的行索引（-1 = 无请求）。 */
+  gridCursor: -1,
 })
 
 // ---------------------------------------------------------------------------
@@ -304,6 +310,17 @@ export async function previewFile(name) {
 export function closePreview() {
   S.preview = null
 }
+
+/** 预览窗开着时，列表里单选了图片条目 → 预览跟随切换（列表→预览方向；
+ *  预览→列表方向见 PreviewWindow 的 syncSelection，名字相同即停，不成环）。 */
+const selectedImage = computed(() => {
+  if (S.selected.size !== 1) return null
+  const e = entryByKey.value.get(S.selected.values().next().value)
+  return e?.name && U.isImageName(e.name) ? e : null
+})
+watch(selectedImage, (e) => {
+  if (e && S.preview && S.preview.name !== e.name) previewFile(e.name)
+})
 
 /** 预览窗「保存」：按原编码写临时文件（后端），再把该文件排队到
  * 「修改归档 → 待导入」，由用户在弹窗中确认应用/写盘。 */

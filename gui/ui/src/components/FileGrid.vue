@@ -30,7 +30,7 @@
 <script setup>
   import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
   import { NVirtualList, NDropdown } from 'naive-ui'
-  import { rows, selectNone, anyModalOpen, MAX_ROWS } from '../store'
+  import { rows, selectNone, anyModalOpen, MAX_ROWS, S } from '../store'
   import { fmtBytes, baseName, isImageName } from '../utils'
   import { thumbFor } from '../thumbs'
   import {
@@ -137,6 +137,13 @@
     dirEnter = false
   })
 
+  // 预览窗切图时（预览有焦点的方向键 / 连翻）把光标与滚动定位到该行。
+  watch(() => S.gridCursor, (idx) => {
+    if (idx < 0 || idx >= rows.value.list.length) return
+    cursor.value = idx
+    vlRef.value?.scrollTo({ index: Math.floor(idx / Math.max(1, cols.value)) })
+  })
+
   /** 双击 / 回车打开：进入文件夹时光标落到第一项。 */
   function onTileOpen(r) {
     dirEnter = r.type === 'dir'
@@ -155,7 +162,10 @@
   }
 
   function onKey(ev) {
-    if (anyModalOpen.value || ctx.show) return
+    if (ctx.show) return
+    // 预览窗开着不算「有弹窗」：焦点区在列表时方向键归网格，
+    // 预览通过选择联动跟随；焦点区在预览时仍让位给预览切图。
+    if (anyModalOpen.value && !(S.preview && S.focusZone === 'list')) return
     const t = ev.target
     if (t?.closest?.('input, textarea, [contenteditable="true"]')) return
     const list = rows.value.list

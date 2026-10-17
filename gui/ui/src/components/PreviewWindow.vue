@@ -1,15 +1,18 @@
 <template>
   <div class="fwindow fwindow-editor" :class="{ maximized }"
-       :style="{ left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' }">
+       :style="{ left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' }"
+       @pointerdown.capture="S.focusZone = 'preview'">
     <div ref="titleEl" class="fwin-title" @pointerdown="startDrag">
-      <!-- 图片预览：文件名与大小等信息直接放标题栏，不再占内部一行 -->
+      <!-- 图片预览：标题栏只留文件名；详细信息在窗口下方的悬浮条（👁 开关） -->
       <template v-if="p?.image">
         <strong class="mono title-name" :title="p?.name">{{ p?.name }}</strong>
-        <span class="weak title-note" :title="headerNote">{{ headerNote }}</span>
       </template>
       <span v-else>预览</span>
       <span v-if="p?.dirty" class="dirty-dot" title="有未保存的修改">●</span>
       <span class="spacer"></span>
+      <n-button v-if="p?.image" size="tiny" quaternary :class="{ off: !infoBar }"
+                :title="infoBar ? '隐藏图片信息浮条' : '显示图片信息浮条'"
+                @click="toggleInfoBar">👁</n-button>
       <n-button v-if="p?.image" size="tiny" quaternary title="逆时针旋转 90°" @click="rotate(-1)">↺</n-button>
       <n-button v-if="p?.image" size="tiny" quaternary title="顺时针旋转 90°" @click="rotate(1)">↻</n-button>
       <n-button v-if="!p?.image" size="tiny" type="primary" :disabled="!p?.editable"
@@ -18,6 +21,8 @@
                 @click="save">保存</n-button>
       <n-button size="tiny" quaternary :title="maximized ? '还原' : '最大化'"
                 @click="toggleMaximize">⛶</n-button>
+      <n-button size="tiny" quaternary title="缩为最小尺寸并贴到右下角（再点还原）"
+                @click="toggleMiniCorner">◲</n-button>
       <n-button size="tiny" quaternary title="关闭" @click="tryClose">✕</n-button>
     </div>
     <div v-if="!p?.image" class="fwin-head">
@@ -51,6 +56,18 @@
                 @pointerup="stopFlip" @pointercancel="stopFlip" @lostpointercapture="stopFlip"
                 @click="ev => ev.detail === 0 && switchImage(1)">›</button>
       </template>
+      <!-- 图片信息浮条：悬浮在编辑区底部内侧，不挡图片交互（仅缩放锁可点） -->
+      <div v-if="p?.image && infoBar" class="fwin-info">
+        <span v-if="imgCount > 1 && imgIndex >= 0">第 {{ imgIndex + 1 }}/{{ imgCount }} 张</span>
+        <span v-if="dims">{{ dims }} px</span>
+        <span>{{ fmtSize(p.size) }}</span>
+        <span>{{ Math.round(zoom * 100) }}%</span>
+        <button class="lock-btn" :class="{ on: zoomLocked }"
+                :title="zoomLocked ? '缩放已锁定，点击解锁（切换图片回到完整显示）'
+                                   : '锁定缩放：切换图片时保持当前比例'"
+                @click="toggleZoomLock">{{ zoomLocked ? '🔒' : '🔓' }}</button>
+        <span v-if="p.image.converted">已转换为 PNG</span>
+      </div>
     </div>
     <div v-if="!maximized" class="fwin-resize" @pointerdown="startResize"></div>
   </div>
@@ -59,9 +76,9 @@
 <script setup>
   import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
   import { NButton } from 'naive-ui'
-  import { S, rows, previewFile, closePreview, savePreviewEdit } from '../store'
+  import { S, rows, previewFile, closePreview, savePreviewEdit, setSelectedKeys } from '../store'
   import { loadMonaco, languageFor } from '../monaco'
-  import { fmtBytes, isImageName } from '../utils'
+  import { fmtBytes, fmtSize, isImageName } from '../utils'
   import { toast } from '../toast'
 
   // 非模态浮动窗口；标题栏拖动、右下角调整大小。Monaco 编辑器填充窗体。
@@ -91,19 +108,23 @@
   const panning = ref(false)
   let suppressClick = false  // 拖动平移后不再当作点击缩放
 
+  // 图片信息浮条（窗口下方）：👁 开关；缩放锁：切换图片时保持比例。
+  // 都随 localStorage 持久化，默认浮条开、锁关。
+  const infoBar = ref(localStorage.getItem('img_info_bar') !== '0')
+  const zoomLocked = ref(localStorage.getItem('img_zoom_lock') === '1')
+  function toggleInfoBar() {
+    infoBar.value = !infoBar.value
+    localStorage.setItem('img_info_bar', infoBar.value ? '1' : '0')
+  }
+  function toggleZoomLock() {
+    zoomLocked.value = !zoomLocked.value
+    localStorage.setItem('img_zoom_lock', zoomLocked.value ? '1' : '0')
+  }
+
+  /** 文本预览的头部注释（图片信息在编辑区底部内侧的悬浮条）。 */
   const headerNote = computed(() => {
     const bits = []
-    if (!p.value) return ''
-    if (p.value.image) {
-      if (imgCount.value > 1 && imgIndex.value >= 0) {
-        bits.push(`第 ${imgIndex.value + 1}/${imgCount.value} 张`)
-      }
-      if (dims.value) bits.push(dims.value)
-      bits.push(fmtBytes(p.value.size))
-      bits.push(`${Math.round(zoom.value * 100)}%`)
-      if (p.value.image.converted) bits.push('已转换为 PNG')
-      return bits.join('，')
-    }
+    if (!p.value || p.value.image) return ''
     if (p.value.encoding !== 'UTF-8') bits.push(`按 ${p.value.encoding} 解码`)
     if (p.value.truncated) bits.push(`仅加载前 256 KiB / 共 ${fmtBytes(p.value.size)} 字节，只读`)
     else if (p.value.binary) bits.push('二进制内容，只读')
@@ -206,6 +227,7 @@
    *  在预览打开时永远短路。 */
   function onKey(ev) {
     if (!S.preview?.image) return
+    if (S.focusZone === 'list') return // 焦点在列表：方向键归网格，预览经选择联动跟随
     if (S.modify || S.create || S.convert || S.pw || S.repair || S.newFolder || S.settingsOpen) return
     const t = ev.target
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
@@ -247,7 +269,17 @@
     dims.value = `${natW.value}×${natH.value}`
     rot.value = 0
     imgFailed.value = false
-    zoom.value = fitZoom()
+    if (zoomLocked.value) {
+      // 缩放锁定：保持比例，切换后把滚动居中到新图
+      nextTick(() => {
+        const el = imgBox.value
+        if (!el) return
+        el.scrollLeft = (el.scrollWidth - el.clientWidth) / 2
+        el.scrollTop = (el.scrollHeight - el.clientHeight) / 2
+      })
+    } else {
+      zoom.value = fitZoom()
+    }
     shownUrl.value = url // 位图已解码，与上面的状态同帧上屏
     imgReady = true
   }
@@ -257,7 +289,19 @@
     natW.value = ev.target.naturalWidth
     natH.value = ev.target.naturalHeight
     dims.value = `${natW.value}×${natH.value}`
-    zoom.value = fitZoom() // 打开 / 切换图片时先完整显示（contain）
+    if (!zoomLocked.value) zoom.value = fitZoom() // 打开 / 切换图片时先完整显示（contain）
+  }
+
+  /** 预览→列表透传：预览切图后，把列表选择与网格光标/滚动定位到该行。
+   *  与 store 的「选中→预览」联动名字相同即停，不会成环。 */
+  function syncSelection() {
+    const name = S.preview?.name
+    if (!S.preview?.image || !name) return
+    const idx = rows.value.list.findIndex((r) => r.type === 'file' && r.entry.name === name)
+    if (idx < 0) return
+    const key = rows.value.list[idx].entry.key
+    if (S.selected.size !== 1 || !S.selected.has(key)) setSelectedKeys([key])
+    S.gridCursor = idx
   }
 
   // -- 缩放 / 旋转 / 平移 ---------------------------------------------------------
@@ -308,11 +352,11 @@
     zoomBy(target / zoom.value, ev.clientX, ev.clientY)
   }
 
-  /** 旋转 ±90°，保持缩放；原本是完整显示则按新方向重新 contain。 */
+  /** 旋转 ±90°，保持缩放；原本是完整显示则按新方向重新 contain（锁定缩放时不重排）。 */
   function rotate(dir) {
     const wasFit = Math.abs(zoom.value - fitZoom()) < 1e-3
     rot.value = (rot.value + dir * 90 + 360) % 360
-    if (wasFit) zoom.value = fitZoom()
+    if (!zoomLocked.value && wasFit) zoom.value = fitZoom()
     nextTick(() => {
       const el = imgBox.value
       if (!el) return
@@ -366,9 +410,46 @@
 
   /** 最大化期间浏览器窗口尺寸变化时保持铺满。 */
   function onViewportResize() {
-    if (!maximized.value) return
-    w.value = window.innerWidth
-    h.value = window.innerHeight
+    if (maximized.value) {
+      w.value = window.innerWidth
+      h.value = window.innerHeight
+    } else if (miniMode.value) {
+      // 迷你小窗贴住右下角
+      x.value = Math.max(0, window.innerWidth - w.value)
+      y.value = Math.max(0, window.innerHeight - h.value)
+    }
+  }
+
+  /** 缩为最小高宽并贴到视口右下角；再点一次还原到进入前的位置尺寸。 */
+  const miniMode = ref(false)
+  let preMiniRect = null
+  function toggleMiniCorner() {
+    if (miniMode.value) {
+      if (preMiniRect) {
+        x.value = preMiniRect.x
+        y.value = preMiniRect.y
+        w.value = preMiniRect.w
+        h.value = preMiniRect.h
+      }
+      miniMode.value = false
+      return
+    }
+    // 从最大化进入时先回到最大化前的位置尺寸
+    if (maximized.value) {
+      if (savedRect) {
+        x.value = savedRect.x
+        y.value = savedRect.y
+        w.value = savedRect.w
+        h.value = savedRect.h
+      }
+      maximized.value = false
+    }
+    preMiniRect = { x: x.value, y: y.value, w: w.value, h: h.value }
+    w.value = 320 // 与 startResize 下限、CSS min-width/min-height 一致
+    h.value = 200
+    x.value = Math.max(0, window.innerWidth - 320)
+    y.value = Math.max(0, window.innerHeight - 200)
+    miniMode.value = true
   }
 
   function startDrag(ev) {
@@ -495,7 +576,11 @@
   })
   // 打开 / 切换图片：先屏外解码，再一次性上屏。也盯住 name——两张
   // 内容相同的图片 data URL 相同，只看 url 不会触发重置。
-  watch(() => [S.preview?.name, S.preview?.image?.url], ([, url]) => showImage(url), { immediate: true })
+  // 同时把列表选择/网格光标同步到该行（预览有焦点时的「事件透传」）。
+  watch(() => [S.preview?.name, S.preview?.image?.url], ([, url]) => {
+    showImage(url)
+    syncSelection()
+  }, { immediate: true })
   // 界面字号变化时同步编辑器。
   watch(() => S.fontSize, (v) => { editor?.updateOptions({ fontSize: v }) })
   onUnmounted(() => {
