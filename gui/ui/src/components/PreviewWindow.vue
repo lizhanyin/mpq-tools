@@ -446,9 +446,9 @@
     }
     preMiniRect = { x: x.value, y: y.value, w: w.value, h: h.value }
     w.value = 320 // 与 startResize 下限、CSS min-width/min-height 一致
-    h.value = 200
+    h.value = 250
     x.value = Math.max(0, window.innerWidth - 320)
-    y.value = Math.max(0, window.innerHeight - 200)
+    y.value = Math.max(0, window.innerHeight - 250)
     miniMode.value = true
   }
 
