@@ -10,6 +10,32 @@ import type {
   PreviewDto, TreeNodeDto,
 } from '../types'
 
+// MDX 预览样例：mdx-m3-viewer 官方示例资源（模型 + 其引用的 BLP 贴图）。
+// 二进制资产用 new URL 引用（vite 对任意扩展都返回服务 URL；`?url` 导入
+// 会让 import-analysis 把 .mdx 当 JS 解析）。
+const mdxAssetUrl = new URL('./assets/SmileyGW_004.mdx.bin', import.meta.url).href
+const blpAssetUrl = new URL('./assets/SmileyGW.blp', import.meta.url).href
+
+async function fetchBase64(url: string): Promise<string> {
+  const buf = new Uint8Array(await (await fetch(url)).arrayBuffer())
+  let bin = ''
+  for (let i = 0; i < buf.length; i += 0x8000) {
+    bin += String.fromCharCode(...buf.subarray(i, i + 0x8000))
+  }
+  return btoa(bin)
+}
+
+const b64Cache = new Map<string, string>()
+async function cachedBase64(key: string, url: string): Promise<string> {
+  const hit = b64Cache.get(key)
+  if (hit) return hit
+  const b64 = await fetchBase64(url)
+  b64Cache.set(key, b64)
+  return b64
+}
+const mdxBase64 = () => cachedBase64('mdx', mdxAssetUrl)
+const blpBase64 = () => cachedBase64('blp', blpAssetUrl)
+
 function entry(
   name: string | null, key: string, size: number, csize: number,
   flags: string, locale: number, source: string, mtime: string | null,
@@ -59,6 +85,12 @@ const MOCK_TREE: TreeNodeDto = dir('', [
     entry('war3mapImported\\readme.txt', 'classic:6', 800, 400, 'E', 0, 'classic', '2024-06-15 12:31'),
     entry('war3mapImported\\logo.png', 'classic:11', 40960, 39800, 'EK', 0, 'classic', '2024-06-15 12:32'),
     entry('war3mapImported\\floor.tga', 'classic:12', 69904, 21000, 'EKC', 0, 'classic', '2024-06-15 12:33'),
+    // MDX 预览样例（mdx-m3-viewer 官方示例资源），贴图在 Textures\ 下。
+    entry('war3mapImported\\SmileyGW_004.mdx', 'classic:14', 3964, 3500, 'EKC', 0, 'classic', '2024-06-15 12:34'),
+    entry('war3mapImported\SmileyGW_005.mdx', 'classic:16', 3964, 3500, 'EKC', 0, 'classic', '2024-06-15 12:35'),
+  ]),
+  dir('Textures', [
+    entry('Textures\\SmileyGW.blp', 'classic:15', 73014, 71000, 'EKC', 0, 'classic', '2024-06-15 12:34'),
   ]),
 ])
 
@@ -67,14 +99,14 @@ const MOCK_INFO: ArchiveInfoDto = {
   version: 1,
   sector_size: 4096,
   hash_table_size: 1024,
-  block_table_size: 14,
+  block_table_size: 17,
   het_bet: false,
-  listfile_count: 11,
+  listfile_count: 14,
   warnings: ['archive_size 0x2200 与实际 0x22ac 不符，已按实际值处理'],
   tree: MOCK_TREE,
-  entry_count: 14,
-  protected: false,
-  locked: false,
+  entry_count: 17,
+  protected: true,
+  locked: true,
 }
 
 const MOCK_TEXT = `function config takes nothing returns nothing\n    call SetMapName("TRIGSTR_1")\nendfunction\n\n// 中文内容预览测试\n// war3map.j`
@@ -179,7 +211,23 @@ const MOCKS: Record<string, (args: any) => unknown> = {
       ? '已启用密码保护（11 个文件已按扇区密封，容器转为 v4）。'
       : op === 'change' ? '已更换密码。' : '已解除密码保护（11 个文件已解密）。',
   }),
-  preview_file: ({ name }: any) => mockPreview(name),
+  preview_file: async ({ name }: any) => {
+    // MDX：真实样本字节（assets 经 ?url 由 vite 提供），验证 3D 预览。
+    if (String(name).toLowerCase().endsWith('.mdx')) {
+      return {
+        text: '', size: 3964, truncated: false,
+        encoding: 'UTF-8', binary: false,
+        model: { data: await mdxBase64() },
+      } satisfies PreviewDto
+    }
+    return mockPreview(name)
+  },
+  // MDX 贴图按名取字节：Smiley 模型的贴图返回真实 BLP，其余 null（回退无贴图）。
+  read_file_bytes: async ({ name }: any) => {
+    const n = String(name).toLowerCase().replace(/\//g, '\\')
+    if (n === 'textures\\smileygw.blp') return await blpBase64()
+    return null
+  },
   // 缩略图 mock：图片扩展名返回 canvas 生成的 data URL，其余 null。
   thumbnail: ({ name }: any) => {
     const ext = (String(name).toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || ''

@@ -13,6 +13,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
     "@tauri-apps/plugin-dialog": "^2.8.3",
+    "events": "^3.3.0",
     "mdx-m3-viewer": "^5.12.0",
     "monaco-editor": "^0.57.0",
     "naive-ui": "^2.43.0",

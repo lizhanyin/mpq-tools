@@ -4,7 +4,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
-use base64::Engine as _;
 use mpq::{Deletion, ModifyOptions};
 use mpqtool::tasks;
 use serde::{Deserialize, Serialize};

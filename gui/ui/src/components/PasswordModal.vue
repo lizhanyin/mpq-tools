@@ -24,6 +24,7 @@
             {{ mode === 'set' ? '密码' : mode === 'remove' ? '当前密码' : '密码' }}
           </div>
           <n-input
+            ref="pwInput"
             v-model:value="p.password"
             type="password"
             show-password-on="click"
@@ -48,6 +49,7 @@
         <template v-else>
           <div class="field-label">当前密码</div>
           <n-input
+            ref="pwInput"
             v-model:value="p.password"
             type="password"
             show-password-on="click"
@@ -109,7 +111,7 @@
 </style>
 
 <script setup lang="ts">
-  import { computed } from 'vue'
+  import { computed, ref, watch } from 'vue'
   import { NModal, NButton, NInput, NTag } from 'naive-ui'
   import {
     S, submitUnlock, confirmPwOp, closePw,
@@ -125,6 +127,17 @@
 
   const p = computed(() => S.pw)
   const mode = computed((): PwMode => S.pw?.mode || 'unlock')
+  const pwInput = ref<InstanceType<typeof NInput> | null>(null)
+
+  // 验证失败（密码错误等）后重新聚焦密码框并全选，方便直接重输。
+  // flush:'post'——失败时 busy 恰被置回 false，须等 DOM 移除 disabled
+  // 后再 focus，否则对禁用输入框的聚焦会静默失效。
+  watch(() => S.pw?.errTick, (tick, prev) => {
+    if (tick && tick !== prev) {
+      pwInput.value?.focus()
+      pwInput.value?.select()
+    }
+  }, { flush: 'post' })
 
   /** 各模式的操作说明 / 警示。 */
   const hints = computed((): string[] => {

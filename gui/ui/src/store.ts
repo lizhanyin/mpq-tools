@@ -102,6 +102,7 @@ export interface PwState {
   newPassword: string   // 用于 change
   confirm: string       // set / change 的确认输入
   busy: boolean
+  errTick: number       // 验证失败计数递增，弹窗据此重新聚焦密码输入框
 }
 
 /** 表格 / 网格的行：目录行或文件行（判别联合，见 rows）。 */
@@ -960,6 +961,7 @@ function startPwModal(mode: PwMode) {
     newPassword: '',      // 用于 change
     confirm: '',          // set / change 的确认输入
     busy: false,
+    errTick: 0,
   }
   if (mode === 'unlock') {
     toast.info('文件名无需密码即可浏览；读取、提取和修改文件内容需要密码。')
@@ -999,6 +1001,7 @@ export async function submitUnlock() {
   } catch (e) {
     toast.error(String(e))
     p.busy = false
+    p.errTick++
   }
 }
 
@@ -1063,6 +1066,7 @@ export async function confirmPwOp() {
   } catch (e) {
     toast.error(String(e))
     p.busy = false
+    p.errTick++
   }
 }
 

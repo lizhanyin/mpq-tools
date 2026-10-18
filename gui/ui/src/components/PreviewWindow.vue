@@ -3,8 +3,8 @@
        :style="{ left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' }"
        @pointerdown.capture="S.focusZone = 'preview'">
     <div ref="titleEl" class="fwin-title" @pointerdown="startDrag">
-      <!-- 图片预览：标题栏只留文件名；详细信息在窗口下方的悬浮条（👁 开关） -->
-      <template v-if="p?.image">
+      <!-- 图片 / 模型预览：标题栏只留文件名；详细信息在窗口下方的悬浮条（👁 开关，仅图片） -->
+      <template v-if="p?.image || p?.model">
         <strong class="mono title-name" :title="p?.name">{{ p?.name }}</strong>
       </template>
       <span v-else>预览</span>
@@ -15,7 +15,7 @@
                 @click="toggleInfoBar">👁</n-button>
       <n-button v-if="p?.image" size="tiny" quaternary title="逆时针旋转 90°" @click="rotate(-1)">↺</n-button>
       <n-button v-if="p?.image" size="tiny" quaternary title="顺时针旋转 90°" @click="rotate(1)">↻</n-button>
-      <n-button v-if="!p?.image" size="tiny" type="primary" :disabled="!p?.editable"
+      <n-button v-if="!p?.image && !p?.model" size="tiny" type="primary" :disabled="!p?.editable"
                 :loading="p?.saving"
                 title="把编辑内容排队到「修改归档」，随后在弹窗中确认写入（Ctrl+S）"
                 @click="save">保存</n-button>
@@ -25,13 +25,15 @@
                 @click="toggleMiniCorner">◲</n-button>
       <n-button size="tiny" quaternary title="关闭" @click="tryClose">✕</n-button>
     </div>
-    <div v-if="!p?.image" class="fwin-head">
+    <div v-if="!p?.image && !p?.model" class="fwin-head">
       <strong class="mono">{{ p?.name }}</strong>
       <span class="weak">{{ headerNote }}</span>
     </div>
     <div class="fwin-editor">
-      <div v-if="loading && !p?.image" class="editor-loading">正在加载编辑器…</div>
-      <div v-show="!p?.image" ref="editorHost" class="editor-host"></div>
+      <div v-if="loading && !p?.image && !p?.model" class="editor-loading">正在加载编辑器…</div>
+      <div v-show="!p?.image && !p?.model" ref="editorHost" class="editor-host"></div>
+      <!-- MDX 模型：WebGL 渲染（左键旋转 / 滚轮缩放 / 右键平移） -->
+      <MdxPreview v-if="p?.model" :data="p.model.data" :name="p.name"></MdxPreview>
       <!-- 图片：滚轮缩放（跟随光标）、按住拖动平移、点击切换 100%/完整显示 -->
       <div v-if="p?.image" ref="imgBox" class="fwin-img" :class="{ panning }"
            title="滚轮缩放，拖动平移；点击在 100% 与完整显示间切换"
@@ -83,6 +85,7 @@
   import { loadMonaco, languageFor } from '../monaco'
   import { fmtBytes, fmtSize, isImageName } from '../utils'
   import { toast } from '../toast'
+  import MdxPreview from './MdxPreview.vue'
 
   type Monaco = typeof import('monaco-editor')
 
@@ -305,7 +308,7 @@
    *  与 store 的「选中→预览」联动名字相同即停，不会成环。 */
   function syncSelection() {
     const name = S.preview?.name
-    if (!S.preview?.image || !name) return
+    if ((!S.preview?.image && !S.preview?.model) || !name) return
     const idx = rows.value.list.findIndex((r) => r.type === 'file' && r.entry.name === name)
     if (idx < 0) return
     const row = rows.value.list[idx] as ImageRow
@@ -533,7 +536,7 @@
   async function syncModel() {
     const cur = S.preview
     if (!cur) return
-    if (cur.image) { loading.value = false; return } // 图片不加载 Monaco
+    if (cur.image || cur.model) { loading.value = false; return } // 图片/模型不加载 Monaco
     await ensureEditor()
     if (!editor || loadedName === cur.name) return
     loadedName = cur.name
