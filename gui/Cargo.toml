@@ -20,6 +20,9 @@ encoding_rs = "0.8"
 base64 = "0.22"
 # 缩略图需要解码 jpeg/gif/bmp/ico/webp；tga/blp 为手写解码，png 用于再编码。
 image = { version = "0.25", default-features = false, features = ["png", "tga", "jpeg", "gif", "bmp", "ico", "webp"] }
+# BLP1 的内嵌 JPEG 是 B,G,R,A 四平面直存的非标流，用 zune-jpeg（image
+# 已依赖的同版解码器）取原始 CMYK 样本后自行重排。
+zune-jpeg = "0.5"
 
 [[bin]]
 name = "mpqtool-gui"

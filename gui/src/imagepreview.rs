@@ -1,6 +1,6 @@
 //! 归档内图片条目的预览：浏览器 `<img>` 原生支持的格式以 base64
-//! data URL 原样传给前端；TGA 与 Warcraft III 的 BLP2 在此解码后
-//! 转成 PNG。图片不走 256 KiB 文本截断，也不可编辑。
+//! data URL 原样传给前端；TGA 与 Warcraft III 的 BLP（BLP1 / BLP2）
+//! 在此解码后转成 PNG。图片不走 256 KiB 文本截断，也不可编辑。
 
 use base64::Engine as _;
 use image::{DynamicImage, ImageFormat, RgbaImage};
@@ -182,92 +182,257 @@ fn decode_tga(data: &[u8]) -> Result<ImageDto, String> {
     tga_pixels(data).and_then(png_url)
 }
 
-/// 解析后的 BLP2 mip 0：头字段 + 载荷切片（预览与缩略图共用）。
-struct BlpMip<'a> {
-    blp_type: u32,
-    compression: u8,
-    alpha_depth: u8,
-    width: u32,
-    height: u32,
-    mip: &'a [u8],
+/// 解析后的 BLP 内容（BLP1 / BLP2 共用；预览与缩略图共用）。
+enum BlpImage<'a> {
+    /// BLP2 type 0：mip 0 是标准 JPEG，直接透传给浏览器。
+    Jpeg(&'a [u8]),
+    /// BLP1 JPEG：共享头 ++ mip 0 拼成的完整 JPEG 流（4 分量 B,G,R,A）；
+    /// alpha8 = 头部 alphaBits 是否为 8（决定第 4 平面是否按 alpha 采用）。
+    Blp1Jpeg {
+        jpeg: Vec<u8>,
+        alpha8: bool,
+    },
+    /// 调色板（BLP2 压缩 1 / BLP1 content 1）：palette 为 256×BGRA，
+    /// mip 为每像素索引 + 可选附加 alpha 平面。
+    Palette {
+        palette: &'a [u8],
+        mip: &'a [u8],
+        width: u32,
+        height: u32,
+        alpha_depth: u8,
+    },
+    /// DXT（BLP2 压缩 2）。
+    Dxt {
+        mip: &'a [u8],
+        width: u32,
+        height: u32,
+        alpha_depth: u8,
+    },
 }
 
-/// 校验 BLP2 头并取出 mip 0 载荷。
-fn blp_mip0(data: &[u8]) -> Result<BlpMip<'_>, String> {
-    // 头 0x14 字节 + 两张 mip 表各 0x40 = 0x94；调色板变体在 0x94 处
-    // 还有 1024 字节调色板（mip 数据因此从 0x494 起）。
+fn u32at(data: &[u8], o: usize) -> u32 {
+    u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]])
+}
+
+/// 按头里的 mip 偏移/长度切出 mip 0 载荷（防越界）。
+fn mip_slice(data: &[u8], off: usize, len: usize) -> Result<&[u8], String> {
+    off.checked_add(len)
+        .filter(|&end| end <= data.len())
+        .map(|end| &data[off..end])
+        .ok_or_else(|| "BLP mipmap 数据越界".to_string())
+}
+
+/// 识别 BLP 版本并解析（预览与缩略图的共用入口）。
+fn blp_analyze(data: &[u8]) -> Result<BlpImage<'_>, String> {
     if data.len() < 0x94 {
         return Err("BLP 头不完整".to_string());
     }
-    let u32at = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
-    match u32at(0) {
-        0x3250_4C42 => {} // "BLP2"
-        0x3150_4C42 => return Err("BLP1（旧格式）暂不支持预览".to_string()),
-        _ => return Err("不是有效的 BLP 文件".to_string()),
+    match u32at(data, 0) {
+        0x3250_4C42 => blp2_analyze(data), // "BLP2"
+        0x3150_4C42 => blp1_analyze(data), // "BLP1"
+        _ => Err("不是有效的 BLP 文件".to_string()),
     }
-    let blp_type = u32at(4);
+}
+
+/// 校验 BLP2 头并取出 mip 0 载荷。
+/// 头 0x14 字节 + 两张 mip 表各 0x40 = 0x94；调色板变体在 0x94 处
+/// 还有 1024 字节调色板（mip 数据因此从 0x494 起）。
+fn blp2_analyze(data: &[u8]) -> Result<BlpImage<'_>, String> {
+    let blp_type = u32at(data, 4);
     let compression = data[8];
     let alpha_depth = data[9];
-    let width = u32at(12);
-    let height = u32at(16);
+    let width = u32at(data, 12);
+    let height = u32at(data, 16);
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
         return Err(format!("BLP 尺寸异常（{width}×{height}）"));
     }
-    let mip_off = u32at(0x14) as usize;
-    let mip_len = u32at(0x54) as usize;
-    let mip_end = mip_off
-        .checked_add(mip_len)
-        .filter(|&end| end <= data.len())
-        .ok_or_else(|| "BLP mipmap 数据越界".to_string())?;
-    Ok(BlpMip {
-        blp_type,
-        compression,
-        alpha_depth,
-        width,
-        height,
-        mip: &data[mip_off..mip_end],
-    })
+    let mip = mip_slice(data, u32at(data, 0x14) as usize, u32at(data, 0x54) as usize)?;
+    match (blp_type, compression) {
+        (0, _) => Ok(BlpImage::Jpeg(mip)),
+        (1, 1) => {
+            if data.len() < 0x94 + 1024 {
+                return Err("BLP 头不完整（缺调色板）".to_string());
+            }
+            Ok(BlpImage::Palette {
+                palette: &data[0x94..0x94 + 1024],
+                mip,
+                width,
+                height,
+                alpha_depth,
+            })
+        }
+        (1, 2) => Ok(BlpImage::Dxt {
+            mip,
+            width,
+            height,
+            alpha_depth,
+        }),
+        _ => Err(format!("未知 BLP 类型 {}（压缩 {}）", blp_type, compression)),
+    }
 }
 
-/// 解码 BLP2（Warcraft III 的贴图格式）。只取 mip 0（最高清一级）：
-/// - type 0：mip 数据是标准 JPEG，直接透传给浏览器；
-/// - type 1 + 压缩 1：调色板索引 → RGBA；
-/// - type 1 + 压缩 2：DXT1 / DXT3 / DXT5 块解码 → RGBA。
+/// 校验 BLP1 头（Warcraft III 早期 / WoW alpha 时代的旧格式）并解析内容。
+/// 头 0x9C 字节：content（0=JPEG、1=调色板）、alphaBits、宽、高、extra、
+/// hasMipmaps 各 u32，随后 16 个 mip 偏移 + 16 个 mip 大小（mip 0 即全图）。
+fn blp1_analyze(data: &[u8]) -> Result<BlpImage<'_>, String> {
+    if data.len() < 0x9C {
+        return Err("BLP 头不完整".to_string());
+    }
+    let content = u32at(data, 4);
+    let alpha_bits = u32at(data, 8);
+    let width = u32at(data, 0x0C);
+    let height = u32at(data, 0x10);
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_PIXELS {
+        return Err(format!("BLP 尺寸异常（{width}×{height}）"));
+    }
+    let mip_off = u32at(data, 0x1C) as usize;
+    let mip = mip_slice(data, mip_off, u32at(data, 0x5C) as usize)?;
+    match content {
+        0 => {
+            // 0x9C 处是 u32 共享 JPEG 头长度；完整 JPEG = 共享头 ++ mip 0。
+            let hdr_len = u32at(data, 0x9C) as usize;
+            let hdr = 0xA0usize
+                .checked_add(hdr_len)
+                .filter(|&end| end <= data.len())
+                .map(|end| &data[0xA0..end])
+                .ok_or_else(|| "BLP1 JPEG 共享头越界".to_string())?;
+            let mut jpeg = Vec::with_capacity(hdr.len() + mip.len());
+            jpeg.extend_from_slice(hdr);
+            jpeg.extend_from_slice(mip);
+            Ok(BlpImage::Blp1Jpeg {
+                jpeg,
+                alpha8: alpha_bits == 8,
+            })
+        }
+        1 => {
+            // 0x9C 起 1024 字节调色板。损坏文件可能把 mip 数据压进调色板
+            // 区（短调色板），越界索引按黑色处理；alphaBits 非法值按引擎
+            // 行为视作 0。
+            let palette = &data[0x9C..(0x9C + 1024).min(mip_off.max(0x9C))];
+            Ok(BlpImage::Palette {
+                palette,
+                mip,
+                width,
+                height,
+                alpha_depth: match alpha_bits {
+                    1 | 4 | 8 => alpha_bits as u8,
+                    _ => 0,
+                },
+            })
+        }
+        c => Err(format!("未知 BLP1 内容类型 {c}")),
+    }
+}
+
+/// 解码 BLP（Warcraft III 的贴图格式）。只取 mip 0（最高清一级）：
+/// BLP1 的 JPEG / 调色板与 BLP2 的调色板 / DXT 在此解码转 PNG；
+/// BLP2 type 0 的标准 JPEG 直接透传给浏览器。
 fn decode_blp(data: &[u8]) -> Result<ImageDto, String> {
-    let m = blp_mip0(data)?;
-    match (m.blp_type, m.compression) {
-        (0, _) => Ok(data_url("image/jpeg", m.mip)),
-        (1, 1) => blp_palette(data, m.mip, m.width, m.height, m.alpha_depth).and_then(png_url),
-        (1, 2) => blp_dxt(m.mip, m.width, m.height, m.alpha_depth).and_then(png_url),
-        _ => Err(format!("未知 BLP 类型 {}（压缩 {}）", m.blp_type, m.compression)),
+    match blp_analyze(data)? {
+        BlpImage::Jpeg(mip) => Ok(data_url("image/jpeg", mip)),
+        BlpImage::Blp1Jpeg { jpeg, alpha8 } => blp1_jpeg_pixels(&jpeg, alpha8).and_then(png_url),
+        BlpImage::Palette {
+            palette,
+            mip,
+            width,
+            height,
+            alpha_depth,
+        } => blp_palette(palette, mip, width, height, alpha_depth).and_then(png_url),
+        BlpImage::Dxt {
+            mip,
+            width,
+            height,
+            alpha_depth,
+        } => blp_dxt(mip, width, height, alpha_depth).and_then(png_url),
     }
 }
 
-/// BLP 解码为 RGBA 像素（缩略图用）：type 0 的 JPEG 也在此解码以便缩放。
+/// BLP 解码为 RGBA 像素（缩略图用）：透传的 JPEG 也在此解码以便缩放。
 fn blp_pixels(data: &[u8]) -> Result<RgbaImage, String> {
-    let m = blp_mip0(data)?;
-    match (m.blp_type, m.compression) {
-        (0, _) => decode_with_limits(m.mip, ImageFormat::Jpeg),
-        (1, 1) => blp_palette(data, m.mip, m.width, m.height, m.alpha_depth),
-        (1, 2) => blp_dxt(m.mip, m.width, m.height, m.alpha_depth),
-        _ => Err(format!("未知 BLP 类型 {}（压缩 {}）", m.blp_type, m.compression)),
+    match blp_analyze(data)? {
+        BlpImage::Jpeg(mip) => decode_with_limits(mip, ImageFormat::Jpeg),
+        BlpImage::Blp1Jpeg { jpeg, alpha8 } => blp1_jpeg_pixels(&jpeg, alpha8),
+        BlpImage::Palette {
+            palette,
+            mip,
+            width,
+            height,
+            alpha_depth,
+        } => blp_palette(palette, mip, width, height, alpha_depth),
+        BlpImage::Dxt {
+            mip,
+            width,
+            height,
+            alpha_depth,
+        } => blp_dxt(mip, width, height, alpha_depth),
     }
 }
 
-/// 调色板 BLP：mip 0 是每像素 1 字节的调色板索引（无 alpha 且超过
-/// 65536 像素时为 2 字节、低字节有效——按数据量自校正识别）；
-/// alphaDepth > 0 时索引数据之后还有 1/4/8 位的附加 alpha。
+/// BLP1 内嵌 JPEG 是 4 分量（B、G、R、A 平面直存、无色彩变换）的非标
+/// 流（Intel Imaging Framework 产物）——常规解码器会按 Adobe 惯例误当
+/// CMYK 做墨色/反相处理而严重错色。这里把输出色彩空间钉在 CMYK（与
+/// 输入一致即不做任何转换），拿到交错的原始样本后重排成 RGBA；极少数
+/// 3 分量/灰度流按标准 JPEG 解码。
+fn blp1_jpeg_pixels(jpeg: &[u8], alpha8: bool) -> Result<RgbaImage, String> {
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+
+    let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::CMYK);
+    let mut dec = zune_jpeg::JpegDecoder::new_with_options(std::io::Cursor::new(jpeg), opts);
+    dec.decode_headers()
+        .map_err(|e| format!("BLP1 JPEG 解码失败：{e}"))?;
+    let info = dec.info().ok_or_else(|| "BLP1 JPEG 头缺失".to_string())?;
+    if u64::from(info.width) * u64::from(info.height) > MAX_PIXELS {
+        return Err(format!(
+            "BLP1 JPEG 尺寸异常（{}×{}）",
+            info.width, info.height
+        ));
+    }
+    if dec.input_colorspace() != Some(ColorSpace::CMYK) {
+        return decode_with_limits(jpeg, ImageFormat::Jpeg);
+    }
+    let raw = dec
+        .decode()
+        .map_err(|e| format!("BLP1 JPEG 解码失败：{e}"))?;
+    let (w, h) = (u32::from(info.width), u32::from(info.height));
+    let n = w as usize * h as usize;
+    if raw.len() < n * 4 {
+        return Err("BLP1 JPEG 像素数据不完整".to_string());
+    }
+    // 交错 4 字节/像素，存储顺序 B、G、R、A。
+    let px = |i: usize| [raw[i * 4 + 2], raw[i * 4 + 1], raw[i * 4], raw[i * 4 + 3]];
+    // 第 4 平面是否携带信息：全 0 或全 255 都视为不透明（作者工具两种
+    // 填法都出现过），且头部 alphaBits 为 8 时才采用。
+    let a0 = raw[3];
+    let use_alpha = alpha8
+        && (raw[3..n * 4]
+            .iter()
+            .skip(4)
+            .step_by(4)
+            .any(|&a| a != a0)
+            || a0 != 0 && a0 != 255);
+    let mut img = RgbaImage::new(w, h);
+    for i in 0..n {
+        let mut p = px(i);
+        if !use_alpha {
+            p[3] = 255;
+        }
+        img.put_pixel((i % w as usize) as u32, (i / w as usize) as u32, image::Rgba(p));
+    }
+    Ok(img)
+}
+
+/// 调色板 BLP（BLP2 压缩 1 / BLP1 content 1）：mip 0 是每像素 1 字节的
+/// 调色板索引（无 alpha 且数据量翻倍时为 2 字节、低字节有效——按数据量
+/// 自校正识别）；alphaDepth > 0 时索引数据之后还有 1/4/8 位的附加 alpha
+/// 平面。调色板条目为 B,G,R,pad（pad 非 alpha，两种版本一致）。
 fn blp_palette(
-    full: &[u8],
+    palette: &[u8],
     mip: &[u8],
     width: u32,
     height: u32,
     alpha_depth: u8,
 ) -> Result<RgbaImage, String> {
-    if full.len() < 0x94 + 1024 {
-        return Err("BLP 头不完整（缺调色板）".to_string());
-    }
-    let palette = &full[0x94..0x94 + 1024]; // 256 × BGRA
     let n = width as usize * height as usize;
     let idx2 = alpha_depth == 0 && mip.len() >= n * 2;
     let idx_len = if idx2 { n * 2 } else { n };
@@ -286,7 +451,11 @@ fn blp_palette(
     let mut img = RgbaImage::new(width, height);
     for i in 0..n {
         let idx = (if idx2 { mip[i * 2] } else { mip[i] }) as usize;
-        let [b, g, r, _] = palette[idx * 4..idx * 4 + 4].try_into().unwrap();
+        // 短调色板（BLP1 损坏文件）中越界索引按黑色不透明处理。
+        let [b, g, r] = palette
+            .get(idx * 4..idx * 4 + 4)
+            .map(|e| [e[0], e[1], e[2]])
+            .unwrap_or([0, 0, 0]);
         let a = if !has_alpha {
             255
         } else {
@@ -610,6 +779,158 @@ mod tests {
         let mut b = blp_file(1, 1, 0, 2, 1, 0x494, &[0, 1]);
         b[0x14..0x18].copy_from_slice(&0xFFFF_u32.to_le_bytes());
         assert!(decode_blp(&b).is_err());
+    }
+
+    // -- BLP1 -------------------------------------------------------------------
+
+    /// 生成一个 BLP1 文件：0x9C 处放 extra_header（调色板，或 JPEG
+    /// 共享头长度 + 共享头），mip_off 起放 mip 0 载荷。
+    fn blp1_file(
+        content: u32,
+        alpha_bits: u32,
+        w: u32,
+        h: u32,
+        mip_off: usize,
+        extra_header: &[u8],
+        mip: &[u8],
+    ) -> Vec<u8> {
+        let mut b = vec![0u8; mip_off];
+        b[0..4].copy_from_slice(&0x3150_4C42u32.to_le_bytes()); // "BLP1"
+        b[4..8].copy_from_slice(&content.to_le_bytes());
+        b[8..12].copy_from_slice(&alpha_bits.to_le_bytes());
+        b[12..16].copy_from_slice(&w.to_le_bytes());
+        b[16..20].copy_from_slice(&h.to_le_bytes());
+        b[0x14..0x18].copy_from_slice(&5u32.to_le_bytes()); // extra：WorldEdit 写 5
+        b[0x1C..0x20].copy_from_slice(&(mip_off as u32).to_le_bytes());
+        b[0x5C..0x60].copy_from_slice(&(mip.len() as u32).to_le_bytes());
+        b[0x9C..0x9C + extra_header.len()].copy_from_slice(extra_header);
+        b.extend_from_slice(mip);
+        b
+    }
+
+    /// 1024 字节调色板，0 号色红、1 号色蓝（B,G,R,pad 字节序）。
+    fn blp1_palette_header() -> Vec<u8> {
+        let mut p = vec![0u8; 1024];
+        p[0..4].copy_from_slice(&[0, 0, 255, 255]);
+        p[4..8].copy_from_slice(&[255, 0, 0, 255]);
+        p
+    }
+
+    #[test]
+    fn blp1_palette_decodes() {
+        let b = blp1_file(1, 0, 2, 1, 0x9C + 1024, &blp1_palette_header(), &[0, 1]);
+        let img = png_pixels(&decode_blp(&b).unwrap());
+        assert_eq!(img.dimensions(), (2, 1));
+        // alphaBits 0 → 不透明（调色板 pad 字节不生效）。
+        assert_eq!(*img.get_pixel(0, 0), image::Rgba([255, 0, 0, 255]));
+        assert_eq!(*img.get_pixel(1, 0), image::Rgba([0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn blp1_palette_8bit_alpha() {
+        // 索引 [0,0] + 附加 alpha 平面 [255, 64]。
+        let b = blp1_file(1, 8, 2, 1, 0x9C + 1024, &blp1_palette_header(), &[0, 0, 255, 64]);
+        let img = png_pixels(&decode_blp(&b).unwrap());
+        assert_eq!(*img.get_pixel(0, 0), image::Rgba([255, 0, 0, 255]));
+        assert_eq!(*img.get_pixel(1, 0), image::Rgba([255, 0, 0, 64]));
+    }
+
+    #[test]
+    fn blp1_palette_packed_alpha() {
+        // 4 位 alpha 低半字节在前：0x5A → 像素 0 = 10、像素 1 = 5（×17）。
+        let b = blp1_file(1, 4, 2, 1, 0x9C + 1024, &blp1_palette_header(), &[0, 0, 0x5A]);
+        let img = png_pixels(&decode_blp(&b).unwrap());
+        assert_eq!(*img.get_pixel(0, 0), image::Rgba([255, 0, 0, 170]));
+        assert_eq!(*img.get_pixel(1, 0), image::Rgba([255, 0, 0, 85]));
+        // 1 位 alpha 每字节 8 像素：0b10 → 像素 0 透明、像素 1 不透明。
+        let b = blp1_file(1, 1, 2, 1, 0x9C + 1024, &blp1_palette_header(), &[0, 0, 0b10]);
+        let img = png_pixels(&decode_blp(&b).unwrap());
+        assert_eq!(*img.get_pixel(0, 0), image::Rgba([255, 0, 0, 0]));
+        assert_eq!(*img.get_pixel(1, 0), image::Rgba([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn blp1_palette_short_palette_tolerated() {
+        // 损坏文件：调色板被 mip 数据截短只剩 1 个条目；越界索引按黑色不透明。
+        let b = blp1_file(1, 0, 2, 1, 0xA0, &blp1_palette_header()[..4], &[0, 1]);
+        let img = png_pixels(&decode_blp(&b).unwrap());
+        assert_eq!(*img.get_pixel(0, 0), image::Rgba([255, 0, 0, 255]));
+        assert_eq!(*img.get_pixel(1, 0), image::Rgba([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn blp1_jpeg_real_sample() {
+        // Pillow 测试套件里的真实 BLP1 JPEG 文件（WoW alpha 遗物）。
+        // 基准取自 Pillow 的参考渲染 blp1_jpeg.png：中心像素偏蓝
+        // (22,47,93)——通道顺序接反会变成 (93,47,22)，是强判别点。
+        let data = include_bytes!("../tests/fixtures/blp1_jpeg.blp");
+        let img = png_pixels(&decode_blp(data).unwrap());
+        assert_eq!(img.dimensions(), (256, 256));
+        let near = |got: image::Rgba<u8>, want: [u8; 3], tol: i16| {
+            for i in 0..3 {
+                assert!(
+                    (i16::from(got[i]) - i16::from(want[i])).abs() <= tol,
+                    "got {got:?} want {want:?}"
+                );
+            }
+        };
+        near(*img.get_pixel(128, 128), [22, 47, 93], 16);
+        near(*img.get_pixel(200, 50), [26, 53, 54], 16);
+        // 全图均值（参考 (22.3, 58.9, 23.5)）：接错成 CMYK 反相时严重偏离。
+        let (mut r, mut g, mut bl) = (0u64, 0u64, 0u64);
+        for p in img.pixels() {
+            r += u64::from(p[0]);
+            g += u64::from(p[1]);
+            bl += u64::from(p[2]);
+        }
+        let n = 256 * 256;
+        for (mean, want) in [(r / n, 22), (g / n, 59), (bl / n, 23)] {
+            assert!((mean as i64 - i64::from(want)).abs() <= 6, "mean {mean} want {want}");
+        }
+    }
+
+    #[test]
+    fn blp1_jpeg_standard_fallback() {
+        // 极少数工具写入的标准 3 分量 JPEG：按共享头 ++ mip 重组后常规解码。
+        let jpeg = encoded(8, 8, ImageFormat::Jpeg);
+        let (hdr, rest) = jpeg.split_at(jpeg.len() / 2);
+        let mut extra = (hdr.len() as u32).to_le_bytes().to_vec();
+        extra.extend_from_slice(hdr);
+        let b = blp1_file(0, 0, 8, 8, 0x9C + extra.len(), &extra, rest);
+        let img = png_pixels(&decode_blp(&b).unwrap());
+        assert_eq!(img.dimensions(), (8, 8));
+        // JPEG 有损，纯色块取中心像素放宽比较。
+        let got = img.get_pixel(4, 4);
+        for (g, w) in [(got[0], 200i16), (got[1], 60), (got[2], 60)] {
+            assert!((i16::from(g) - w).abs() <= 16, "got {got:?}");
+        }
+    }
+
+    #[test]
+    fn blp1_bad_rejected() {
+        // 头截断
+        let mut b = blp1_file(1, 0, 2, 1, 0x9C + 1024, &blp1_palette_header(), &[0, 1]);
+        b.truncate(0x50);
+        assert!(decode_blp(&b).is_err());
+        // 未知内容类型
+        let b = blp1_file(2, 0, 2, 1, 0x9C, &[], &[0, 1]);
+        assert!(decode_blp(&b).is_err());
+        // mip 越界
+        let mut b = blp1_file(1, 0, 2, 1, 0x9C + 1024, &blp1_palette_header(), &[0, 1]);
+        b[0x1C..0x20].copy_from_slice(&0xFFFF_u32.to_le_bytes());
+        assert!(decode_blp(&b).is_err());
+        // JPEG 共享头越界
+        let mut extra = 0x00FF_FFFFu32.to_le_bytes().to_vec();
+        extra.extend_from_slice(&[0xFF, 0xD8, 0xFF]);
+        let b = blp1_file(0, 0, 2, 1, 0x9C + extra.len(), &extra, &[0]);
+        assert!(decode_blp(&b).is_err());
+    }
+
+    #[test]
+    fn thumbnail_blp1_jpeg_is_resized() {
+        let data = include_bytes!("../tests/fixtures/blp1_jpeg.blp");
+        let url = thumbnail("old.blp", data).unwrap().unwrap();
+        assert_eq!(url_png_pixels(&url).dimensions(), (192, 192));
     }
 
     // -- 缩略图 -----------------------------------------------------------------
