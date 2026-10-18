@@ -56,7 +56,7 @@
   </n-modal>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { computed } from 'vue'
   import { NModal, NButton, NRadioGroup, NRadio, NTag } from 'naive-ui'
   import { S, runConvert, closeConvert } from '../store'
@@ -75,7 +75,7 @@
   /** 转换后果提示；无法转换的情况由后端在「应用转换」时给出理由。 */
   const hints = computed(() => {
     if (!S.convert) return []
-    const out = []
+    const out: string[] = []
     if (S.convert.target !== from.value && S.info?.het_bet) {
       out.push('HET/BET 表将改为经典表（文件内容不变，名字取自 (listfile)）')
     }

@@ -108,14 +108,15 @@
 }
 </style>
 
-<script setup>
+<script setup lang="ts">
   import { computed } from 'vue'
   import { NModal, NButton, NInput, NTag } from 'naive-ui'
   import {
     S, submitUnlock, confirmPwOp, closePw,
   } from '../store'
+  import type { PwMode } from '../store'
 
-  const TITLES = {
+  const TITLES: Record<PwMode, string> = {
     unlock: '输入密码',
     set: '设置密码保护',
     change: '修改密码',
@@ -123,10 +124,10 @@
   }
 
   const p = computed(() => S.pw)
-  const mode = computed(() => S.pw?.mode || 'unlock')
+  const mode = computed((): PwMode => S.pw?.mode || 'unlock')
 
   /** 各模式的操作说明 / 警示。 */
-  const hints = computed(() => {
+  const hints = computed((): string[] => {
     switch (mode.value) {
       case 'unlock':
         return []

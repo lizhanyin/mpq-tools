@@ -117,7 +117,7 @@
   </n-modal>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { computed, ref } from 'vue'
   import { NModal, NButton, NTag, NCheckbox, NTooltip } from 'naive-ui'
   import { S, confirmModify, closeModify, setImportChildrenOnly, importTargetDir } from '../store'
@@ -137,9 +137,9 @@
 
   // 弹窗过渡结束后聚焦「确认」，回车可直接应用修改。naive-ui 按钮
   // 实例没有 focus 方法，取底层 <button> 元素调用原生 focus。
-  const confirmBtn = ref(null)
+  const confirmBtn = ref<InstanceType<typeof NButton> | null>(null)
   function focusConfirm() {
-    const el = confirmBtn.value?.$el
+    const el = confirmBtn.value?.$el as HTMLButtonElement | undefined
     if (!el) return
     el.focus()
     // 前一个弹窗（如导入确认窗）关闭归还焦点可能发生在此之后，补一次。

@@ -10,7 +10,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { computed } from 'vue'
   import { S } from '../store'
   import { fmtBytes } from '../utils'
@@ -18,7 +18,7 @@
   const parts = computed(() => {
     if (!S.info) return null
     const i = S.info
-    const out = [
+    const out: { text: string; strong?: boolean }[] = [
       { text: `MPQ v${i.version}`, strong: true },
       { text: `扇区 ${fmtBytes(i.sector_size)} B` },
       { text: `hash ${fmtBytes(i.hash_table_size)} / block ${fmtBytes(i.block_table_size)}` },

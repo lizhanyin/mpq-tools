@@ -35,7 +35,7 @@
   </n-modal>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { NModal, NButton, NInput } from 'naive-ui'
   import { S, createFolder, closeNewFolder } from '../store'
 </script>

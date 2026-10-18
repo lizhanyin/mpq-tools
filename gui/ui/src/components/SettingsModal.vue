@@ -7,7 +7,7 @@
     :content-style="{ maxHeight: 'calc(90vh - 110px)', overflowY: 'auto' }"
     :mask-closable="false"
     :bordered="false"
-    @update:show="(v) => { S.settingsOpen = v }"
+    @update:show="onShowUpdate"
   >
     <div class="dialog-body settings-body">
       <div class="setting-card">
@@ -24,7 +24,7 @@
           <div class="slider-wrap">
             <n-slider :min="FONT_MIN" :max="FONT_MAX" :step="0.5"
                       :value="S.fontSize"
-                      :format-tooltip="(v) => v + 'px'"
+                      :format-tooltip="(v: number) => v + 'px'"
                       @update:value="setFontSize" />
             <div class="slider-marks">
               <button v-for="p in PRESETS" :key="p.size" type="button" class="slider-mark"
@@ -68,10 +68,14 @@
   </n-modal>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { computed } from 'vue'
   import { NModal, NButton, NSlider, NSwitch } from 'naive-ui'
   import { S, setFontSize, setGridThumbs, FONT_MIN, FONT_MAX, FONT_DEFAULT } from '../store'
+
+  function onShowUpdate(v: boolean) {
+    S.settingsOpen = v
+  }
 
   const PRESETS = [
     { text: '小', size: 11 },
@@ -86,7 +90,7 @@
 
   /** 刻度标签与把手对齐：naive-ui 把把手中心映射为 P×(轨宽−18px)+9px，而非简单百分比。 */
   const HANDLE_W = 18
-  const markStyle = (size) => ({
+  const markStyle = (size: number) => ({
     left: `calc((100% - ${HANDLE_W}px) * ${(size - FONT_MIN) / (FONT_MAX - FONT_MIN)} + ${HANDLE_W / 2}px)`,
   })
 </script>

@@ -20,9 +20,10 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { computed, ref } from 'vue'
   import { NDropdown, NButton } from 'naive-ui'
+  import type { DropdownOption } from 'naive-ui'
   import {
     S, openArchiveDialog, extractAll, importFilesDialog, importFolderDialog, startNewFolder, reloadArchive, closeArchive, startRepair, startCreate, startConvert, startUnlock, startPwOp, protectedArchive, lockedArchive,
   } from '../store'
@@ -37,7 +38,7 @@
   const toolsShow = ref(false)
   const settingsShow = ref(false)
 
-  const fileOptions = computed(() => [
+  const fileOptions = computed((): DropdownOption[] => [
     { label: '新建归档…', key: 'create' },
     { label: '打开归档…', key: 'open' },
     { label: '重新载入归档\u2003F5', key: 'reload', disabled: !hasPath.value },
@@ -46,14 +47,14 @@
     { label: '退出', key: 'quit' },
   ])
 
-  const opsOptions = computed(() => [
+  const opsOptions = computed((): DropdownOption[] => [
     { label: '提取全部…', key: 'extract-all', disabled: !hasArchive.value },
     { label: '导入文件到归档…', key: 'import', disabled: !hasArchive.value },
     { label: '导入文件夹到归档…', key: 'import-folder', disabled: !hasArchive.value },
     { label: '新建文件夹…', key: 'new-folder', disabled: !hasArchive.value },
   ])
 
-  const toolsOptions = computed(() => [
+  const toolsOptions = computed((): DropdownOption[] => [
     { label: '修复头信息…', key: 'repair', disabled: !hasPath.value },
     { label: '版本转换…', key: 'convert', disabled: !hasArchive.value },
     { type: 'divider', key: 'd2' },
@@ -67,11 +68,11 @@
     },
   ])
 
-  const settingsOptions = [
+  const settingsOptions: DropdownOption[] = [
     { label: '界面设置…', key: 'settings' },
   ]
 
-  function onFileSelect(key) {
+  function onFileSelect(key: string | number) {
     fileShow.value = false
     if (key === 'create') startCreate()
     else if (key === 'open') openArchiveDialog()
@@ -80,7 +81,7 @@
     else if (key === 'quit') ipc.closeWindow()
   }
 
-  function onOpsSelect(key) {
+  function onOpsSelect(key: string | number) {
     opsShow.value = false
     if (key === 'extract-all') extractAll()
     else if (key === 'import') importFilesDialog()
@@ -88,7 +89,7 @@
     else if (key === 'new-folder') startNewFolder()
   }
 
-  function onToolsSelect(key) {
+  function onToolsSelect(key: string | number) {
     toolsShow.value = false
     if (key === 'repair') startRepair()
     else if (key === 'convert') startConvert()
@@ -98,9 +99,8 @@
     else if (key === 'pw-unlock') startUnlock()
   }
 
-  function onSettingsSelect(key) {
+  function onSettingsSelect(key: string | number) {
     settingsShow.value = false
     if (key === 'settings') S.settingsOpen = true
   }
 </script>
-

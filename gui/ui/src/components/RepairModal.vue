@@ -48,7 +48,7 @@
   </n-modal>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { computed } from 'vue'
   import { NModal, NButton, NTag, NEmpty } from 'naive-ui'
   import { S, applyRepair, saveRepaired, openRepaired, closeRepair } from '../store'

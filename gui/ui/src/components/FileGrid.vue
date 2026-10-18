@@ -9,7 +9,7 @@
                @dblclick="onTileOpen(r)"
                @contextmenu="onTileMenu(r, $event)">
             <div class="tile-icon" :class="{ warn: r.type === 'file' && !r.entry.name }">
-              <img v-if="thumbUrl(r)" class="tile-thumb" :src="thumbUrl(r)" alt="">
+              <img v-if="thumbUrl(r)" class="tile-thumb" :src="thumbUrl(r) || undefined" alt="">
               <template v-else>{{ tileIcon(r) }}</template>
             </div>
             <div class="tile-name">{{ tileName(r) }}</div>
@@ -27,10 +27,12 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
   import { NVirtualList, NDropdown } from 'naive-ui'
+  import type { VirtualListInst } from 'naive-ui'
   import { rows, selectNone, anyModalOpen, MAX_ROWS, S } from '../store'
+  import type { Row } from '../store'
   import { fmtBytes, baseName, isImageName } from '../utils'
   import { thumbFor } from '../thumbs'
   import {
@@ -47,21 +49,23 @@
 
   // -- 列数自适应（挂载时先同步测一次，之后交给 ResizeObserver） --------------------
 
-  const wrapEl = ref(null)
+  const wrapEl = ref<HTMLElement | null>(null)
   const cols = ref(0)
-  let ro = null
+  let ro: ResizeObserver | null = null
 
-  function measure(w) {
+  function measure(w: number) {
     cols.value = Math.max(1, Math.floor((w - 2 * PAD + GAP_X) / (TILE_W + GAP_X)))
   }
 
   onMounted(() => {
-    measure(wrapEl.value.clientWidth) // 不依赖 RO 的初始回调（个别 WebView 不触发）
+    measure(wrapEl.value!.clientWidth) // 不依赖 RO 的初始回调（个别 WebView 不触发）
     ro = new ResizeObserver((entries) => {
-      const e = entries[entries.length - 1]
-      measure(e.contentBoxSize?.[0]?.inlineSize ?? e.contentRect.width)
+      const e = entries[entries.length - 1]!
+      const cbs = e.contentBoxSize
+      const w = Array.isArray(cbs) ? cbs[0]?.inlineSize : undefined
+      measure(w ?? e.contentRect.width)
     })
-    ro.observe(wrapEl.value)
+    ro.observe(wrapEl.value!)
     window.addEventListener('keydown', onKey)
   })
   onBeforeUnmount(() => {
@@ -72,7 +76,7 @@
   /** 把行列表按列数切成「网格行」，每个虚拟项渲染一行。 */
   const gridRows = computed(() => {
     const c = Math.max(1, cols.value)
-    const out = []
+    const out: { key: string; items: Row[] }[] = []
     const list = rows.value.list
     for (let i = 0; i < list.length; i += c) {
       out.push({ key: `r${i}`, items: list.slice(i, i + c) })
@@ -82,22 +86,22 @@
 
   // -- 单元格内容 -----------------------------------------------------------------
 
-  function rowKey(r) {
+  function rowKey(r: Row) {
     return r.type === 'dir' ? `d:${r.path.join('\\')}` : r.entry.key
   }
 
-  function tileClass(r) {
+  function tileClass(r: Row) {
     const st = rowSelectedState(r)
     return st === 'full' ? 'sel' : st === 'partial' ? 'sel-partial' : ''
   }
 
-  function tileName(r) {
+  function tileName(r: Row) {
     if (r.type === 'dir') return r.node.name
     const e = r.entry
     return e.name ? (r.showFull ? e.name : baseName(e.name)) : e.display
   }
 
-  function tileTitle(r) {
+  function tileTitle(r: Row) {
     if (r.type === 'dir') {
       return `${r.path.join('\\')}（${fmtBytes(r.node.file_count)} 个文件）`
     }
@@ -106,27 +110,27 @@
     return `${e.name}（${fmtBytes(e.size)} 字节）`
   }
 
-  function tileIcon(r) {
+  function tileIcon(r: Row) {
     if (r.type === 'dir') return '📁'
     if (!r.entry.name) return '⚠'
     return isImageName(r.entry.name) ? '🖼️' : '📄'
   }
 
   /** 图片文件的缩略图 URL（设置开启且已加载时）；否则 null 显示图标。 */
-  function thumbUrl(r) {
+  function thumbUrl(r: Row) {
     if (r.type !== 'file' || !r.entry.name || !isImageName(r.entry.name)) return null
     return thumbFor(r.entry)
   }
 
   /** 点击单元格以外的空白处清空选择。 */
-  function onBlankClick(ev) {
-    if (ev.target?.closest?.('.grid-tile')) return
+  function onBlankClick(ev: MouseEvent) {
+    if ((ev.target as HTMLElement | null)?.closest?.('.grid-tile')) return
     selectNone()
   }
 
   // -- 方向键导航（↑↓←→ 移动选择，Shift 扩选，Enter 打开） --------------------------
 
-  const vlRef = ref(null)
+  const vlRef = ref<VirtualListInst | null>(null)
   const cursor = ref(-1) // 光标在 rows.list 中的索引；-1 = 尚未定位
 
   // 行列表变化（导航/过滤）后光标作废，方向键重新从头开始；
@@ -145,28 +149,28 @@
   })
 
   /** 双击 / 回车打开：进入文件夹时光标落到第一项。 */
-  function onTileOpen(r) {
+  function onTileOpen(r: Row) {
     dirEnter = r.type === 'dir'
     openRow(r)
   }
 
   /** 单击 / 右键单元格时把光标同步到该格，方向键从它继续。 */
-  function onTileClick(r, ev) {
+  function onTileClick(r: Row, ev: MouseEvent) {
     cursor.value = rows.value.list.indexOf(r)
     activateRow(r, ev)
   }
 
-  function onTileMenu(r, ev) {
+  function onTileMenu(r: Row, ev: MouseEvent) {
     cursor.value = rows.value.list.indexOf(r)
     openContextMenu(r, ev)
   }
 
-  function onKey(ev) {
+  function onKey(ev: KeyboardEvent) {
     if (ctx.show) return
     // 预览窗开着不算「有弹窗」：焦点区在列表时方向键归网格，
     // 预览通过选择联动跟随；焦点区在预览时仍让位给预览切图。
     if (anyModalOpen.value && !(S.preview && S.focusZone === 'list')) return
-    const t = ev.target
+    const t = ev.target as HTMLElement | null
     if (t?.closest?.('input, textarea, [contenteditable="true"]')) return
     const list = rows.value.list
     if (list.length === 0) return

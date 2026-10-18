@@ -23,21 +23,23 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { h, ref, watch, onMounted, onBeforeUnmount } from 'vue'
   import { NDataTable, NCheckbox, NDropdown } from 'naive-ui'
+  import type { DataTableColumns, DataTableInst } from 'naive-ui'
   import {
     S, rows, toggleSelected, toggleDirSelected, selectNone,
     scopeSelection, toggleSelectAll, anyModalOpen,
     MAX_ROWS,
   } from '../store'
+  import type { Row } from '../store'
   import { fmtBytes, baseName, collectKeys } from '../utils'
   import {
     ctx, ctxOptions, onCtxSelect,
     activateRow, openRow, openContextMenu, moveCursorTo, rowSelectedState,
   } from './entryActions'
 
-  const columns = [
+  const columns: DataTableColumns<Row> = [
     {
       key: 'check',
       width: 36,
@@ -49,7 +51,7 @@
         indeterminate: scopeSelection.value.indeterminate,
         disabled: scopeSelection.value.disabled,
         title: '全选 / 取消全选（当前视图）',
-        'onUpdate:checked': (v) => toggleSelectAll(v),
+        'onUpdate:checked': (v: boolean) => toggleSelectAll(v),
       }),
       render(row) {
         if (row.type === 'dir') {
@@ -60,13 +62,13 @@
             checked: keys.length > 0 && sel === keys.length,
             indeterminate: sel > 0 && sel < keys.length,
             title: '选中此文件夹下的全部文件',
-            'onUpdate:checked': (v) => toggleDirSelected(row.node, v),
+            'onUpdate:checked': (v: boolean) => toggleDirSelected(row.node, v),
           })
         }
         return h(NCheckbox, {
           size: 'small',
           checked: S.selected.has(row.entry.key),
-          'onUpdate:checked': (v) => toggleSelected(row.entry.key, v),
+          'onUpdate:checked': (v: boolean) => toggleSelected(row.entry.key, v),
         })
       },
     },
@@ -84,8 +86,8 @@
         }
         const e = row.entry
         const named = !!e.name
-        const label = row.showFull ? (named ? e.name : e.display)
-                                  : (named ? baseName(e.name) : e.display)
+        const label = row.showFull ? (named ? e.name! : e.display)
+                                  : (named ? baseName(e.name!) : e.display)
         if (named) return h('span', { class: 'cname' }, label)
         return h('span', {
           class: 'cname unnamed',
@@ -148,33 +150,33 @@
     },
   ]
 
-  function rowKey(row) {
+  function rowKey(row: Row) {
     return row.type === 'dir' ? `d:${row.path.join('\\')}` : row.entry.key
   }
 
-  function rowProps(row) {
+  function rowProps(row: Row) {
     const st = rowSelectedState(row)
     return {
       class: st === 'full' ? 'row-sel' : st === 'partial' ? 'row-sel-partial' : undefined,
-      onClick: (ev) => {
-        if (ev.target?.closest?.('.n-checkbox')) return // 勾选列自己处理，不当作行点击
+      onClick: (ev: MouseEvent) => {
+        if ((ev.target as HTMLElement | null)?.closest?.('.n-checkbox')) return // 勾选列自己处理，不当作行点击
         cursor.value = rows.value.list.indexOf(row)
         activateRow(row, ev)
       },
       onDblclick: () => onRowOpen(row),
-      onContextmenu: (ev) => onRowMenu(row, ev),
+      onContextmenu: (ev: MouseEvent) => onRowMenu(row, ev),
     }
   }
 
   /** 点击行/表头以外的空白处清空选择。 */
-  function onBlankClick(ev) {
-    if (ev.target?.closest?.('.n-data-table-tr')) return
+  function onBlankClick(ev: MouseEvent) {
+    if ((ev.target as HTMLElement | null)?.closest?.('.n-data-table-tr')) return
     selectNone()
   }
 
   // -- 方向键导航（↑↓ 移动选择，Shift 扩选，Enter 打开） ----------------------------
 
-  const tableRef = ref(null)
+  const tableRef = ref<DataTableInst | null>(null)
   const cursor = ref(-1) // 光标在 rows.list 中的索引；-1 = 尚未定位
 
   // 行列表变化（导航/过滤）后光标作废，方向键重新从头开始；
@@ -193,23 +195,23 @@
   })
 
   /** 双击 / 回车打开：进入文件夹时光标落到第一项。 */
-  function onRowOpen(row) {
+  function onRowOpen(row: Row) {
     dirEnter = row.type === 'dir'
     openRow(row)
   }
 
   /** 右键行时把光标同步到该行，方向键从它继续。 */
-  function onRowMenu(row, ev) {
+  function onRowMenu(row: Row, ev: MouseEvent) {
     cursor.value = rows.value.list.indexOf(row)
     openContextMenu(row, ev)
   }
 
-  function onKey(ev) {
+  function onKey(ev: KeyboardEvent) {
     if (ctx.show) return
     // 预览窗开着不算「有弹窗」：焦点区在列表时方向键归表格，
     // 预览通过选择联动跟随；焦点区在预览时仍让位给预览切图。
     if (anyModalOpen.value && !(S.preview && S.focusZone === 'list')) return
-    const t = ev.target
+    const t = ev.target as HTMLElement | null
     if (t?.closest?.('input, textarea, [contenteditable="true"]')) return
     const list = rows.value.list
     if (list.length === 0) return

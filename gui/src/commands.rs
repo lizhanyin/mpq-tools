@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
+use base64::Engine as _;
 use mpq::{Deletion, ModifyOptions};
 use mpqtool::tasks;
 use serde::{Deserialize, Serialize};
@@ -211,6 +212,15 @@ pub struct PreviewDto {
     /// 图片条目：data URL（此时 text 为空，前端改用图片视图）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<crate::imagepreview::ImageDto>,
+    /// MDX 模型条目：base64 原始字节（前端 WebGL 渲染，不可编辑）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelDto>,
+}
+
+/// MDX（Warcraft III 模型）预览载荷：base64 的原始文件字节。
+#[derive(Serialize)]
+pub struct ModelDto {
+    pub data: String,
 }
 
 struct Decoded {
@@ -293,10 +303,12 @@ fn encode_text(text: &str, encoding: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-/// 为预览窗口读取一个具名文件（前 256 KiB）。
+/// 为预览窗口读取一个具名文件（文本前 256 KiB；图片 / 模型不截断）。
 #[tauri::command]
 pub fn preview_file(name: String, state: St) -> Result<PreviewDto, String> {
     const LIMIT: usize = 256 * 1024;
+    /// 模型体积上限：base64 后约放大 1/3，再大走 IPC 不划算。
+    const MODEL_LIMIT: usize = 32 * 1024 * 1024;
     let s = lock(&state);
     let Some(archive) = &s.archive else {
         return Err("未打开归档".to_string());
@@ -311,6 +323,27 @@ pub fn preview_file(name: String, state: St) -> Result<PreviewDto, String> {
             encoding: "UTF-8".to_string(),
             binary: false,
             image: Some(image),
+            model: None,
+        });
+    }
+    // MDX 模型：整文件 base64 给前端 WebGL 渲染（贴图按需另取）。
+    if name.to_lowercase().ends_with(".mdx") {
+        if data.len() > MODEL_LIMIT {
+            return Err(format!(
+                "模型过大（{} MiB，上限 32 MiB），请提取后用模型查看器打开",
+                data.len() / 1024 / 1024
+            ));
+        }
+        return Ok(PreviewDto {
+            text: String::new(),
+            size: data.len(),
+            truncated: false,
+            encoding: "UTF-8".to_string(),
+            binary: false,
+            image: None,
+            model: Some(ModelDto {
+                data: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data),
+            }),
         });
     }
     let truncated = data.len() > LIMIT;
@@ -323,7 +356,24 @@ pub fn preview_file(name: String, state: St) -> Result<PreviewDto, String> {
         encoding: d.encoding.to_string(),
         binary: d.lossy,
         image: None,
+        model: None,
     })
+}
+
+/// 读取归档内一个文件的原始字节（base64）——MDX 预览按需加载贴图用。
+/// 条目不存在（或读取失败）返回 None，由前端回退到无贴图渲染。
+#[tauri::command]
+pub fn read_file_bytes(name: String, state: St) -> Result<Option<String>, String> {
+    let s = lock(&state);
+    let Some(archive) = &s.archive else {
+        return Ok(None);
+    };
+    match archive.read_file(&name) {
+        Ok(data) => Ok(Some(
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data),
+        )),
+        Err(_) => Ok(None),
+    }
 }
 
 /// 网格视图缩略图：解码并等比缩到 192px 内的 PNG data URL。

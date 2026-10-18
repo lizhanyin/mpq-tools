@@ -1,4 +1,4 @@
-<script setup>
+<script setup lang="ts">
 import { computed, onMounted, onUnmounted } from 'vue'
 import { NConfigProvider } from 'naive-ui'
 import MenuBar from './components/MenuBar.vue'
@@ -41,8 +41,8 @@ const themeOverrides = computed(() => {
   }
 })
 
-let offDrop = null
-function onKeyDown(ev) {
+let offDrop: (() => void) | null = null
+function onKeyDown(ev: KeyboardEvent) {
   if (ev.key === 'F5') {
     ev.preventDefault()
     reloadArchive()
@@ -50,7 +50,7 @@ function onKeyDown(ev) {
   }
   // Ctrl+A：文件列表全选（当前视图范围）。文本输入/编辑场景保留原生全选。
   if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'a') {
-    const t = ev.target
+    const t = ev.target as HTMLElement | null
     if (t?.closest?.('input, textarea, [contenteditable="true"], .monaco-editor, .log-body')) return
     if (!S.info || anyModalOpen.value) return
     ev.preventDefault()
@@ -80,7 +80,7 @@ onMounted(async () => {
       } else if (p.type === 'drop') {
         S.dropping = null
         handleDrop(p.paths || [])
-      } else if (p.type === 'leave' || p.type === 'exit') {
+      } else if ((p.type as string) === 'leave' || (p.type as string) === 'exit') {
         S.dropping = null
       }
     })

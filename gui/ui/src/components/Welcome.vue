@@ -6,7 +6,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { NButton } from 'naive-ui'
   import { openArchiveDialog } from '../store'
 </script>

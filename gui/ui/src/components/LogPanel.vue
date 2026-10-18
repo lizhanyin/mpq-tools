@@ -8,12 +8,12 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { ref, watch, nextTick } from 'vue'
   import { NButton } from 'naive-ui'
   import { S, clearLog } from '../store'
 
-  const el = ref(null)
+  const el = ref<HTMLElement | null>(null)
 
   watch(() => S.logs.length, async () => {
     await nextTick()

@@ -41,8 +41,9 @@
   </n-modal>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { NModal, NButton, NRadioGroup, NRadio, NSelect } from 'naive-ui'
+  import type { SelectOption } from 'naive-ui'
   import { S, createArchive, closeCreate } from '../store'
 
   const VERSIONS = [
@@ -52,7 +53,7 @@
     { value: 4, label: 'v4', hint: 'v3 + 头部与各表的 MD5 校验' },
   ]
 
-  const HASH_SIZES = [64, 256, 1024, 4096].map((n) => ({
+  const HASH_SIZES: SelectOption[] = [64, 256, 1024, 4096].map((n) => ({
     label: `${n.toLocaleString('en-US')} 槽`,
     value: n,
   }))

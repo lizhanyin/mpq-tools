@@ -1,7 +1,7 @@
 <template>
   <div ref="browserEl" class="browser">
     <div class="tree-panel" :style="{ width: treeWidth + 'px' }">
-      <div class="tree-header">文件夹（{{ fmtBytes(S.info.tree.file_count) }} 项）</div>
+      <div class="tree-header">文件夹（{{ fmtBytes(rootFileCount) }} 项）</div>
       <FileTree />
     </div>
     <div class="tree-splitter" :class="{ dragging }" @pointerdown="startSplit"></div>
@@ -68,7 +68,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { ref, computed } from 'vue'
   import { NButton, NButtonGroup, NInput } from 'naive-ui'
   import FileTree from './FileTree.vue'
@@ -83,14 +83,14 @@
 
   // -- 目录树宽度（可拖动分隔条） ------------------------------------------------
 
-  const browserEl = ref(null)
+  const browserEl = ref<HTMLElement | null>(null)
   const treeWidth = ref(230)
   const dragging = ref(false)
 
-  function startSplit(ev) {
+  function startSplit(ev: PointerEvent) {
     dragging.value = true
-    const move = (e) => {
-      const rect = browserEl.value.getBoundingClientRect()
+    const move = (e: PointerEvent) => {
+      const rect = browserEl.value!.getBoundingClientRect()
       const w = Math.min(Math.max(e.clientX - rect.left, 150), Math.max(200, rect.width * 0.6))
       treeWidth.value = w
     }
@@ -107,6 +107,8 @@
 
   const selCount = S.selected // 模板中直接读 S.selected.size
 
+  // BrowserPane 只在 S.info 存在时挂载（App.vue 的 v-else），树根必有值。
+  const rootFileCount = computed(() => S.info?.tree.file_count ?? 0)
   const cwdNode = computed(() => (S.info && !searching.value) ? nodeAt(S.info.tree, S.cwd) : null)
   const matchCount = computed(() => searching.value ? searchResults.value.length : 0)
 </script>

@@ -26,6 +26,7 @@ fn main() {
             commands::write_password_note,
             commands::preview_file,
             commands::thumbnail,
+            commands::read_file_bytes,
             commands::stage_edited_file,
             commands::extract,
             commands::diagnose_archive,

@@ -73,13 +73,18 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
   import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
   import { NButton } from 'naive-ui'
+  import type { editor as MonacoEditor } from 'monaco-editor'
   import { S, rows, previewFile, closePreview, savePreviewEdit, setSelectedKeys } from '../store'
+  import type { Row } from '../store'
+  import type { EntryDto } from '../types'
   import { loadMonaco, languageFor } from '../monaco'
   import { fmtBytes, fmtSize, isImageName } from '../utils'
   import { toast } from '../toast'
+
+  type Monaco = typeof import('monaco-editor')
 
   // 非模态浮动窗口；标题栏拖动、右下角调整大小。Monaco 编辑器填充窗体。
   const x = ref(90)
@@ -87,12 +92,12 @@
   const w = ref(720)
   const h = ref(520)
   const maximized = ref(false)
-  let savedRect = null // 最大化前的位置尺寸，还原时用
-  const titleEl = ref(null)
-  const editorHost = ref(null)
+  let savedRect: { x: number; y: number; w: number; h: number } | null = null // 最大化前的位置尺寸，还原时用
+  const titleEl = ref<HTMLElement | null>(null)
+  const editorHost = ref<HTMLDivElement | null>(null)
   const loading = ref(true)
-  let editor = null
-  let monaco = null
+  let editor: MonacoEditor.IStandaloneCodeEditor | null = null
+  let monaco: Monaco | null = null
   let applying = false // 程序化 setValue 不计入 dirty
 
   const p = computed(() => S.preview)
@@ -104,7 +109,7 @@
   const imgFailed = ref(false)
   const shownUrl = ref('') // 当前显示的图片 URL；先屏外解码再替换，切换时不闪白
   let imgSeq = 0           // 快速连续切换时只认最后一次的结果
-  const imgBox = ref(null)   // 图片滚动容器：平移 = 拖动它的滚动
+  const imgBox = ref<HTMLElement | null>(null) // 图片滚动容器：平移 = 拖动它的滚动
   const panning = ref(false)
   let suppressClick = false  // 拖动平移后不再当作点击缩放
 
@@ -123,7 +128,7 @@
 
   /** 文本预览的头部注释（图片信息在编辑区底部内侧的悬浮条）。 */
   const headerNote = computed(() => {
-    const bits = []
+    const bits: string[] = []
     if (!p.value || p.value.image) return ''
     if (p.value.encoding !== 'UTF-8') bits.push(`按 ${p.value.encoding} 解码`)
     if (p.value.truncated) bits.push(`仅加载前 256 KiB / 共 ${fmtBytes(p.value.size)} 字节，只读`)
@@ -148,14 +153,18 @@
 
   // -- 图片左右切换 ---------------------------------------------------------------
 
+  /** 有名字的图片文件行（filter 的类型谓词让后续 entry.name 直接是 string）。 */
+  type ImageRow = { type: 'file'; entry: EntryDto & { name: string }; showFull: boolean }
+
   /** 当前视图（含搜索视图）里的图片条目，按列表顺序切换。 */
   const imgEntries = computed(() =>
-    rows.value.list.filter((r) => r.type === 'file' && r.entry.name && isImageName(r.entry.name)))
+    rows.value.list.filter((r): r is ImageRow =>
+      r.type === 'file' && !!r.entry.name && isImageName(r.entry.name)))
   const imgIndex = computed(() =>
     imgEntries.value.findIndex((r) => r.entry.name === p.value?.name))
   const imgCount = computed(() => imgEntries.value.length)
 
-  function switchImage(dir) {
+  function switchImage(dir: number) {
     const i = imgIndex.value + dir
     if (i < 0 || i >= imgEntries.value.length) return
     previewFile(imgEntries.value[i].entry.name)
@@ -176,7 +185,7 @@
   let imgReady = true          // 当前图已解码上屏（或加载失败）
 
   /** 尝试向 flipDir 翻一张；返回是否发起了请求。到达边界自动停。 */
-  function flipStep() {
+  function flipStep(): boolean {
     const i = imgIndex.value + flipDir
     if (i < 0 || i >= imgEntries.value.length) { stopFlip(); return false }
     if (flipInFlight || !imgReady) return false
@@ -192,14 +201,14 @@
     return true
   }
 
-  function flipTick(now) {
+  function flipTick(now: number) {
     if (!flipDir) return
     if (now - lastFlipReq >= FLIP_MIN_MS - 1 && flipStep()) lastFlipReq = now
     flipRaf = requestAnimationFrame(flipTick)
   }
 
   /** 按下立刻翻一张；一直按住则延时后进入 60fps 连翻。 */
-  function startFlip(dir) {
+  function startFlip(dir: number) {
     if (flipDir === dir) return
     stopFlip()
     flipDir = dir
@@ -217,19 +226,19 @@
   }
 
   /** 指针按到 ‹/› 上：捕获指针，按住期间即使移出按钮也能收到抬起。 */
-  function pressNav(dir, ev) {
-    try { ev.currentTarget.setPointerCapture(ev.pointerId) } catch { /* 合成事件没有真实指针 */ }
+  function pressNav(dir: number, ev: PointerEvent) {
+    try { (ev.currentTarget as HTMLElement).setPointerCapture(ev.pointerId) } catch { /* 合成事件没有真实指针 */ }
     startFlip(dir)
   }
 
   /** 图片预览时 ←/→ 切换，按住连翻；正在输入文本（过滤框等）时不抢按键。
    *  注意不能用 anyModalOpen——它包含预览窗自身，会让本处理器
    *  在预览打开时永远短路。 */
-  function onKey(ev) {
+  function onKey(ev: KeyboardEvent) {
     if (!S.preview?.image) return
     if (S.focusZone === 'list') return // 焦点在列表：方向键归网格，预览经选择联动跟随
     if (S.modify || S.create || S.convert || S.pw || S.repair || S.newFolder || S.settingsOpen) return
-    const t = ev.target
+    const t = ev.target as HTMLElement | null
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
     if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') {
       ev.preventDefault()
@@ -239,14 +248,14 @@
   }
 
   /** 松开方向键即停翻（按错方向重按也走这里的停→起）。 */
-  function onKeyUp(ev) {
+  function onKeyUp(ev: KeyboardEvent) {
     if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') stopFlip()
   }
 
   /** 屏外解码新图，成功后才一次性替换 src 与视图状态：旧图保持可见
    *  直到新位图可绘制，避免中间一帧露出白底。imgReady 供按住连翻掌握
    *  解码节奏。 */
-  async function showImage(url) {
+  async function showImage(url: string | undefined) {
     const seq = ++imgSeq
     if (!url) { shownUrl.value = ''; imgReady = true; return }
     imgReady = false
@@ -284,10 +293,10 @@
     imgReady = true
   }
 
-  function onImgLoad(ev) {
+  function onImgLoad(ev: Event) {
     imgFailed.value = false
-    natW.value = ev.target.naturalWidth
-    natH.value = ev.target.naturalHeight
+    natW.value = (ev.target as HTMLImageElement).naturalWidth
+    natH.value = (ev.target as HTMLImageElement).naturalHeight
     dims.value = `${natW.value}×${natH.value}`
     if (!zoomLocked.value) zoom.value = fitZoom() // 打开 / 切换图片时先完整显示（contain）
   }
@@ -299,19 +308,19 @@
     if (!S.preview?.image || !name) return
     const idx = rows.value.list.findIndex((r) => r.type === 'file' && r.entry.name === name)
     if (idx < 0) return
-    const key = rows.value.list[idx].entry.key
-    if (S.selected.size !== 1 || !S.selected.has(key)) setSelectedKeys([key])
+    const row = rows.value.list[idx] as ImageRow
+    if (S.selected.size !== 1 || !S.selected.has(row.entry.key)) setSelectedKeys([row.entry.key])
     S.gridCursor = idx
   }
 
   // -- 缩放 / 旋转 / 平移 ---------------------------------------------------------
 
   /** 缩放后考虑旋转的显示宽高。 */
-  const rotW = (z) => Math.round((rot.value % 180 ? natH.value : natW.value) * z)
-  const rotH = (z) => Math.round((rot.value % 180 ? natW.value : natH.value) * z)
+  const rotW = (z: number) => Math.round((rot.value % 180 ? natH.value : natW.value) * z)
+  const rotH = (z: number) => Math.round((rot.value % 180 ? natW.value : natH.value) * z)
 
   /** 完整显示（contain）所需缩放；小图放大封顶 200%，避免打开时过度放大。 */
-  function fitZoom() {
+  function fitZoom(): number {
     const el = imgBox.value
     if (!el || !natW.value) return 1
     return Math.min(2, el.clientWidth / rotW(1), el.clientHeight / rotH(1))
@@ -319,7 +328,7 @@
 
   /** 以屏幕坐标 (cx,cy) 为锚点缩放：缩放后光标下的内容点保持不动。
    *  下限为「完整显示」（不再缩小成孤岛），上限 1000%。 */
-  function zoomBy(factor, cx, cy) {
+  function zoomBy(factor: number, cx: number, cy: number) {
     const el = imgBox.value
     if (!el || !natW.value) return
     const oz = zoom.value
@@ -339,13 +348,13 @@
     })
   }
 
-  function onWheel(ev) {
+  function onWheel(ev: WheelEvent) {
     if (!S.preview?.image) return
     zoomBy(ev.deltaY < 0 ? 1.1 : 1 / 1.1, ev.clientX, ev.clientY)
   }
 
   /** 点击（没拖动过）在 100% 与完整显示之间切换。 */
-  function onImgClick(ev) {
+  function onImgClick(ev: MouseEvent) {
     if (suppressClick) { suppressClick = false; return }
     if (!imgBox.value || !natW.value) return
     const target = Math.abs(zoom.value - 1) < 1e-3 ? fitZoom() : 1
@@ -353,7 +362,7 @@
   }
 
   /** 旋转 ±90°，保持缩放；原本是完整显示则按新方向重新 contain（锁定缩放时不重排）。 */
-  function rotate(dir) {
+  function rotate(dir: number) {
     const wasFit = Math.abs(zoom.value - fitZoom()) < 1e-3
     rot.value = (rot.value + dir * 90 + 360) % 360
     if (!zoomLocked.value && wasFit) zoom.value = fitZoom()
@@ -366,15 +375,16 @@
   }
 
   /** 按住拖动平移：内容溢出窗口时四处查看（实现为拖动滚动位置）。 */
-  function startPan(ev) {
+  function startPan(ev: PointerEvent) {
     if (ev.button !== 0) return
     const el = imgBox.value
+    if (!el) return
     const sx = ev.clientX, sy = ev.clientY
     const sl = el.scrollLeft, st = el.scrollTop
     let moved = false
     suppressClick = false
     el.setPointerCapture(ev.pointerId)
-    const move = (e) => {
+    const move = (e: PointerEvent) => {
       const dx = e.clientX - sx, dy = e.clientY - sy
       if (!moved && Math.hypot(dx, dy) > 3) { moved = true; panning.value = true }
       if (moved) { el.scrollLeft = sl - dx; el.scrollTop = st - dy }
@@ -422,7 +432,7 @@
 
   /** 缩为最小高宽并贴到视口右下角；再点一次还原到进入前的位置尺寸。 */
   const miniMode = ref(false)
-  let preMiniRect = null
+  let preMiniRect: { x: number; y: number; w: number; h: number } | null = null
   function toggleMiniCorner() {
     if (miniMode.value) {
       if (preMiniRect) {
@@ -452,15 +462,16 @@
     miniMode.value = true
   }
 
-  function startDrag(ev) {
+  function startDrag(ev: PointerEvent) {
     // 点击按钮等交互元素时不启动拖动：setPointerCapture 会吞掉
     // 后续指针事件，导致按钮收不到 click。最大化时也不拖动。
-    if (ev.button !== 0 || maximized.value || ev.target.closest('button')) return
+    if (ev.button !== 0 || maximized.value || (ev.target as HTMLElement).closest('button')) return
+    const title = titleEl.value
+    if (!title) return
     const sx = ev.clientX, sy = ev.clientY
     const ox = x.value, oy = y.value
-    const title = titleEl.value
     title.setPointerCapture(ev.pointerId)
-    const move = (e) => {
+    const move = (e: PointerEvent) => {
       x.value = Math.max(0, ox + e.clientX - sx)
       y.value = Math.max(0, oy + e.clientY - sy)
     }
@@ -472,13 +483,13 @@
     title.addEventListener('pointerup', up)
   }
 
-  function startResize(ev) {
+  function startResize(ev: PointerEvent) {
     if (ev.button !== 0 || maximized.value) return
     ev.preventDefault()
     ev.stopPropagation()
     const sx = ev.clientX, sy = ev.clientY
     const ow = w.value, oh = h.value
-    const move = (e) => {
+    const move = (e: PointerEvent) => {
       w.value = Math.max(320, ow + e.clientX - sx)
       h.value = Math.max(200, oh + e.clientY - sy)
     }
@@ -497,7 +508,7 @@
   async function ensureEditor() {
     if (editor) return
     monaco = await loadMonaco()
-    editor = monaco.editor.create(editorHost.value, {
+    editor = monaco.editor.create(editorHost.value!, {
       value: '',
       language: 'plaintext',
       theme: 'vs',
@@ -528,7 +539,7 @@
     loadedName = cur.name
     applying = true
     editor.setValue(cur.text)
-    monaco.editor.setModelLanguage(editor.getModel(), languageFor(cur.name))
+    monaco!.editor.setModelLanguage(editor.getModel()!, languageFor(cur.name))
     editor.updateOptions({ readOnly: !cur.editable })
     cur.dirty = false
     applying = false
