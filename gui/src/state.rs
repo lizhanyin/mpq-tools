@@ -30,6 +30,54 @@ pub struct GuiState {
     pub modify_applied: Option<(Vec<u8>, String)>,
     /// 最近一次应用「版本转换」后的结果字节 + 单行摘要。
     pub convert_applied: Option<(Vec<u8>, String)>,
+    /// 老客户端 MPQ 链（贴图 / 模型回退查找用），惰性打开。
+    pub war3_archives: Vec<Archive<std::fs::File>>,
+    /// war3_archives 对应的客户端目录（设置变化时重新加载）。
+    pub war3_dir_loaded: Option<String>,
+}
+
+/// 老客户端目录中的 MPQ，按游戏资源加载顺序（补丁优先）排列。
+const WAR3_MPQ_ORDER: [&str; 5] = [
+    "War3Patch.mpq",
+    "War3x.mpq",
+    "War3xlocal.mpq",
+    "War3local.mpq",
+    "War3.mpq",
+];
+
+impl GuiState {
+    /// 确保来自 `dir` 的老客户端 MPQ 链已打开（目录变化时重载）。
+    /// 返回链中是否有可用归档。
+    pub fn ensure_war3_chain(&mut self, dir: &str) -> bool {
+        if self.war3_dir_loaded.as_deref() == Some(dir) {
+            return !self.war3_archives.is_empty();
+        }
+        self.war3_dir_loaded = Some(dir.to_string());
+        self.war3_archives.clear();
+        for name in WAR3_MPQ_ORDER {
+            let path = std::path::Path::new(dir).join(name);
+            if let Ok(archive) = Archive::open(&path) {
+                self.war3_archives.push(archive);
+            }
+        }
+        !self.war3_archives.is_empty()
+    }
+
+    /// 在老客户端 MPQ 链中查找并读取文件（按补丁优先序）。
+    /// `dir` 为空或链不可用时返回 `None`。
+    pub fn read_war3_bytes(&mut self, name: &str, dir: &str) -> Option<Vec<u8>> {
+        if dir.is_empty() || !self.ensure_war3_chain(dir) {
+            return None;
+        }
+        for archive in &mut self.war3_archives {
+            if archive.has_file(name) {
+                if let Ok(data) = archive.read_file(name) {
+                    return Some(data);
+                }
+            }
+        }
+        None
+    }
 }
 
 /// 条目的选择键，跨导航保持稳定，且不受重名显示名的影响：
@@ -168,10 +216,30 @@ impl GuiState {
                 }
                 let locked = protected && !archive.is_unlocked();
 
+                // 存在未命名条目时，自动应用外部 listfile 清单
+                //（归档旁 / 程序旁的 Listfiles 目录，MPQMaster 布局）。
+                let mut extra_warnings: Vec<String> = Vec::new();
+                if archive.has_unnamed_entries() {
+                    let lists = tasks::discover_listfiles(&path);
+                    if !lists.is_empty() {
+                        let (recovered, errors) =
+                            tasks::apply_listfiles(&mut archive, &lists);
+                        if recovered > 0 {
+                            extra_warnings
+                                .push(format!("外部清单恢复 {recovered} 个文件名"));
+                        }
+                        for e in errors {
+                            extra_warnings.push(format!("清单不可读：{e}"));
+                        }
+                    }
+                }
+
                 let entries = archive.entries();
                 let tree = tasks::build_tree(&entries);
                 let times = tasks::file_time_map(&archive);
                 let h = archive.header();
+                let mut warnings = archive.warnings().to_vec();
+                warnings.extend(extra_warnings);
                 let info = ArchiveInfoDto {
                     path: path.display().to_string(),
                     version: archive.version().as_u32(),
@@ -180,7 +248,7 @@ impl GuiState {
                     block_table_size: h.block_table_size,
                     het_bet: archive.uses_het_bet(),
                     listfile_count: archive.file_names().len(),
-                    warnings: archive.warnings().to_vec(),
+                    warnings,
                     tree: tree_dto(&tree, &times),
                     entry_count: entries.len(),
                     protected,
@@ -211,5 +279,91 @@ impl GuiState {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod war3_chain_tests {
+    use super::*;
+
+    /// 生成一个含给定文件的最小 MPQ。
+    fn mini_mpq(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let base = mpq::create(&mpq::CreateOptions {
+            version: mpq::FormatVersion::V1,
+            hash_table_size: 16,
+            sector_shift: 3,
+        })
+        .expect("create");
+        let additions: Vec<(String, Vec<u8>)> = files
+            .iter()
+            .map(|(n, d)| (n.to_string(), d.to_vec()))
+            .collect();
+        mpq::modify(&base, &[], &additions).expect("modify").bytes
+    }
+
+    fn setup_client_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mpqtool-war3-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // 补丁归档：同名文件覆盖基础归档（优先级更高）。
+        std::fs::write(
+            dir.join("War3Patch.mpq"),
+            mini_mpq(&[("ReplaceableTextures\\teamcolor.blp", b"patch-version")]),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("War3.mpq"),
+            mini_mpq(&[
+                ("ReplaceableTextures\\teamcolor.blp", b"base-version"),
+                ("Units\\Human\\Footman.blp", b"footman"),
+            ]),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn finds_files_with_patch_priority() {
+        let dir = setup_client_dir("prio");
+        let mut s = GuiState::default();
+        assert!(s.ensure_war3_chain(dir.to_str().unwrap()));
+        assert_eq!(s.war3_archives.len(), 2);
+
+        // 补丁优先：同名文件取 War3Patch 的版本。
+        assert_eq!(
+            s.read_war3_bytes("ReplaceableTextures\\teamcolor.blp", dir.to_str().unwrap()),
+            Some(b"patch-version".to_vec())
+        );
+        // 仅存在于基础归档的文件正常读取；hash 大小写不敏感。
+        assert_eq!(
+            s.read_war3_bytes("units\\human\\FOOTMAN.blp", dir.to_str().unwrap()),
+            Some(b"footman".to_vec())
+        );
+        // 两边都没有 → None。
+        assert_eq!(s.read_war3_bytes("nope.blp", dir.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn reloads_when_dir_changes() {
+        let dir = setup_client_dir("reload");
+        let empty = std::env::temp_dir().join(format!("mpqtool-war3-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&empty).unwrap();
+        let mut s = GuiState::default();
+
+        assert!(s.ensure_war3_chain(dir.to_str().unwrap()));
+        // 换成空目录：链重载为空。
+        assert!(!s.ensure_war3_chain(empty.to_str().unwrap()));
+        assert!(s.war3_archives.is_empty());
+        assert_eq!(
+            s.read_war3_bytes("Units\\Human\\Footman.blp", empty.to_str().unwrap()),
+            None
+        );
+
+        // 换回有效目录再次可用；空目录参数直接短路。
+        assert!(s.ensure_war3_chain(dir.to_str().unwrap()));
+        assert_eq!(
+            s.read_war3_bytes("Units\\Human\\Footman.blp", dir.to_str().unwrap()),
+            Some(b"footman".to_vec())
+        );
+        assert_eq!(s.read_war3_bytes("Units\\Human\\Footman.blp", ""), None);
     }
 }

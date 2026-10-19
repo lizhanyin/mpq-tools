@@ -11,7 +11,10 @@
 //! * 经典 hash table / block table / hi-block 表（加密，可能压缩）
 //! * v3/v4 归档的 HET + BET 表
 //! * v4 MD5 校验（各表、头部、文件原始块）
-//! * `(listfile)`、`(attributes)` —— 两者皆为可选
+//! * `(listfile)`、`(attributes)` —— 两者皆为可选；缺失 listfile 时
+//!   以内置游戏清单（MPQMaster 魔兽清单合集）与 `war3map.imp` 试探
+//!   哈希表恢复文件名，亦可经 [`Archive::recover_names_with`] 接入
+//!   任意外部清单
 //! * sector 与单单元（single-unit）文件，加密（含 key-v2），
 //!   zlib / PKWARE / bzip2 / LZMA 解压
 //! * `MPQ\x1B` 用户数据包装（Warcraft III / StarCraft II 地图），以及
@@ -48,12 +51,12 @@ mod error;
 mod header;
 mod hetbet;
 mod jenkins;
+mod knownnames;
 mod modify;
 mod passcrypt;
 mod pkware;
 mod repair;
 mod tables;
-
 pub use archive::{Archive, FileEntry, TableSource, SPECIAL_FILES};
 pub use attrs::{Attributes, FileAttributes};
 pub use crypt::{
@@ -74,6 +77,10 @@ pub use crate::error::{Error, Result};
 
 /// 解压辅助函数，供高级用户 / 工具使用。
 pub use compression::{decompress_imploded, decompress_masked};
+
+/// 解析 MDX 模型 TEXS chunk 中内嵌的贴图路径（定长 268 字节记录）。
+/// 供 GUI 等工具展示「模型使用的贴图」。
+pub use knownnames::mdx_texture_paths;
 
 /// 头部诊断与修复。
 pub use repair::{diagnose, locate_header, repair, RepairIssue, RepairReport};

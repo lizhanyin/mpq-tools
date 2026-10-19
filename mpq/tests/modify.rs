@@ -170,8 +170,10 @@ fn unnamed_entries_survive_without_listfile() {
     let out = modify(&src, &[], &[("later.txt".into(), b"added".to_vec())]);
 
     let (archive, names) = open(&out.bytes).unwrap();
-    // 新增的文件（连同重建的 listfile）是唯一有名称的条目。
-    assert_eq!(names, ["later.txt".to_string()]);
+    // 新增文件进入重建的 listfile；readme.txt 虽不在源 listfile
+    //（源没有 listfile），但内置游戏清单恢复了它的名字，修改器
+    // 随之写进重建的 listfile。data\table.txt / secret.bin 仍无名。
+    assert_eq!(names, ["readme.txt".to_string(), "later.txt".to_string()]);
     // 先前未命名的文件仍然可以用原名称读取 — 证明 hash 槽位被
     // 保留而非重建。
     assert_eq!(archive.read_file("readme.txt").unwrap(), b"keep me\n");

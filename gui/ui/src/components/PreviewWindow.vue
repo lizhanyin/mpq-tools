@@ -28,6 +28,9 @@
     <div v-if="!p?.image && !p?.model" class="fwin-head">
       <strong class="mono">{{ p?.name }}</strong>
       <span class="weak">{{ headerNote }}</span>
+      <n-button v-if="p?.truncated" size="tiny" quaternary :loading="p.loadingFull"
+                title="完整加载整个文件（上限 16 MiB），加载后可编辑保存"
+                @click="loadAll">加载全部</n-button>
     </div>
     <div class="fwin-editor">
       <div v-if="loading && !p?.image && !p?.model" class="editor-loading">正在加载编辑器…</div>
@@ -156,6 +159,21 @@
     return bits.join('，')
   })
 
+  /** 截断预览的「加载全部」：完整读取（后端上限 16 MiB），成功后内容
+   *  完整、自动转为可编辑。失败时 previewFile 已 toast，这里只恢复按钮。 */
+  async function loadAll() {
+    const cur = S.preview
+    if (!cur?.truncated || cur.loadingFull) return
+    cur.loadingFull = true
+    try {
+      // key 寻址重载（未命名条目也能「加载全部」），display 沿用旧标题。
+      await previewFile({ key: cur.key, name: null, display: cur.name }, { full: true })
+    } finally {
+      // 成功时 S.preview 已是新对象（loadingFull=false）；失败或响应过期时复位旧对象
+      if (S.preview) S.preview.loadingFull = false
+    }
+  }
+
   /** 图片显示尺寸 = 自然尺寸 × 缩放；旋转 90/270 时外层占位宽高互换。 */
   const dispW = computed(() => Math.round(natW.value * zoom.value))
   const dispH = computed(() => Math.round(natH.value * zoom.value))
@@ -172,21 +190,21 @@
 
   // -- 图片左右切换 ---------------------------------------------------------------
 
-  /** 有名字的图片文件行（filter 的类型谓词让后续 entry.name 直接是 string）。 */
-  type ImageRow = { type: 'file'; entry: EntryDto & { name: string }; showFull: boolean }
+  /** 图片文件行（未命名条目按识别出的类型后缀也算图片）。 */
+  type ImageRow = { type: 'file'; entry: EntryDto; showFull: boolean }
 
   /** 当前视图（含搜索视图）里的图片条目，按列表顺序切换。 */
   const imgEntries = computed(() =>
     rows.value.list.filter((r): r is ImageRow =>
-      r.type === 'file' && !!r.entry.name && isImageName(r.entry.name)))
+      r.type === 'file' && isImageName(r.entry.display)))
   const imgIndex = computed(() =>
-    imgEntries.value.findIndex((r) => r.entry.name === p.value?.name))
+    imgEntries.value.findIndex((r) => r.entry.display === p.value?.name))
   const imgCount = computed(() => imgEntries.value.length)
 
   function switchImage(dir: number) {
     const i = imgIndex.value + dir
     if (i < 0 || i >= imgEntries.value.length) return
-    previewFile(imgEntries.value[i].entry.name)
+    previewFile(imgEntries.value[i].entry)
   }
 
   // -- 按住连翻（‹ › 按钮 / ←→ 方向键）--------------------------------------------
@@ -208,13 +226,13 @@
     const i = imgIndex.value + flipDir
     if (i < 0 || i >= imgEntries.value.length) { stopFlip(); return false }
     if (flipInFlight || !imgReady) return false
-    const name = imgEntries.value[i].entry.name
+    const entry = imgEntries.value[i].entry
     flipInFlight = true
     imgReady = false
-    previewFile(name)
+    previewFile(entry)
       .then(() => {
         // 预览没变成目标（提取失败等）：恢复节奏门并停翻，避免原地刷请求
-        if (S.preview?.name !== name) { imgReady = true; stopFlip() }
+        if (S.preview?.name !== entry.display) { imgReady = true; stopFlip() }
       })
       .finally(() => { flipInFlight = false })
     return true
@@ -323,9 +341,10 @@
   /** 预览→列表透传：预览切图后，把列表选择与网格光标/滚动定位到该行。
    *  与 store 的「选中→预览」联动名字相同即停，不会成环。 */
   function syncSelection() {
-    const name = S.preview?.name
-    if ((!S.preview?.image && !S.preview?.model) || !name) return
-    const idx = rows.value.list.findIndex((r) => r.type === 'file' && r.entry.name === name)
+    const display = S.preview?.name
+    if ((!S.preview?.image && !S.preview?.model) || !display) return
+    // 显示名匹配：未命名条目没有 name，用 display（含类型后缀）。
+    const idx = rows.value.list.findIndex((r) => r.type === 'file' && r.entry.display === display)
     if (idx < 0) return
     const row = rows.value.list[idx] as ImageRow
     if (S.selected.size !== 1 || !S.selected.has(row.entry.key)) setSelectedKeys([row.entry.key])
@@ -523,6 +542,7 @@
   // -- Monaco -------------------------------------------------------------------
 
   let loadedName = ''
+  let loadedText: string | null = null // 同名完整重载（「加载全部」）时 text 引用会变
 
   async function ensureEditor() {
     if (editor) return
@@ -554,8 +574,9 @@
     if (!cur) return
     if (cur.image || cur.model) { loading.value = false; return } // 图片/模型不加载 Monaco
     await ensureEditor()
-    if (!editor || loadedName === cur.name) return
+    if (!editor || (loadedName === cur.name && loadedText === cur.text)) return
     loadedName = cur.name
+    loadedText = cur.text
     applying = true
     editor.setValue(cur.text)
     monaco!.editor.setModelLanguage(editor.getModel()!, languageFor(cur.name))
@@ -590,10 +611,11 @@
     window.addEventListener('blur', stopFlip) // 失焦收不到 keyup，防止连翻失控
     window.addEventListener('resize', onViewportResize)
   })
-  // 切换预览目标时重置视图状态；syncModel 负责文本装载。图片的视图
-  // 状态不在此时清零——由 showImage 解码完成后统一重置，期间旧图保持
-  // 显示，避免旧图消失、新图未解码之间闪白。
-  watch(() => S.preview?.name, () => {
+  // 切换预览目标时重置视图状态；syncModel 负责文本装载。盯对象引用而
+  // 不是名字：「加载全部」完整重载同名文件时名字不变，也要重新装载。
+  // 图片的视图状态不在此时清零——由 showImage 解码完成后统一重置，期间
+  // 旧图保持显示，避免旧图消失、新图未解码之间闪白。
+  watch(() => S.preview, () => {
     if (!S.preview?.image) {
       zoom.value = 1
       rot.value = 0

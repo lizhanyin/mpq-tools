@@ -57,6 +57,29 @@
           <n-switch size="large" :value="S.gridThumbs" @update:value="setGridThumbs" />
         </div>
       </div>
+
+      <div class="setting-card">
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-name">老版本 Warcraft III 目录</div>
+            <div class="setting-desc">
+              模型预览的贴图在当前归档里找不到时，回退到该目录下的
+              War3Patch / War3x / War3xlocal / War3local / War3.mpq
+              （按游戏加载顺序）读取原版资源。设置后重新打开模型生效。
+            </div>
+          </div>
+        </div>
+        <div class="setting-dir">
+          <input class="dir-input" type="text" spellcheck="false"
+                 placeholder="例如 E:\Game\Warcraft III"
+                 :value="S.war3Dir" @change="onDirInput" />
+          <n-button size="small" @click="pickWar3Dir">浏览…</n-button>
+          <n-button size="small" quaternary :disabled="!S.war3Dir"
+                    title="清除目录（不再回退到老客户端）"
+                    @click="clearWar3Dir">清除</n-button>
+        </div>
+        <div v-if="dirState" class="dir-state" :class="{ ok: dirState.ok }">{{ dirState.text }}</div>
+      </div>
     </div>
 
     <template #action>
@@ -69,13 +92,61 @@
 </template>
 
 <script setup lang="ts">
-  import { computed } from 'vue'
+  import { computed, ref } from 'vue'
   import { NModal, NButton, NSlider, NSwitch } from 'naive-ui'
-  import { S, setFontSize, setGridThumbs, FONT_MIN, FONT_MAX, FONT_DEFAULT } from '../store'
+  import { S, setFontSize, setGridThumbs, setWar3Dir, FONT_MIN, FONT_MAX, FONT_DEFAULT } from '../store'
+  import * as ipc from '../ipc'
 
   function onShowUpdate(v: boolean) {
     S.settingsOpen = v
   }
+
+  // -- 老客户端目录 ----------------------------------------------------------
+
+  const dirState = ref<{ ok: boolean; text: string } | null>(null)
+
+  /** 目录里是否有 War3*.mpq（提示设置是否有效，不阻断保存）。 */
+  async function validateDir(dir: string) {
+    if (!dir) { dirState.value = null; return }
+    const has = await invoke_ls_war3(dir)
+    dirState.value = has
+      ? { ok: true, text: `已找到 ${has} 个 MPQ（设置有效）` }
+      : { ok: false, text: '该目录下没有 War3*.mpq —— 请确认指向老版本客户端根目录' }
+  }
+
+  /** 通过后端列目录（Tauri 环境）；mock 下简单给个确定值。 */
+  async function invoke_ls_war3(dir: string): Promise<number> {
+    try {
+      return await ipc.invoke<number>('war3_mpq_count', { dir })
+    } catch {
+      return 0
+    }
+  }
+
+  function onDirInput(ev: Event) {
+    const v = (ev.target as HTMLInputElement).value.trim()
+    setWar3Dir(v)
+    validateDir(v)
+  }
+
+  async function pickWar3Dir() {
+    const picked = await ipc.dialogOpen({
+      title: '选择老版本 Warcraft III 目录（包含 War3.mpq）',
+      directory: true,
+    })
+    const dir = Array.isArray(picked) ? null : picked
+    if (!dir) return
+    setWar3Dir(dir)
+    validateDir(dir)
+  }
+
+  function clearWar3Dir() {
+    setWar3Dir('')
+    dirState.value = null
+  }
+
+  // 首次打开设置时对已有目录做一次校验。
+  if (S.war3Dir) validateDir(S.war3Dir)
 
   const PRESETS = [
     { text: '小', size: 11 },

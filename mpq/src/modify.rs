@@ -574,6 +574,7 @@ pub fn modify_with(
     fn entry_of(b: &SrcBlock) -> FileEntry {
         FileEntry {
             name: b.name.clone(),
+            guessed_ext: None,
             locale: 0,
             block_index: b.index,
             offset: b.offset,

@@ -17,6 +17,7 @@ use crate::header::{
 use crate::hetbet::{load_ext_table, BetTable, HetTable, BET_SIGNATURE, HET_SIGNATURE};
 use crate::jenkins;
 use crate::crypt::{KEY_BLOCK_TABLE, KEY_HASH_TABLE};
+use crate::knownnames;
 use crate::passcrypt::{self, TAG_LEN};
 use crate::tables::{
     load_mpq_table, parse_block_table, parse_hash_table, ClassicTables, FILE_COMPRESS,
@@ -45,8 +46,12 @@ pub enum TableSource {
 /// 归档内的一个文件，统一表示经典表与 BET 表两种来源。
 #[derive(Debug, Clone)]
 pub struct FileEntry {
-    /// 名字（已知时），来自 `(listfile)` 或探测出的内部文件名。
+    /// 名字（已知时），来自 `(listfile)`、探测出的内部文件名或
+    /// 脚本 / 对象数据中恢复的资源路径。
     pub name: Option<String>,
+    /// 未命名条目按内容识别出的类型后缀（如 `"mdx"`）——
+    /// 见 [`Archive`] 打开时的类型探测。
+    pub guessed_ext: Option<&'static str>,
     pub locale: u16,
     /// 在源表中的索引。
     pub block_index: usize,
@@ -79,11 +84,15 @@ impl FileEntry {
     pub fn is_compressed(&self) -> bool {
         self.flags & FILE_COMPRESS_MASK != 0
     }
-    /// 用于显示的名字；未知时为 `<unnamed #index>`。
+    /// 用于显示的名字；未知时为 `<unnamed #index>`，若按内容识别出
+    /// 类型则附带后缀（`<unnamed #index>.mdx`）。
     pub fn display_name(&self) -> String {
         match &self.name {
             Some(n) => n.clone(),
-            None => format!("<unnamed #{}>", self.block_index),
+            None => match self.guessed_ext {
+                Some(ext) => format!("<unnamed #{}>.{}", self.block_index, ext),
+                None => format!("<unnamed #{}>", self.block_index),
+            },
         }
     }
 }
@@ -101,6 +110,11 @@ pub struct Archive<R: Read + Seek> {
     het: Option<HetTable>,
     bet: Option<BetTable>,
     names: Vec<String>,
+    /// 未命名条目按内容识别的类型后缀（按表来源 + 索引缓存，
+    /// 打开时探测一次）。
+    guessed: std::collections::HashMap<(TableSource, usize), &'static str>,
+    /// 已扫过 TEXS 的模型条目（避免迭代恢复中重复读取）。
+    scanned_models: std::collections::HashSet<(TableSource, usize)>,
     attributes: Option<Attributes>,
     warnings: Vec<String>,
     /// 读取文件数据时遇到的非致命问题（有界环形缓冲）。
@@ -143,6 +157,8 @@ impl<R: Read + Seek> Archive<R> {
             het: None,
             bet: None,
             names: Vec::new(),
+            guessed: std::collections::HashMap::new(),
+            scanned_models: std::collections::HashSet::new(),
             attributes: None,
             warnings: Vec::new(),
             read_warnings: RefCell::new(VecDeque::new()),
@@ -151,6 +167,17 @@ impl<R: Read + Seek> Archive<R> {
         archive.sector_size = archive.header.sector_size();
         archive.load_tables()?;
         archive.load_optional_metadata();
+        archive.guess_unnamed_kinds();
+        // 类型探测后补一轮模型 TEXS × 资源惯例启发式的迭代：
+        // 未命名模型的贴图引用 → 贴图名 → 同名反推其它模型 →
+        // 新模型的 TEXS → …… 收敛到不动点。
+        for _ in 0..4 {
+            let a = archive.scan_model_textures();
+            let b = archive.heuristic_round();
+            if a + b == 0 {
+                break;
+            }
+        }
         Ok(archive)
     }
 
@@ -577,7 +604,18 @@ impl<R: Read + Seek> Archive<R> {
             }
         }
         if self.names.is_empty() {
-            self.warn("no (listfile); file names unknown");
+            let recovered = self.recover_names();
+            if recovered > 0 {
+                self.warn(format!(
+                    "no (listfile); recovered {recovered} file name(s) via built-in game file lists"
+                ));
+            } else {
+                self.warn("no (listfile); file names unknown");
+            }
+        } else {
+            // 受保护地图也可能只保留删减过的 listfile：静默补上
+            // 未列出但能对上 hash 表的标准文件名。
+            self.recover_names();
         }
 
         if self.has_file("(attributes)") {
@@ -590,6 +628,274 @@ impl<R: Read + Seek> Archive<R> {
                 Err(e) => self.warn(format!("(attributes) present but unreadable: {e}")),
             }
         }
+    }
+
+    /// 用内置游戏文件名清单试探 hash 表以恢复文件名（缺失或删减
+    /// listfile 时）。对 Warcraft III 地图还会读取 `war3map.imp`
+    /// （世界编辑器的导入清单），从中恢复导入文件的路径。
+    /// 返回新恢复出的名字数。
+    fn recover_names(&mut self) -> usize {
+        let before = self.names.len();
+
+        // 精炼清单先试：其规范拼写优先登记；MPQ hash 查找是大小写
+        // 不敏感的，靠小写去重避免大小写变体重复占用。
+        for list in [
+            knownnames::WAR3_FILES,
+            knownnames::WAR3_DATA_FILES,
+            knownnames::MISC_GAME_FILES,
+        ] {
+            for name in list {
+                self.try_recover_name(name);
+            }
+        }
+        for name in knownnames::BUNDLED_LISTFILE.iter() {
+            self.try_recover_name(name);
+        }
+
+        // 导入清单存在时（哪怕刚由上面的试探发现），其内容本身就是
+        // 一批候选文件名 —— 这是恢复 war3mapImported\... 等
+        // 自定义路径的唯一途径。
+        if let Ok(data) = self.read_file("war3map.imp") {
+            for path in knownnames::parse_imp(&data) {
+                self.try_recover_name(&path);
+            }
+        }
+
+        // 已命名文件中的资源路径引用（.j/.lua/.ai 脚本的字符串常量、
+        // 对象数据 w3u/w3t/... 内嵌的模型与图标路径、声音定义 w3s、
+        // 字符串表 wts 等）—— 导入文件名的又一来源。MDX 模型则解析
+        // 其 TEXS chunk 内嵌的贴图路径（模型引用贴图的权威来源）。
+        // 用工作列表：扫描中新恢复的名字（如脚本引用的模型）若本身
+        // 可扫描，也入队继续 —— 引用链条可以任意深。
+        let mut queue: Vec<String> = self
+            .names
+            .iter()
+            .filter(|n| {
+                knownnames::is_scannable(n) || n.to_lowercase().ends_with(".mdx")
+            })
+            .cloned()
+            .collect();
+        let mut i = 0usize;
+        while i < queue.len() {
+            let name = queue[i].clone();
+            i += 1;
+            let names_before = self.names.len();
+            let Ok(data) = self.read_file(&name) else { continue };
+            let paths = if name.to_lowercase().ends_with(".mdx") {
+                knownnames::mdx_texture_paths(&data)
+            } else {
+                knownnames::extract_candidate_paths(&data)
+            };
+            for path in paths {
+                // 模型引用做 .mdl↔.mdx 互替（引擎等价）。
+                self.try_recover_model_variants(&path);
+            }
+            for n in &self.names[names_before..] {
+                let enqueueable = knownnames::is_scannable(n)
+                    || n.to_lowercase().ends_with(".mdx");
+                if enqueueable && !queue.iter().any(|q| q.eq_ignore_ascii_case(n)) {
+                    queue.push(n.clone());
+                }
+            }
+        }
+
+        // War3 资源惯例启发式，迭代到不动点（新恢复的名字可能再
+        // 引出下一层资源）：同名多扩展 × 同目录/根目录双向反推
+        //（模型↔贴图互换角色），以及禁用图标的 dis 前缀变体。
+        for _ in 0..4 {
+            if self.heuristic_round() == 0 {
+                break;
+            }
+        }
+
+        self.names.len() - before
+    }
+
+    /// 一轮资源惯例启发式，返回新恢复的名字数：
+    /// * 同名规律 —— 对每个已命名的资源（模型 / 贴图皆可），以其
+    ///   「完整路径 + 各扩展名」与「基础名（根目录）+ 各扩展名」
+    ///   双向试探（hero.mdx ↔ hero.blp、贴图反推模型同理）；
+    /// * 禁用图标 —— `xxx.blp` 与同目录 `disxxx.blp` 成对
+    ///   （`CommandButtons\BTN*` ↔ `CommandButtonsDisabled\DISBTN*`）。
+    fn heuristic_round(&mut self) -> usize {
+        let before = self.names.len();
+
+        let resources: Vec<String> = self
+            .names
+            .iter()
+            .filter(|n| {
+                let l = n.to_lowercase();
+                l.ends_with(".mdx")
+                    || l.ends_with(".mdl")
+                    || l.ends_with(".blp")
+                    || l.ends_with(".tga")
+            })
+            .cloned()
+            .collect();
+        for resource in resources {
+            let Some((stem_full, _)) = resource.rsplit_once('.') else {
+                continue;
+            };
+            // 基础名（去目录）：War3 资源按「基础名 + 扩展名」匹配，
+            // 贴图可以与模型不同目录（改图常见布局是模型在
+            // war3mapImported\、贴图在根目录），根目录变体一并试探。
+            let base = stem_full
+                .rsplit(['\\', '/'])
+                .next()
+                .unwrap_or(stem_full);
+            for ext in ["blp", "tga", "png", "jpg", "dds", "mdx", "mdl"] {
+                let candidate = format!("{stem_full}.{ext}");
+                self.try_recover_name(&candidate);
+                let rooted = format!("{base}.{ext}");
+                self.try_recover_name(&rooted);
+            }
+        }
+
+        let icons: Vec<String> = self
+            .names
+            .iter()
+            .filter(|n| {
+                let l = n.to_lowercase();
+                l.ends_with(".blp") || l.ends_with(".tga")
+            })
+            .cloned()
+            .collect();
+        for icon in icons {
+            let (dir, file) = match icon.rsplit_once('\\') {
+                Some((d, f)) => (format!("{d}\\"), f.to_string()),
+                None => (String::new(), icon.clone()),
+            };
+            let alt = if file.to_lowercase().starts_with("dis") {
+                format!("{dir}{}", &file[3..])
+            } else {
+                format!("{dir}dis{file}")
+            };
+            self.try_recover_name(&alt);
+        }
+
+        self.names.len() - before
+    }
+
+    /// 试探单个候选名：hash 表命中且尚未收录时登记。
+    /// MPQ 系统文件（`(listfile)` 等）除外 —— 它们由 [`Archive::entries`]
+    /// 经 [`SPECIAL_FILES`] 单独标注，不属于 `file_names()`。
+    fn try_recover_name(&mut self, name: &str) {
+        if SPECIAL_FILES.iter().any(|s| s.eq_ignore_ascii_case(name)) {
+            return;
+        }
+        if self.has_file(name)
+            && !self
+                .names
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(name))
+        {
+            self.names.push(name.to_string());
+        }
+    }
+
+    /// 试探候选名及其**模型扩展名互替**变体（`.mdl` ↔ `.mdx`）。
+    /// War3 引擎查找模型引用时两种扩展等价（数据表里写 `x.mdl`、
+    /// MPQ 里存的常是 `x.mdx`），对象数据 / SLK 的引用因此需要
+    /// 双向试探才能对上 hash 表。
+    fn try_recover_model_variants(&mut self, name: &str) {
+        self.try_recover_name(name);
+        let swap = |ext: &str, other: &str, name: &str| {
+            let lower = name.to_lowercase();
+            let suffix = format!(".{ext}");
+            lower
+                .ends_with(&suffix)
+                .then(|| format!("{}.{other}", &name[..name.len() - suffix.len()]))
+        };
+        if let Some(alt) = swap("mdl", "mdx", name).or_else(|| swap("mdx", "mdl", name)) {
+            self.try_recover_name(&alt);
+        }
+    }
+
+    /// 用外部候选文件名清单试探 hash 表恢复文件名 —— 例如
+    /// MPQMaster 的 Listfiles 文本或其他游戏 / 社区维护的清单。
+    /// 内置魔兽清单之外的补充途径；返回新恢复出的名字数。
+    pub fn recover_names_with<'a, I>(&mut self, names: I) -> usize
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let before = self.names.len();
+        for name in names {
+            self.try_recover_name(name);
+        }
+        self.names.len() - before
+    }
+
+    /// 对仍未命名的条目按内容识别类型（魔法字节），把后缀缓存到
+    /// [`FileEntry::guessed_ext`]。跳过加密条目（key 不可知）与
+    /// 过大的条目（探测预算有限）。
+    fn guess_unnamed_kinds(&mut self) {
+        /// 单个条目与总读取的预算上限。
+        const PER_FILE_LIMIT: u32 = 4 << 20;
+        const TOTAL_LIMIT: u64 = 64 << 20;
+
+        let targets: Vec<(TableSource, usize)> = self
+            .entries()
+            .into_iter()
+            .filter(|e| e.name.is_none() && e.exists() && !e.is_encrypted() && e.size > 0)
+            .filter(|e| e.compressed_size <= PER_FILE_LIMIT)
+            .map(|e| (e.source, e.block_index))
+            .collect();
+
+        let mut total: u64 = 0;
+        for key in targets {
+            if total > TOTAL_LIMIT {
+                break;
+            }
+            // 经 self.entries() 复原该条目再读取。
+            let entry = match key.0 {
+                TableSource::Classic => {
+                    // locale 无关紧要：只影响元数据，不影响内容。
+                    self.file_entry_from_classic(key.1, 0)
+                }
+                TableSource::Bet => self.file_entry_from_bet(key.1),
+            };
+            let Some(entry) = entry else { continue };
+            total += entry.compressed_size as u64;
+            if let Ok(data) = self.read_entry(&entry) {
+                if let Some(ext) = knownnames::detect_ext(&data) {
+                    self.guessed.insert(key, ext);
+                }
+            }
+        }
+    }
+
+    /// 扫描模型条目的 TEXS 贴图引用（模型引用贴图的权威来源）：
+    /// 具名模型按名读取；未命名但按内容识别为 `.mdx` 的条目按
+    /// key 读取。已扫过的条目（按 key）缓存跳过。返回新恢复数。
+    fn scan_model_textures(&mut self) -> usize {
+        let before = self.names.len();
+        let targets: Vec<(TableSource, usize)> = self
+            .entries()
+            .into_iter()
+            .filter(|e| {
+                e.exists()
+                    && (e.name
+                        .as_ref()
+                        .is_some_and(|n| n.to_lowercase().ends_with(".mdx"))
+                        || e.guessed_ext == Some("mdx"))
+            })
+            .filter(|e| !self.scanned_models.contains(&(e.source, e.block_index)))
+            .map(|e| (e.source, e.block_index))
+            .collect();
+        for key in targets {
+            self.scanned_models.insert(key);
+            let entry = match key.0 {
+                TableSource::Classic => self.file_entry_from_classic(key.1, 0),
+                TableSource::Bet => self.file_entry_from_bet(key.1),
+            };
+            let Some(entry) = entry else { continue };
+            if let Ok(data) = self.read_entry(&entry) {
+                for path in knownnames::mdx_texture_paths(&data) {
+                    self.try_recover_name(&path);
+                }
+            }
+        }
+        self.names.len() - before
     }
 
     fn file_table_len(&self) -> usize {
@@ -641,6 +947,12 @@ impl<R: Read + Seek> Archive<R> {
     /// 来自 `(listfile)` 的文件名（缺失时可能为空）。
     pub fn file_names(&self) -> &[String] {
         &self.names
+    }
+
+    /// 是否仍有未命名的文件条目 —— 用于决定是否值得应用外部
+    /// listfile 清单（完整 listfile 的归档无需再试探）。
+    pub fn has_unnamed_entries(&self) -> bool {
+        self.entries().iter().any(|e| e.name.is_none())
     }
 
     /// 解析出的 `(attributes)`（存在且可读时）。
@@ -718,6 +1030,7 @@ impl<R: Read + Seek> Archive<R> {
         let block = classic.block_table.get(index)?;
         Some(FileEntry {
             name: None,
+            guessed_ext: self.guessed.get(&(TableSource::Classic, index)).copied(),
             locale,
             block_index: index,
             offset: classic.block_offset(index),
@@ -736,6 +1049,7 @@ impl<R: Read + Seek> Archive<R> {
         let rec = bet.record(index as u32);
         Some(FileEntry {
             name: None,
+            guessed_ext: self.guessed.get(&(TableSource::Bet, index)).copied(),
             locale: 0,
             block_index: index,
             offset: rec.file_pos,

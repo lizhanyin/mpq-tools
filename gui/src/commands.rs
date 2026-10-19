@@ -302,19 +302,53 @@ fn encode_text(text: &str, encoding: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-/// 为预览窗口读取一个具名文件（文本前 256 KiB；图片 / 模型不截断）。
+/// 读取一个条目用于预览 / 缩略图：优先按 key（`<source>:<index>`，
+/// 未命名条目唯一可用的寻址方式），回退按名字。返回（数据，用于
+/// 判断预览类型的显示名 —— 未命名条目带识别出的类型后缀）。
+fn read_for_preview(
+    state: &GuiState,
+    key: Option<&str>,
+    name: Option<&str>,
+) -> Result<(Vec<u8>, String), String> {
+    let Some(archive) = &state.archive else {
+        return Err("未打开归档".to_string());
+    };
+    if let Some(k) = key {
+        let (src, idx) = crate::state::parse_key(k).ok_or("无效的条目键")?;
+        let entry = state
+            .entries
+            .iter()
+            .find(|e| e.source == src && e.block_index == idx)
+            .ok_or("条目不存在")?;
+        let display = entry.display_name();
+        let data = archive.read_entry(entry).map_err(|e| e.to_string())?;
+        return Ok((data, display));
+    }
+    let name = name.ok_or("缺少 name 或 key")?;
+    let data = archive.read_file(name).map_err(|e| e.to_string())?;
+    Ok((data, name.to_string()))
+}
+
+/// 为预览窗口读取一个条目（文本前 256 KiB；图片 / 模型不截断）。
+/// 未命名条目以 key 寻址（显示名带识别出的类型后缀，如
+/// `<unnamed #3>.blp`，据此走图片 / 模型预览）。full=true 时不截断
+/// 地加载整个文本（前端「加载全部」按钮）。
 #[tauri::command]
-pub fn preview_file(name: String, state: St) -> Result<PreviewDto, String> {
+pub fn preview_file(
+    key: Option<String>,
+    name: Option<String>,
+    full: Option<bool>,
+    state: St,
+) -> Result<PreviewDto, String> {
     const LIMIT: usize = 256 * 1024;
+    /// 「加载全部」的体积上限：更大的文本过 IPC 并渲染会明显卡顿。
+    const FULL_LIMIT: usize = 16 * 1024 * 1024;
     /// 模型体积上限：base64 后约放大 1/3，再大走 IPC 不划算。
     const MODEL_LIMIT: usize = 32 * 1024 * 1024;
     let s = lock(&state);
-    let Some(archive) = &s.archive else {
-        return Err("未打开归档".to_string());
-    };
-    let data = archive.read_file(&name).map_err(|e| e.to_string())?;
-    // 图片条目按扩展名走图片预览（无 256 KiB 截断，也不可编辑）。
-    if let Some(image) = crate::imagepreview::build(&name, &data)? {
+    let (data, display) = read_for_preview(&s, key.as_deref(), name.as_deref())?;
+    // 图片条目按显示名后缀走图片预览（无 256 KiB 截断，也不可编辑）。
+    if let Some(image) = crate::imagepreview::build(&display, &data)? {
         return Ok(PreviewDto {
             text: String::new(),
             size: data.len(),
@@ -326,7 +360,7 @@ pub fn preview_file(name: String, state: St) -> Result<PreviewDto, String> {
         });
     }
     // MDX 模型：整文件 base64 给前端 WebGL 渲染（贴图按需另取）。
-    if name.to_lowercase().ends_with(".mdx") {
+    if display.to_lowercase().ends_with(".mdx") {
         if data.len() > MODEL_LIMIT {
             return Err(format!(
                 "模型过大（{} MiB，上限 32 MiB），请提取后用模型查看器打开",
@@ -345,8 +379,15 @@ pub fn preview_file(name: String, state: St) -> Result<PreviewDto, String> {
             }),
         });
     }
-    let truncated = data.len() > LIMIT;
-    let slice = &data[..data.len().min(LIMIT)];
+    if full.unwrap_or(false) && data.len() > FULL_LIMIT {
+        return Err(format!(
+            "文件过大（{} MiB，上限 16 MiB），请提取后用文本编辑器打开",
+            data.len() / 1024 / 1024
+        ));
+    }
+    let limit = if full.unwrap_or(false) { FULL_LIMIT } else { LIMIT };
+    let truncated = data.len() > limit;
+    let slice = &data[..data.len().min(limit)];
     let d = decode_preview(slice);
     Ok(PreviewDto {
         text: d.text,
@@ -360,31 +401,112 @@ pub fn preview_file(name: String, state: St) -> Result<PreviewDto, String> {
 }
 
 /// 读取归档内一个文件的原始字节（base64）——MDX 预览按需加载贴图用。
-/// 条目不存在（或读取失败）返回 None，由前端回退到无贴图渲染。
+/// 归档里没有时回退到老客户端 MPQ 链（`war3dir` 设置；补丁优先）。
+/// 两者都没有返回 None，由前端回退到无贴图渲染。
 #[tauri::command]
-pub fn read_file_bytes(name: String, state: St) -> Result<Option<String>, String> {
-    let s = lock(&state);
-    let Some(archive) = &s.archive else {
-        return Ok(None);
+pub fn read_file_bytes(
+    name: String,
+    war3dir: Option<String>,
+    state: St,
+) -> Result<Option<String>, String> {
+    let mut s = lock(&state);
+    let from_map = s.archive.as_ref().and_then(|a| a.read_file(&name).ok());
+    let data = match from_map {
+        Some(d) => d,
+        None => match s.read_war3_bytes(&name, war3dir.as_deref().unwrap_or("")) {
+            Some(d) => d,
+            None => return Ok(None),
+        },
     };
-    match archive.read_file(&name) {
-        Ok(data) => Ok(Some(
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data),
-        )),
-        Err(_) => Ok(None),
+    Ok(Some(base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &data,
+    )))
+}
+
+/// 老客户端目录下可用的 War3*.mpq 数量（设置页校验提示用）。
+#[tauri::command]
+pub fn war3_mpq_count(dir: String) -> usize {
+    [
+        "War3Patch.mpq",
+        "War3x.mpq",
+        "War3xlocal.mpq",
+        "War3local.mpq",
+        "War3.mpq",
+    ]
+    .iter()
+    .filter(|name| std::path::Path::new(&dir).join(name).is_file())
+    .count()
+}
+
+/// 模型使用的贴图：按 key 读模型、解析 TEXS，返回每条贴图路径及其
+/// 来源（map = 当前归档、war3 = 老客户端 MPQ 链、missing = 均未找到）。
+#[derive(Serialize)]
+pub struct ModelTextureDto {
+    pub path: String,
+    /// "map" | "war3" | "missing"
+    pub source: String,
+}
+
+#[tauri::command]
+pub fn model_textures(
+    key: String,
+    war3dir: Option<String>,
+    state: St,
+) -> Result<Vec<ModelTextureDto>, String> {
+    let mut s = lock(&state);
+    let (data, _display) = read_for_preview(&s, Some(&key), None)?;
+    let mut out = Vec::new();
+    for path in mpq::mdx_texture_paths(&data) {
+        // TEXS 中 replaceable 槽的路径与归档名可能大小写不同，
+        // has_file 的 hash 匹配本身不区分大小写。
+        let in_map = s.archive.as_ref().is_some_and(|a| a.has_file(&path));
+        let source = if in_map {
+            "map".to_string()
+        } else if s
+            .read_war3_bytes(&path, war3dir.as_deref().unwrap_or(""))
+            .is_some()
+        {
+            "war3".to_string()
+        } else {
+            "missing".to_string()
+        };
+        out.push(ModelTextureDto { path, source });
     }
+    Ok(out)
+}
+
+/// 贴图缩略图（PNG data URL）：当前归档优先，回退老客户端 MPQ 链。
+/// 找不到或无法解码返回 None（前端显示占位）。
+#[tauri::command]
+pub fn texture_thumbnail(
+    path: String,
+    war3dir: Option<String>,
+    state: St,
+) -> Result<Option<String>, String> {
+    let mut s = lock(&state);
+    let from_map = s.archive.as_ref().and_then(|a| a.read_file(&path).ok());
+    let data = match from_map {
+        Some(d) => d,
+        None => match s.read_war3_bytes(&path, war3dir.as_deref().unwrap_or("")) {
+            Some(d) => d,
+            None => return Ok(None),
+        },
+    };
+    crate::imagepreview::thumbnail(&path, &data)
 }
 
 /// 网格视图缩略图：解码并等比缩到 192px 内的 PNG data URL。
 /// 非图片或解码失败返回 None（前端回退到图标），不弹错误。
 #[tauri::command]
-pub fn thumbnail(name: String, state: St) -> Result<Option<String>, String> {
+pub fn thumbnail(
+    key: Option<String>,
+    name: Option<String>,
+    state: St,
+) -> Result<Option<String>, String> {
     let s = lock(&state);
-    let Some(archive) = &s.archive else {
-        return Err("未打开归档".to_string());
-    };
-    let data = archive.read_file(&name).map_err(|e| e.to_string())?;
-    crate::imagepreview::thumbnail(&name, &data)
+    let (data, display) = read_for_preview(&s, key.as_deref(), name.as_deref())?;
+    crate::imagepreview::thumbnail(&display, &data)
 }
 
 #[derive(Serialize)]

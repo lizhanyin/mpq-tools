@@ -26,7 +26,12 @@ export const FONT_MIN = 10, FONT_MAX = 28, FONT_DEFAULT = 13
 
 /** 浮动预览窗的全部状态。 */
 export interface PreviewState {
-  name: string          // 归档内条目名（编辑保存时也用它）
+  /** 条目选择键（<source>:<index>，未命名条目重载「加载全部」用）。 */
+  key: string
+  /** 显示名（未命名条目为 <unnamed #N>[.ext]）。 */
+  name: string
+  /** 归档内真名（编辑保存用；未命名条目为 null）。 */
+  fileName: string | null
   text: string
   size: number
   encoding: string
@@ -39,6 +44,7 @@ export interface PreviewState {
   dirty: boolean        // Monaco 里是否改过
   saving: boolean
   armed: boolean        // 有未保存修改时关闭需二次确认
+  loadingFull: boolean  // 「加载全部」请求在途（按钮转圈，防重复点击）
 }
 
 /** 「修改归档 → 待导入」的单个条目（stat_imports 结果的落地形态）。 */
@@ -142,6 +148,9 @@ interface AppState {
   logs: string[]
   fontSize: number
   gridThumbs: boolean   // 网格视图显示图片缩略图（localStorage 持久化，默认关闭）
+  /** 老版本 Warcraft III 客户端目录（localStorage 持久化；模型预览
+   *  的贴图在归档里找不到时回退到其中的 War3*.mpq 读取）。 */
+  war3Dir: string
   dropping: { count: number } | null // 拖拽悬停
   /** 键盘焦点区：'list' 文件列表（表格/网格）| 'preview' 预览浮窗。
    *  方向键归谁：列表有焦点 → 网格导航、预览跟随选择；
@@ -172,6 +181,7 @@ export const S = reactive<AppState>({
   logs: [],
   fontSize: FONT_DEFAULT,
   gridThumbs: false,
+  war3Dir: '',
   dropping: null,
   focusZone: 'list',
   gridCursor: -1,
@@ -250,6 +260,7 @@ export function initStore() {
   document.documentElement.style.fontSize = `${S.fontSize}px`
   S.viewMode = localStorage.getItem('view_mode') === 'grid' ? 'grid' : 'table'
   S.gridThumbs = localStorage.getItem('grid_thumbs') === '1'
+  S.war3Dir = localStorage.getItem('war3_dir') ?? ''
 }
 
 export function setViewMode(v: string) {
@@ -260,6 +271,13 @@ export function setViewMode(v: string) {
 export function setGridThumbs(v: boolean) {
   S.gridThumbs = !!v
   localStorage.setItem('grid_thumbs', v ? '1' : '0')
+}
+
+/** 设置老客户端目录：立即持久化。预览中的模型需重新打开才会应用
+ *  新的贴图回退（已在浏览器里的贴图有会话缓存）。 */
+export function setWar3Dir(v: string) {
+  S.war3Dir = v
+  localStorage.setItem('war3_dir', v)
 }
 
 // ---------------------------------------------------------------------------
@@ -412,13 +430,25 @@ export async function handleDrop(paths: string[]) {
 
 let previewSeq = 0 // 并发预览时只认最后一次，防止慢的旧响应覆盖新预览
 
-export async function previewFile(name: string) {
+/** 预览请求的条目信息：key 恒有（未命名条目按 key 寻址），
+ *  name / display 用于标题展示与联动比较。 */
+export interface PreviewTarget {
+  key: string
+  name: string | null
+  display: string
+}
+
+export async function previewFile(target: PreviewTarget, opts: { full?: boolean } = {}) {
   const seq = ++previewSeq
   try {
-    const p = await ipc.invoke<PreviewDto>('preview_file', { name })
+    const p = await ipc.invoke<PreviewDto>('preview_file', {
+      key: target.key, name: target.name ?? undefined, full: !!opts.full,
+    })
     if (seq !== previewSeq) return // 期间又预览了其它条目，丢弃过期响应
     S.preview = {
-      name,
+      key: target.key,
+      name: target.display,
+      fileName: target.name,
       text: p.text,
       size: p.size,
       encoding: p.encoding || 'UTF-8',
@@ -426,10 +456,11 @@ export async function previewFile(name: string) {
       binary: !!p.binary,
       image: p.image || null,
       model: p.model || null,
-      editable: !p.truncated && !p.binary && !p.image && !p.model,
+      editable: !!target.name && !p.truncated && !p.binary && !p.image && !p.model,
       dirty: false,                 // Monaco 里是否改过
       saving: false,
       armed: false,                 // 有未保存修改时关闭需二次确认
+      loadingFull: false,           // 完整加载完成（或未触发）后的新对象
     }
   } catch (e) {
     if (seq !== previewSeq) return
@@ -447,26 +478,29 @@ export function closePreview() {
 const selectedImageName = computed((): string | null => {
   if (S.selected.size !== 1) return null
   const e = entryByKey.value.get([...S.selected][0])
-  return e?.name && U.isImageName(e.name) ? e.name : null
+  return e && U.isImageName(e.display) ? e.display : null
 })
-watch(selectedImageName, (name) => {
-  if (name && S.preview && S.preview.name !== name) previewFile(name)
+watch(selectedImageName, (display) => {
+  if (!display || !S.preview || S.preview.name === display) return
+  const e = entryByKey.value.get([...S.selected][0])
+  if (e) previewFile(e)
 })
 
 /** 预览窗「保存」：按原编码写临时文件（后端），再把该文件排队到
- * 「修改归档 → 待导入」，由用户在弹窗中确认应用/写盘。 */
+ *  「修改归档 → 待导入」，由用户在弹窗中确认应用/写盘。 */
 export async function savePreviewEdit(text: string) {
   const p = S.preview
-  if (!p || !p.editable || p.saving) return
+  if (!p || !p.editable || !p.fileName || p.saving) return
   p.saving = true
   try {
+    const name = p.fileName
     const st = await ipc.invoke<StagedDto>('stage_edited_file', {
-      name: p.name, text, encoding: p.encoding,
+      name, text, encoding: p.encoding,
     })
     S.modify ??= defaultModify()
-    const dupIdx = S.modify.additions.findIndex((a) => a.name.toLowerCase() === p.name.toLowerCase())
+    const dupIdx = S.modify.additions.findIndex((a) => a.name.toLowerCase() === name.toLowerCase())
     const item: ImportItem = {
-      name: p.name,
+      name,
       path: st.path,
       size: st.size,
       replaces: st.replaces || dupIdx >= 0,
@@ -475,8 +509,8 @@ export async function savePreviewEdit(text: string) {
     else S.modify.additions.push(item)
     p.dirty = false
     p.armed = false
-    log(`已保存编辑 ${p.name}（${U.fmtBytes(st.size)} 字节，${item.replaces ? '替换已有文件' : '新增'}），在「修改归档」窗口中应用`)
-    toast.success(`已保存编辑：${p.name}（在「修改归档」中确认写入）`)
+    log(`已保存编辑 ${name}（${U.fmtBytes(st.size)} 字节，${item.replaces ? '替换已有文件' : '新增'}），在「修改归档」窗口中应用`)
+    toast.success(`已保存编辑：${name}（在「修改归档」中确认写入）`)
   } catch (e) {
     log(String(e))
     toast.error(String(e))

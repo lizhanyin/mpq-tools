@@ -99,10 +99,9 @@ export function openRow(row: Row) {
   if (row.type === 'dir') {
     enterSelectFirst = true
     navigate(row.path)
-  } else if (row.entry.name) {
-    previewFile(row.entry.name)
   } else {
-    log('未命名文件无法预览（缺少名字无法解密/定位）')
+    // 未命名条目按 key 寻址（加密的除外 —— key 依赖名字，读不了）。
+    previewFile(row.entry)
   }
 }
 
@@ -196,7 +195,7 @@ export function onCtxSelect(key: string | number) {
     return
   }
   const e = row.entry
-  if (key === 'preview') { if (e.name) previewFile(e.name) }
+  if (key === 'preview') previewFile(e)
   else if (key === 'extract') extractKeys([e.key])
   else if (key === 'toggle') toggleSelected(e.key, !S.selected.has(e.key))
   else if (key === 'move') startMoveModal([e.key])

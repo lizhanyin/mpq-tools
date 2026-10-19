@@ -63,6 +63,8 @@ const MOCK_TREE: TreeNodeDto = dir('', [
   entry('war3map.j', 'classic:0', 48213, 9120, 'EKC', 0, 'classic', '2023-01-01 08:00'),
   entry('war3map.lua', 'classic:13', 12040, 9100, 'EKC', 0, 'classic', '2023-01-01 08:00'),
   entry('war3map.w3e', 'classic:1', 12045, 8990, 'EKC#', 0, 'classic', '2023-01-01 08:00'),
+  // 截断预览演示：~300 KB 文本，初次只给前 256 KiB（「加载全部」拿全文）。
+  entry('bigdebug.txt', 'classic:17', 306688, 220000, 'EK', 0, 'classic', null),
 ], [
   dir('(系统文件)', [
     entry('(listfile)', 'classic:8', 210, 190, 'EC', 0, 'classic', null),
@@ -104,7 +106,7 @@ const MOCK_INFO: ArchiveInfoDto = {
   listfile_count: 14,
   warnings: ['archive_size 0x2200 与实际 0x22ac 不符，已按实际值处理'],
   tree: MOCK_TREE,
-  entry_count: 17,
+  entry_count: 18,
   protected: true,
   locked: true,
 }
@@ -153,8 +155,30 @@ function mockImageUrl(ext: string): string {
   return c.toDataURL('image/png')
 }
 
-function mockPreview(name: string): PreviewDto {
+/* 截断预览演示（bigdebug.txt）：按需生成 ~300 KB 文本并缓存。 */
+let bigDebugCache: string | null = null
+function bigDebugText(): string {
+  if (bigDebugCache === null) {
+    const parts: string[] = []
+    let total = 0
+    for (let n = 1; total < 300 * 1024; n++) {
+      const line = `debug line ${n}: frame=${n * 16} state=ok\n`
+      parts.push(line)
+      total += line.length
+    }
+    bigDebugCache = parts.join('')
+  }
+  return bigDebugCache
+}
+
+function mockPreview(name: string, full: boolean): PreviewDto {
   const ext = (String(name).toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || ''
+  if (/bigdebug\.txt$/i.test(name)) {
+    const all = bigDebugText()
+    return full
+      ? { text: all, size: all.length, truncated: false, encoding: 'UTF-8', binary: false }
+      : { text: all.slice(0, 256 * 1024), size: all.length, truncated: true, encoding: 'UTF-8', binary: false }
+  }
   if (ext === 'tga' || ext === 'blp') {
     return {
       text: '', size: 33792 + name.length, truncated: false,
@@ -211,26 +235,43 @@ const MOCKS: Record<string, (args: any) => unknown> = {
       ? '已启用密码保护（11 个文件已按扇区密封，容器转为 v4）。'
       : op === 'change' ? '已更换密码。' : '已解除密码保护（11 个文件已解密）。',
   }),
-  preview_file: async ({ name }: any) => {
+  preview_file: async ({ key, name, full }: any) => {
     // MDX：真实样本字节（assets 经 ?url 由 vite 提供），验证 3D 预览。
-    if (String(name).toLowerCase().endsWith('.mdx')) {
+    // key 寻址（未命名条目）时 mock 出一个显示名做后缀判断。
+    const display = String(name ?? (String(key ?? '').includes('mdx') ? 'model.mdx' : 'text.txt'))
+    if (display.toLowerCase().endsWith('.mdx')) {
       return {
         text: '', size: 3964, truncated: false,
         encoding: 'UTF-8', binary: false,
         model: { data: await mdxBase64() },
       } satisfies PreviewDto
     }
-    return mockPreview(name)
+    return mockPreview(display, !!full)
   },
   // MDX 贴图按名取字节：Smiley 模型的贴图返回真实 BLP，其余 null（回退无贴图）。
-  read_file_bytes: async ({ name }: any) => {
+  // war3dir：老客户端回退目录（mock 忽略）。
+  read_file_bytes: async ({ name, war3dir }: any) => {
+    void war3dir
     const n = String(name).toLowerCase().replace(/\//g, '\\')
     if (n === 'textures\\smileygw.blp') return await blpBase64()
     return null
   },
+  // 模型 TEXS 贴图清单（mock：模型条目两条，来源各异）。
+  model_textures: ({ key }: any) =>
+    String(key ?? '').length
+      ? [
+          { path: 'Textures\\SmileyGW.blp', source: 'map' },
+          { path: 'war3mapImported\\gone.blp', source: 'missing' },
+        ]
+      : [],
+  // 贴图缩略图：BLP 返回生成的 data URL。
+  texture_thumbnail: ({ path }: any) =>
+    String(path).toLowerCase().endsWith('.blp') ? mockImageUrl('blp') : null,
+  war3_mpq_count: ({ dir }: any) => (String(dir ?? '').length > 0 ? 5 : 0),
   // 缩略图 mock：图片扩展名返回 canvas 生成的 data URL，其余 null。
-  thumbnail: ({ name }: any) => {
-    const ext = (String(name).toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || ''
+  thumbnail: ({ key, name }: any) => {
+    const display = String(name ?? key ?? '')
+    const ext = (display.toLowerCase().match(/\.([a-z0-9]+)$/) || [])[1] || ''
     return (MOCK_IMAGE_MIME[ext] || ext === 'tga' || ext === 'blp') ? mockImageUrl(ext) : null
   },
   stage_edited_file: ({ name, text }: any) => ({

@@ -5,6 +5,7 @@
 import { reactive, watch } from 'vue'
 import { S } from './store'
 import * as ipc from './ipc'
+import * as U from './utils'
 import type { EntryDto } from './types'
 
 const cache = reactive(new Map<string, string>()) // key → data URL（'' = 请求中或失败）
@@ -17,7 +18,9 @@ let active = 0
 
 /** 网格单元的缩略图 URL；不可用 / 未就绪返回 null（渲染图标）。 */
 export function thumbFor(entry: EntryDto | null | undefined): string | null {
-  if (!S.gridThumbs || !entry?.name) return null
+  if (!S.gridThumbs || !entry) return null
+  // 未命名条目按识别出的类型后缀（<unnamed #N>.blp）也算图片。
+  if (!U.isImageName(entry.name) && !U.isImageName(entry.display)) return null
   if (!cache.has(entry.key)) enqueue(entry)
   return cache.get(entry.key) || null
 }
@@ -34,8 +37,8 @@ function pump() {
   while (active < MAX_ACTIVE && queue.length > 0) {
     const e = queue.shift()!
     active++
-    // thumbFor 已过滤无名字目，这里 name 必有值。
-    ipc.invoke<string | null>('thumbnail', { name: e.name! })
+    // key 优先（未命名条目可寻址），name 供后端回退。
+    ipc.invoke<string | null>('thumbnail', { key: e.key, name: e.name ?? undefined })
       .then((url) => {
         if (url) cache.set(e.key, url)
       })

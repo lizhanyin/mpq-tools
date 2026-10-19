@@ -52,6 +52,11 @@ enum Command {
         /// 显示额外细节（flags、locale、表来源）。
         #[arg(short, long)]
         verbose: bool,
+        /// 外部 listfile 清单（文件或目录，可多次给出），用于恢复
+        /// 缺失 `(listfile)` 归档的文件名。未给出时自动发现归档旁 /
+        /// 可执行文件旁的 `Listfiles` 目录。
+        #[arg(long = "listfile", value_name = "FILE")]
+        listfile: Vec<PathBuf>,
         #[command(flatten)]
         pw: PasswordArg,
     },
@@ -68,6 +73,11 @@ enum Command {
         ///（未命名的加密文件无法解密）。
         #[arg(long)]
         all_entries: bool,
+        /// 外部 listfile 清单（文件或目录，可多次给出），用于恢复
+        /// 缺失 `(listfile)` 归档的文件名。未给出时自动发现归档旁 /
+        /// 可执行文件旁的 `Listfiles` 目录。
+        #[arg(long = "listfile", value_name = "FILE")]
+        listfile: Vec<PathBuf>,
         #[command(flatten)]
         pw: PasswordArg,
     },
@@ -179,14 +189,20 @@ fn main() {
             0
         }
         Some(Command::Info { archive, pw }) => cmd_info(&archive, pw.password.as_deref()),
-        Some(Command::List { archive, verbose, pw }) => cmd_list(&archive, verbose, pw.password.as_deref()),
+        Some(Command::List {
+            archive,
+            verbose,
+            listfile,
+            pw,
+        }) => cmd_list(&archive, verbose, listfile, pw.password.as_deref()),
         Some(Command::Extract {
             archive,
             files,
             output,
             all_entries,
+            listfile,
             pw,
-        }) => cmd_extract(&archive, &files, output, all_entries, pw.password.as_deref()),
+        }) => cmd_extract(&archive, &files, output, all_entries, listfile, pw.password.as_deref()),
         Some(Command::Cat { archive, name, pw }) => cmd_cat(&archive, &name, pw.password.as_deref()),
         Some(Command::Add {
             archive,
@@ -255,6 +271,38 @@ fn print_warnings(archive: &Archive<std::fs::File>) {
     }
 }
 
+/// 打开归档（见 [`open_archive`]），并应用外部 listfile 清单：
+/// 显式给出的路径直接使用；否则当存在未命名条目时，自动发现
+/// 归档旁 / 可执行文件旁的 `Listfiles` 目录（MPQMaster 布局）。
+fn open_archive_with_listfiles(
+    path: &Path,
+    password: Option<&str>,
+    strict: bool,
+    listfile: &[PathBuf],
+) -> mpq::Result<Archive<std::fs::File>> {
+    let mut archive = open_archive(path, password, strict)?;
+    let mut lists: Vec<PathBuf> = listfile.to_vec();
+    if lists.is_empty() && archive.has_unnamed_entries() {
+        lists = tasks::discover_listfiles(path);
+        if !lists.is_empty() {
+            eprintln!(
+                "note: 自动发现外部清单目录 Listfiles/（{} 个文件）",
+                lists.len()
+            );
+        }
+    }
+    if !lists.is_empty() {
+        let (recovered, errors) = tasks::apply_listfiles(&mut archive, &lists);
+        for e in errors {
+            eprintln!("warning: 清单不可读: {e}");
+        }
+        if recovered > 0 {
+            eprintln!("note: 外部清单恢复 {recovered} 个文件名");
+        }
+    }
+    Ok(archive)
+}
+
 fn cmd_info(path: &Path, password: Option<&str>) -> i32 {
     let archive = match open_archive(path, password, false) {
         Ok(a) => a,
@@ -314,8 +362,8 @@ fn cmd_info(path: &Path, password: Option<&str>) -> i32 {
     0
 }
 
-fn cmd_list(path: &Path, verbose: bool, password: Option<&str>) -> i32 {
-    let archive = match open_archive(path, password, false) {
+fn cmd_list(path: &Path, verbose: bool, listfile: Vec<PathBuf>, password: Option<&str>) -> i32 {
+    let archive = match open_archive_with_listfiles(path, password, false, &listfile) {
         Ok(a) => a,
         Err(e) => return fail(e),
     };
@@ -355,9 +403,10 @@ fn cmd_extract(
     files: &[String],
     output: Option<PathBuf>,
     all_entries: bool,
+    listfile: Vec<PathBuf>,
     password: Option<&str>,
 ) -> i32 {
-    let archive = match open_archive(path, password, true) {
+    let archive = match open_archive_with_listfiles(path, password, true, &listfile) {
         Ok(a) => a,
         Err(e) => return fail(e),
     };

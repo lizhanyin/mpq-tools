@@ -20,8 +20,33 @@ Rust 实现的 MPQ 归档读取/修改库（`mpq`）与命令行工具（`mpqtoo
   LZMA 解压、storm 加密（含 key-v2 `(key+offset)^size`）、扇区 CRC
   （校验失败仅告警）
 - **`(listfile)` / `(attributes)`**：完全可选，缺失不影响打开
+- **文件名恢复**：缺 `(listfile)`（受保护地图常见）时，依次用**内置
+  游戏清单**（MPQMaster 的五个魔兽清单合并去重，77 067 个名字，zlib
+  压缩嵌入）、`war3map.imp` 导入清单，以及**已命名文件中的资源路径
+  引用**试探哈希表恢复文件名——引用扫描按工作列表推进、链条任意深：
+  `.j`/`.lua`/`.ai` 脚本字符串常量、对象数据 `w3u/w3t/...` 与
+  `Units\unitUI.slk` 等数据表内嵌的模型与图标路径（引用与实际存储
+  有差异时自动试 `.mdl`↔`.mdx` 互替）、声音定义 `w3s`、字符串表
+  `wts`，以及 **MDX 模型 TEXS chunk 内嵌的贴图路径**（定长 268
+  字节记录；具名模型与经类型识别的未命名模型均扫描）；随后按
+  War3 资源惯例做**不动点迭代**启发：同名多扩展 × 同目录/根目录
+  双向反推（模型↔贴图互换角色，TEXS 恢复的贴图可再反推同名模型、
+  新模型又有自己的 TEXS）、`.mdl`↔`.mdx` 互替、禁用图标 `dis`
+  前缀变体，直到不再有新名字。亦可用 `recover_names_with` 接入
+  任意外部清单；
+  CLI 的 `--listfile`（文件或目录）与 GUI 自动发现均基于此 ——
+  自动发现与 MPQMaster 布局对齐：归档旁 / 程序旁的裸 `(listfile)`
+  文件（社区为特定保护图逆出的专属名单，优先级最高）与
+  `Listfiles` 目录下的全部 `.txt`
+- **内容类型探测**：仍未命名的条目按魔法字节识别实际类型
+  （`MDLX`→`.mdx`、`BLP1`→`.blp`、`RIFF/WAVE`→`.wav`、裸 MP3 帧
+  →`.mp3`、PNG/JPG/GIF/DDS/TGA→图片、`MThd`→`.mid`、`ID;`→`.slk`
+  等），显示为 `<unnamed #N>.mdx` 这样的带后缀形式（提取时自动
+  清洗 Windows 非法字符落盘为 `unnamed #N.mdx`）；加密的未命名
+  条目因 key 依赖文件名，无法探测
 - **容错打开**（非必要数据允许不存在）：
-  - 缺 `(listfile)` → 仍可列出条目（名字未知），未加密文件可读
+  - 缺 `(listfile)` → 自动尝试恢复名字；仍列不出名字的条目按
+    `<unnamed #N>` 列出，未加密文件可读
   - 缺 `(attributes)`、`(signature)`、HET/BET、hi-block 表 → 正常打开
   - 归档大小字段错误、表读取越界（补零）→ 仅告警
   - 只要 hash 表或 HET 之一可用 + block 表或 BET 之一可用即可打开
@@ -70,6 +95,11 @@ mpqtool decrypt <archive> -p <密码>   # 解除密码保护
 mpqtool passwd  <archive> <旧密码> <新密码>
                                       # 更换密码（不重写数据）
 mpqtool repair [options] <archive>    # 诊断 / 修复头部元数据
+
+list / extract 额外接受 --listfile <文件|目录>（可多次）：用外部清单
+（如 MPQMaster 的 Listfiles）恢复缺失 (listfile) 归档的文件名。
+未指定时会在存在未命名条目的情况下，自动发现归档旁与可执行文件旁
+的 Listfiles 目录（目录内全部 .txt）。
 
 受密码保护的归档：info / list / extract / cat / add / delete 均可加
 `-p/--password`；未提供时 info / list 仅提示（文件名可见），读取与
@@ -225,7 +255,14 @@ cargo build --release -p mpqtool-gui
   的 FILETIME）**、地区、来源等列
 - 过滤框按全路径搜索，命中分支在树中自动展开，右侧切换为搜索结果视图
 - 勾选文件或**整棵文件夹**后「提取选中」/「提取全部」（目录选择对话框，
-  路径防逃逸）；双击文件预览文本内容
+  路径防逃逸）；双击文件预览文本内容、图片（BLP/TGA/PNG 等）与
+  **MDX 模型**（WebGL 渲染，动作序列切换 / 变速 / 轨道相机，纯黑
+  背景；模型使用的贴图（TEXS）列表面板可展开/收缩，逐条显示缩略图
+  与来源 —— 当前归档 / 老客户端 / 缺失）
+- **「设置 → 老版本 Warcraft III 目录」**：模型预览的贴图在归档里
+  找不到时，回退到该目录下的 War3Patch / War3x / War3xlocal /
+  War3local / War3.mpq（按游戏加载顺序，惰性打开）读取原版资源，
+  MDX 预览与缩略图同样走这条回退链
 - 「文件 → 导入文件到归档…」多选导入（同名自动替换），或**直接把文件
   拖进已打开归档的窗口**；勾选后「删除选中」（未命名条目也可删）；
   待办列表集中在「修改归档」窗口，「应用修改」→「保存到文件…」

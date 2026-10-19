@@ -125,8 +125,23 @@ body {
   font-weight: 600;
   flex: none;
 }
-.tree-body { flex: 1; min-height: 0; padding: 4px 0; }
-.tree-body .n-tree { height: 100%; }
+/* 树过高/过宽都在面板内滚动，不溢出到相邻区域 */
+.tree-body {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 0;
+  overflow: auto;
+}
+/* 树按最长节点展开宽度（横向滚动代替标签换行），窄内容仍铺满整行 */
+.tree-body .n-tree {
+  min-height: 100%;
+  width: max-content;
+  min-width: 100%;
+}
+.tree-body .n-tree-node-content,
+.tree-body .n-tree-node-content__text {
+  white-space: nowrap;
+}
 
 .tree-splitter {
   width: 4px;
@@ -690,6 +705,22 @@ body {
 .setting-name { font-weight: 600; }
 .setting-desc { color: var(--text-weak); font-size: 0.92em; }
 .setting-value { color: var(--text-weak); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* 老客户端目录：输入框 + 浏览/清除 + 校验提示 */
+.setting-dir { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.setting-dir .dir-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.95em;
+}
+.setting-dir .dir-input:focus { outline: none; border-color: var(--accent); }
+.dir-state { margin-top: 6px; font-size: 0.9em; color: var(--text-weak); }
+.dir-state.ok { color: var(--ok); }
 .setting-slider { display: flex; align-items: flex-start; gap: 10px; }
 .setting-slider .slider-wrap { flex: 1; min-width: 0; }
 .setting-slider .n-button { margin-top: 1px; }

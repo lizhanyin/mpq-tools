@@ -7,6 +7,23 @@
             @contextmenu.prevent></canvas>
     <!-- 右上角坐标轴指示器（随相机旋转；X 红 / Y 绿 / Z 蓝-朝上） -->
     <canvas ref="axesCv" class="mdx-axes" width="72" height="72"></canvas>
+    <!-- 模型使用的贴图（TEXS 引用）：可展开/收缩，标注来源 -->
+    <div v-if="state === 'ready' && textures.length" class="mdx-texpanel">
+      <button type="button" class="tex-head" @click="toggleTexPanel"
+              :title="texPanelOpen ? '收起贴图列表' : '展开贴图列表'">
+        <span class="tex-caret">{{ texPanelOpen ? '▾' : '▸' }}</span>
+        贴图（{{ textures.length }}）
+        <span v-if="missingCount" class="tex-miss">缺失 {{ missingCount }}</span>
+      </button>
+      <div v-show="texPanelOpen" class="tex-list">
+        <div v-for="t in textures" :key="t.path" class="tex-item" :title="t.path">
+          <img v-if="t.thumb" class="tex-thumb" :src="t.thumb" alt="" />
+          <span v-else class="tex-thumb tex-placeholder" :class="{ loading: t.thumb === undefined }"></span>
+          <span class="tex-path">{{ t.path }}</span>
+          <span class="tex-src" :class="t.source">{{ srcLabel(t.source) }}</span>
+        </div>
+      </div>
+    </div>
     <!-- 动作序列 + 播放速度：模型就绪后浮在画布左上角 -->
     <div v-if="state === 'ready'" class="mdx-toolbar">
       <n-select v-if="sequences.length" :value="seqId" :options="sequences"
@@ -27,7 +44,7 @@
    *  懒加载。贴图经 pathSolver 从归档内按名取字节（大小写不敏感），找
    *  不到时回退无贴图渲染。轨道相机参考官方示例（简化：无触屏）。
    *  viewer 内部 API 无公开类型出口，这里以 any 触达。 */
-  import { ref, onMounted, onUnmounted, watch } from 'vue'
+  import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
   import { NSelect } from 'naive-ui'
   import { S, rows, previewFile } from '../store'
   import type { Row } from '../store'
@@ -183,12 +200,13 @@
 
   // -- 方向键：←→ 切换模型文件，↑↓ 切换动作序列 ----------------------------------
 
-  /** 当前视图里的 MDX 条目（与图片 ←→ 切换同一列表口径）。 */
-  type MdxRow = { type: 'file'; entry: EntryDto & { name: string }; showFull: boolean }
-  function mdxEntries(): string[] {
+  /** 当前视图里的 MDX 条目（与图片 ←→ 切换同一列表口径；
+   *  未命名条目按识别出的 .mdx 后缀一并纳入）。 */
+  type MdxRow = { type: 'file'; entry: EntryDto; showFull: boolean }
+  function mdxEntries(): EntryDto[] {
     return rows.value.list
-      .filter((r): r is MdxRow => r.type === 'file' && !!r.entry.name && /\.mdx$/i.test(r.entry.name))
-      .map((r) => r.entry.name)
+      .filter((r): r is MdxRow => r.type === 'file' && /\.mdx$/i.test(r.entry.display))
+      .map((r) => r.entry)
   }
 
   function onKey(ev: KeyboardEvent) {
@@ -199,7 +217,7 @@
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
     if (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight') {
       const list = mdxEntries()
-      const i = list.findIndex((n) => n === S.preview?.name)
+      const i = list.findIndex((e) => e.display === S.preview?.name)
       if (i < 0 || list.length < 2) return
       const next = ev.key === 'ArrowRight' ? Math.min(i + 1, list.length - 1) : Math.max(i - 1, 0)
       if (next !== i) { ev.preventDefault(); previewFile(list[next]) }
@@ -216,36 +234,69 @@
 
   // -- 贴图按需加载 ----------------------------------------------------------------
 
-  /** 归档内条目：小写全路径 → 精确名（贴图路径大小写/分隔符不敏感匹配）。 */
-  function buildNameMap(): Map<string, string> {
-    const map = new Map<string, string>()
-    if (!S.info) return map
-    const walk = (node: any) => {
-      for (const d of node.dirs) walk(d)
-      for (const f of node.files) {
-        if (f.name) map.set(f.name.toLowerCase().replace(/\//g, '\\'), f.name)
-      }
-    }
-    walk(S.info.tree)
-    return map
-  }
-
-  const texCache = new Map<string, ArrayBuffer>() // 精确名 → 字节（会话级复用）
+  const texCache = new Map<string, ArrayBuffer>() // 路径（小写）→ 字节（会话级复用）
+  /** 解析贴图：统一走后端 —— 先查当前归档，未命中回退老客户端
+   *  MPQ 链（S.war3Dir，hash 大小写不敏感，原始拼写直接可用）。 */
   async function resolveTexture(path: string): Promise<string | ArrayBuffer> {
     const key = path.toLowerCase().replace(/\//g, '\\')
-    const exact = buildNameMap().get(key)
-    if (!exact) return path // 归档里没有 → 让加载失败，回退无贴图
-    const hit = texCache.get(exact)
+    const hit = texCache.get(key)
     if (hit) return hit
     try {
-      const b64 = await invoke<string | null>('read_file_bytes', { name: exact })
-      if (!b64) return path
+      const b64 = await invoke<string | null>('read_file_bytes', {
+        name: path, war3dir: S.war3Dir || undefined,
+      })
+      if (!b64) return path // 归档与客户端都没有 → 回退无贴图渲染
       const buf = base64ToBytes(b64)
       if (texCache.size > 40) texCache.clear() // 简单限量，防超大会话膨胀
-      texCache.set(exact, buf)
+      texCache.set(key, buf)
       return buf
     } catch {
       return path
+    }
+  }
+
+  // -- 模型使用的贴图（TEXS 引用；展开/收缩面板） -------------------------------
+
+  interface TexItem { path: string; source: string; thumb?: string | null }
+  const textures = ref<TexItem[]>([])
+  const texPanelOpen = ref(false)
+  const missingCount = computed(() => textures.value.filter((t) => t.source === 'missing').length)
+
+  function srcLabel(s: string): string {
+    return s === 'map' ? '归档' : s === 'war3' ? '客户端' : '缺失'
+  }
+
+  function toggleTexPanel() {
+    texPanelOpen.value = !texPanelOpen.value
+    if (texPanelOpen.value) loadThumbs()
+  }
+
+  /** 模型就绪后向后端要 TEXS 贴图清单（含来源判定）。 */
+  async function loadTextures() {
+    textures.value = []
+    const key = S.preview?.key
+    if (!key) return
+    try {
+      const list = await invoke<{ path: string; source: string }[]>('model_textures', {
+        key, war3dir: S.war3Dir || undefined,
+      })
+      textures.value = list.map((t) => ({ ...t, thumb: undefined }))
+    } catch {
+      textures.value = []
+    }
+  }
+
+  /** 展开时逐个取缩略图（后端解码 BLP/TGA，地图内优先、客户端回退）。 */
+  async function loadThumbs() {
+    for (const t of textures.value) {
+      if (t.thumb !== undefined) continue
+      try {
+        t.thumb = await invoke<string | null>('texture_thumbnail', {
+          path: t.path, war3dir: S.war3Dir || undefined,
+        })
+      } catch {
+        t.thumb = null
+      }
     }
   }
 
@@ -264,6 +315,7 @@
     errMsg.value = ''
     sequences.value = []
     seqId.value = null
+    textures.value = [] // 旧模型的贴图清单失效
     try {
       if (!viewer) await ensureViewer()
       if (seq !== modelSeq) return
@@ -294,6 +346,7 @@
       }
       frameModel(model)
       state.value = 'ready'
+      if (seq === modelSeq) loadTextures() // 就绪后拉取 TEXS 贴图清单
     } catch (e) {
       if (seq !== modelSeq) return
       state.value = 'error'
@@ -391,8 +444,8 @@
     position: absolute;
     inset: 0;
     overflow: hidden;
-    /* 透明 WebGL 画布透出的「摄影棚」背景：中部微亮、向下渐暗 */
-    background: radial-gradient(130% 100% at 50% 26%, #31414f 0%, #1d2a35 48%, #0e151b 100%);
+    /* 透明 WebGL 画布透出的纯黑背景（贴图 / 模型观察对比度最好） */
+    background: #000;
     cursor: grab;
   }
   .fwin-mdx.dragging { cursor: grabbing; }
@@ -427,4 +480,74 @@
     pointer-events: none;
   }
   .mdx-error { color: #ffb4a8; }
+
+  /* 模型贴图面板：左下角叠加，可展开/收缩 */
+  .mdx-texpanel {
+    position: absolute;
+    left: 8px;
+    bottom: 8px;
+    z-index: 2;
+    max-width: min(420px, calc(100% - 20px));
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(4px);
+    color: #cfd8e3;
+    font-size: 12px;
+  }
+  .tex-head {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    width: 100%;
+    padding: 5px 10px;
+    border: none;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .tex-head:hover { color: #fff; }
+  .tex-caret { width: 12px; text-align: center; }
+  .tex-miss { margin-left: auto; color: #ffb4a8; font-size: 11px; }
+  .tex-list {
+    max-height: 180px;
+    overflow-y: auto;
+    padding: 2px 0 6px;
+  }
+  .tex-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 10px;
+  }
+  .tex-item:hover { background: rgba(255, 255, 255, 0.06); }
+  .tex-thumb {
+    flex: none;
+    width: 32px;
+    height: 32px;
+    border-radius: 4px;
+    object-fit: contain;
+    background: #1a1a1a;
+  }
+  .tex-placeholder.loading { background: #262d36; }
+  .tex-path {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--mono, monospace);
+  }
+  .tex-src {
+    flex: none;
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 10px;
+    line-height: 16px;
+    background: #2a3a4a;
+  }
+  .tex-src.war3 { background: #31404f; color: #9fd0ff; }
+  .tex-src.missing { background: #4a2a2a; color: #ffb4a8; }
+
 </style>

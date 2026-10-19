@@ -69,6 +69,19 @@ pub fn extract_entries<R: Read + std::io::Seek>(
     result
 }
 
+/// 清洗路径段中 Windows 文件系统禁止的字符（`< > : " | ? *` 与控制
+/// 字符）以及结尾的点 / 空格 —— `<unnamed #3>.mdx` 落盘为
+/// `unnamed #3.mdx`。
+fn sanitize_part(part: &str) -> String {
+    let cleaned: String = part
+        .chars()
+        .filter(|&c| {
+            !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') && !c.is_control()
+        })
+        .collect();
+    cleaned.trim_end_matches(['.', ' ']).to_string()
+}
+
 /// 将归档内的名称拼接到输出目录上，拒绝路径逃逸。
 pub fn safe_join(base: &Path, name: &str) -> PathBuf {
     let mut path = base.to_path_buf();
@@ -76,6 +89,10 @@ pub fn safe_join(base: &Path, name: &str) -> PathBuf {
     for part in cleaned.split('\\') {
         if part.is_empty() || part == "." || part == ".." {
             continue; // 绝不逃出输出目录
+        }
+        let part = sanitize_part(part);
+        if part.is_empty() {
+            continue;
         }
         path.push(part);
     }
@@ -114,6 +131,100 @@ pub fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     std::fs::File::open(path)?.read_to_end(&mut buf)?;
     Ok(buf)
+}
+
+// -- 外部 listfile 清单 -----------------------------------------------
+
+/// 读取一个外部 listfile 文本（每行一个文件名，也接受 `;` 分隔；
+/// MPQMaster 的 Listfiles 即此格式）。
+pub fn load_listfile_names(path: &Path) -> std::io::Result<Vec<String>> {
+    let bytes = read_file(path)?;
+    let text = String::from_utf8_lossy(&bytes);
+    Ok(text
+        .split(['\r', '\n', ';'])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// 展开一个 listfile 路径（目录时为其中按名称排序的全部 `.txt`；
+/// 不存在的路径展开为空 —— 自动发现的目录允许缺失）。
+fn expand_listfile_path(path: &Path) -> Vec<PathBuf> {
+    if path.is_dir() {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("txt"))
+            })
+            .collect();
+        files.sort();
+        files
+    } else if path.exists() {
+        vec![path.to_path_buf()]
+    } else {
+        Vec::new()
+    }
+}
+
+/// 自动发现外部清单，与 MPQMaster 的两处来源对齐：
+/// 1. 归档所在目录与可执行文件所在目录下的裸 `(listfile)` 文件
+///    （MPQMaster 打开无 listfile 归档时自动应用之 —— 通常是社区为
+///    某张保护图逆出的专属文件名单），优先级最高；
+/// 2. 同两处的 `Listfiles` 子目录内的全部 `.txt`（按名称排序）。
+pub fn discover_listfiles(archive_path: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = archive_path.parent() {
+        dirs.push(dir.to_path_buf());
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            dirs.push(dir.to_path_buf());
+        }
+    }
+
+    let mut out: Vec<PathBuf> = Vec::new();
+    for dir in &dirs {
+        let single = dir.join("(listfile)");
+        if single.is_file() {
+            out.push(single);
+        }
+    }
+    for dir in dirs {
+        out.extend(expand_listfile_path(&dir.join("Listfiles")));
+    }
+    out
+}
+
+/// 对已打开的归档应用外部清单（文件或目录），试探 hash 表补充
+/// 文件名。返回（恢复的名字数，加载失败的清单及原因）。
+pub fn apply_listfiles<R: Read + std::io::Seek>(
+    archive: &mut mpq::Archive<R>,
+    paths: &[PathBuf],
+) -> (usize, Vec<String>) {
+    let mut recovered = 0usize;
+    let mut errors = Vec::new();
+    for path in paths {
+        let files = expand_listfile_path(path);
+        if files.is_empty() {
+            errors.push(format!("{}: 清单或目录不存在或为空", path.display()));
+            continue;
+        }
+        for file in files {
+            match load_listfile_names(&file) {
+                Ok(names) => {
+                    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                    recovered += archive.recover_names_with(refs);
+                }
+                Err(e) => errors.push(format!("{}: {e}", file.display())),
+            }
+        }
+    }
+    (recovered, errors)
 }
 
 /// 修复后归档的默认输出名称：`<stem>.fixed.<ext>`。
@@ -377,6 +488,7 @@ mod tests {
     fn entry(name: Option<&str>, size: u32, csize: u32) -> FileEntry {
         FileEntry {
             name: name.map(|s| s.to_string()),
+            guessed_ext: None,
             locale: 0,
             block_index: 0,
             offset: 0,
@@ -426,6 +538,17 @@ mod tests {
         assert_eq!(split_path("a/b\\c"), vec!["a", "b", "c"]);
         assert_eq!(split_path("..\\a\\./b"), vec!["a", "b"]);
         assert!(split_path("..").is_empty());
+    }
+
+    #[test]
+    fn safe_join_sanitizes_windows_forbidden_chars() {
+        let p = safe_join(Path::new("out"), "<unnamed #3>.mdx");
+        assert_eq!(p, Path::new("out\\unnamed #3.mdx"));
+        // 逃逸与清洗后为空的段仍然被丢弃。
+        assert_eq!(safe_join(Path::new("o"), "..\\<?>\\"), Path::new("o"));
+        // 结尾的点 / 空格会被剥掉（Windows 语义）。
+        let p = safe_join(Path::new("o"), "name. .");
+        assert_eq!(p, Path::new("o\\name"));
     }
 
     #[test]
