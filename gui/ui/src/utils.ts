@@ -30,6 +30,13 @@ export function basenameOf(path: string): string {
   return parts[parts.length - 1] || path
 }
 
+/** 路径（`\`/`/` 分隔）去掉最后一段后的目录部分（`\` 连接；根为空串）。 */
+export function dirNameOf(name: string): string {
+  const parts = String(name).split(/[\\/]/)
+  parts.pop()
+  return parts.join('\\')
+}
+
 /** 与后端 imagepreview 一致的图片扩展名（原生直读 + TGA/BLP 解码）。 */
 const IMAGE_EXTS = new Set([
   'png', 'jpg', 'jpeg', 'jfif', 'gif', 'bmp', 'dib',

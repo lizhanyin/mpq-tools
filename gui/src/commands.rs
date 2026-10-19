@@ -434,6 +434,54 @@ pub fn stage_edited_file(
     })
 }
 
+#[derive(Deserialize)]
+pub struct MoveSpec {
+    /// 选择键 `"<source>:<block_index>"`——定位要移动的源条目。
+    pub key: String,
+    /// 移动后的完整归档内名称（已含目标目录前缀）。
+    pub name: String,
+}
+
+/// 「移动」的数据准备：把选中条目的内容读出并写入临时文件，返回值供
+/// 前端按新名字排队为「待导入」（配合删除旧条目，在「修改归档」窗口
+/// 应用后生效）。逐条读取：任何一条失败都中止本次移动，避免只移动一半。
+#[tauri::command]
+pub fn stage_move_files(moves: Vec<MoveSpec>, state: St) -> Result<Vec<StagedDto>, String> {
+    let s = lock(&state);
+    let Some(archive) = &s.archive else {
+        return Err("未打开归档".to_string());
+    };
+    let dir = std::env::temp_dir().join("mpqtool-move");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    let mut out = Vec::new();
+    for m in &moves {
+        let (source, index) = parse_key(&m.key).ok_or_else(|| format!("无效的表键 {}", m.key))?;
+        let entry = s
+            .entries
+            .iter()
+            .find(|e| e.source == source && e.block_index == index)
+            .ok_or_else(|| format!("找不到条目 {}", m.key))?;
+        let old = entry
+            .name
+            .as_deref()
+            .ok_or_else(|| "未命名条目没有名字，无法移动。".to_string())?;
+        let data = archive
+            .read_file(old)
+            .map_err(|e| format!("读取 {old} 失败：{e}"))?;
+        // 临时文件按选择键命名（`:` 在 Windows 文件名中非法，换成 `_`）；
+        // 同一条目再次移动时后者覆盖前者。
+        let file = dir.join(format!("{}.tmp", m.key.replace(':', "_")));
+        std::fs::write(&file, &data).map_err(|e| format!("写入临时文件失败：{e}"))?;
+        out.push(StagedDto {
+            name: m.name.clone(),
+            path: file.to_string_lossy().to_string(),
+            size: data.len(),
+            replaces: archive.find_file(&m.name).is_some(),
+        });
+    }
+    Ok(out)
+}
+
 #[derive(Serialize)]
 pub struct ExtractDto {
     pub ok: usize,

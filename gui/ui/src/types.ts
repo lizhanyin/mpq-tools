@@ -153,6 +153,14 @@ export interface AddSpec {
   path: string
 }
 
+/** stage_move_files 的单个移动项（参数）。 */
+export interface MoveSpec {
+  /** 选择键 `"<source>:<block_index>"`——定位要移动的源条目。 */
+  key: string
+  /** 移动后的完整归档内名称（已含目标目录前缀）。 */
+  name: string
+}
+
 /** apply_modify 的待删除项（参数）。 */
 export interface DelSpec {
   /** 已知名称时按名称删除（会删除所有 locale 变体）。 */

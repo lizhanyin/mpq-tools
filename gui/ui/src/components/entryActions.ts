@@ -8,7 +8,7 @@ import type { DropdownOption } from 'naive-ui'
 import {
   S, rows, navigate, previewFile, log, entryByKey,
   toggleSelected, toggleDirSelected, setSelectedKeys,
-  extractKeys, markDeletions,
+  extractKeys, markDeletions, startMoveModal,
 } from '../store'
 import type { Row } from '../store'
 import { collectKeys } from '../utils'
@@ -18,7 +18,7 @@ import { toast } from '../toast'
 // -- 行的选中语义 ---------------------------------------------------------------
 
 /** 行对应的条目 key：目录行 = 其下全部文件（递归，与勾选列一致），文件行 = 自身。 */
-function rowKeys(row: Row): string[] {
+export function rowKeys(row: Row): string[] {
   return row.type === 'dir' ? collectKeys(row.node) : [row.entry.key]
 }
 
@@ -150,6 +150,7 @@ export const ctxOptions = computed((): DropdownOption[] => {
       { label: `提取选中项（${n} 个文件）…`, key: 'batch-extract' },
       { label: `复制名称（${n} 项）`, key: 'batch-copy' },
       { type: 'divider', key: 'd1' },
+      { label: `移动选中项到…（${n} 个文件）`, key: 'batch-move' },
       { label: `删除选中项（${n} 个文件）`, key: 'batch-delete' },
     ]
   }
@@ -159,6 +160,7 @@ export const ctxOptions = computed((): DropdownOption[] => {
       { label: dirAllSelected(row.node) ? '取消选中' : '选中', key: 'dir-select' },
       { label: '提取…', key: 'dir-extract' },
       { type: 'divider', key: 'd1' },
+      { label: '移动到…', key: 'dir-move', disabled: row.node.file_count === 0 },
       { label: '复制文件夹名', key: 'copy-name' },
       { type: 'divider', key: 'd2' },
       { label: '删除', key: 'dir-delete', disabled: row.node.file_count === 0 },
@@ -171,6 +173,7 @@ export const ctxOptions = computed((): DropdownOption[] => {
     { label: S.selected.has(e.key) ? '取消选中' : '选中', key: 'toggle' },
     { label: '复制文件名', key: 'copy-name' },
     { type: 'divider', key: 'd1' },
+    { label: '移动到…', key: 'move', disabled: !e.name },
     { label: '删除', key: 'delete' },
   ]
 })
@@ -181,11 +184,13 @@ export function onCtxSelect(key: string | number) {
   if (!row) return
   if (key === 'batch-extract') { extractKeys([...S.selected]); return }
   if (key === 'batch-copy') { copyText(selectedNames().join('\n'), `${S.selected.size} 个名称`); return }
+  if (key === 'batch-move') { startMoveModal([...S.selected]); return }
   if (key === 'batch-delete') { markDeletions([...S.selected]); return }
   if (row.type === 'dir') {
     if (key === 'enter') openRow(row)
     else if (key === 'dir-select') toggleDirSelected(row.node, !dirAllSelected(row.node))
     else if (key === 'dir-extract') extractKeys(collectKeys(row.node))
+    else if (key === 'dir-move') startMoveModal(collectKeys(row.node))
     else if (key === 'copy-name') copyText(row.node.name)
     else if (key === 'dir-delete') markDeletions(collectKeys(row.node))
     return
@@ -194,6 +199,7 @@ export function onCtxSelect(key: string | number) {
   if (key === 'preview') { if (e.name) previewFile(e.name) }
   else if (key === 'extract') extractKeys([e.key])
   else if (key === 'toggle') toggleSelected(e.key, !S.selected.has(e.key))
+  else if (key === 'move') startMoveModal([e.key])
   else if (key === 'copy-name') copyText(e.name || e.display)
   else if (key === 'delete') markDeletions([e.key])
 }

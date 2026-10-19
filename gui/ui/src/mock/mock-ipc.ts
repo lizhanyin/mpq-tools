@@ -239,6 +239,12 @@ const MOCKS: Record<string, (args: any) => unknown> = {
     size: text.length,
     replaces: name === 'war3map.j',
   }),
+  stage_move_files: ({ moves }: any) => moves.map((m: any) => ({
+    name: m.name,
+    path: `C:\\Users\\dev\\AppData\\Local\\Temp\\mpqtool-move\\${m.key.replace(':', '_')}.tmp`,
+    size: 48213,
+    replaces: m.name.toLowerCase() === 'war3map.j',
+  })),
   extract: ({ keys, dir }: any) => ({
     ok: keys.length || 11,
     failed: 0,

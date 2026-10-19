@@ -28,6 +28,7 @@ fn main() {
             commands::thumbnail,
             commands::read_file_bytes,
             commands::stage_edited_file,
+            commands::stage_move_files,
             commands::extract,
             commands::diagnose_archive,
             commands::apply_repair,

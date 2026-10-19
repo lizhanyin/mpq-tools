@@ -6,7 +6,7 @@ import * as U from './utils'
 import { toast } from './toast'
 import type {
   ArchiveInfoDto, ConvertDto, DiagnoseDto, EntryDto, ExtractDto,
-  ImportStatDto, IssueDto, NoteDto, OpenResult, PreviewDto, StagedDto,
+  ImportStatDto, IssueDto, MoveSpec, NoteDto, OpenResult, PreviewDto, StagedDto,
   TreeNodeDto,
 } from './types'
 
@@ -47,6 +47,8 @@ export interface ImportItem {
   path: string
   size: number
   replaces: boolean
+  /** 「移动」排队的条目记录的原归档名；应用后据此不保留被搬空的源目录。 */
+  movedFrom?: string | null
 }
 
 /** 「修改归档 → 待删除」的单个条目。 */
@@ -93,6 +95,13 @@ export interface RepairState {
   applied: boolean
 }
 
+/** 「移动到…」窗口状态：keys 为要移动的条目，target 为目标路径段
+ *  （[] = 归档根）。 */
+export interface MoveState {
+  keys: string[]
+  target: string[]
+}
+
 export type PwMode = 'unlock' | 'set' | 'change' | 'remove'
 
 /** 密码弹窗状态（四种 mode 共用一组输入，按 mode 取用）。 */
@@ -125,6 +134,7 @@ interface AppState {
   repair: RepairState | null
   modify: ModifyState | null
   newFolder: { name: string } | null
+  move: MoveState | null       // 「移动到」弹窗
   create: CreateState | null   // 新建归档弹窗
   convert: ConvertState | null // 版本转换弹窗
   pw: PwState | null           // 密码弹窗
@@ -154,6 +164,7 @@ export const S = reactive<AppState>({
   repair: null,
   modify: null,
   newFolder: null,
+  move: null,
   create: null,
   convert: null,
   pw: null,
@@ -179,7 +190,7 @@ export const lockedArchive = computed(() => !!S.info?.locked)
 
 /** 是否有任意弹窗/浮窗打开（此时拖拽导入被忽略，见 App.vue）。 */
 export const anyModalOpen = computed(() =>
-  !!(S.modify || S.create || S.convert || S.pw || S.repair || S.preview || S.newFolder || S.settingsOpen))
+  !!(S.modify || S.create || S.convert || S.pw || S.repair || S.preview || S.newFolder || S.move || S.settingsOpen))
 
 /** key → entry 的扁平映射（按需构建，info 变化时自动重建）。 */
 export const entryByKey = computed(() => {
@@ -356,6 +367,7 @@ export function closeArchive() {
   S.preview = null
   S.modify = null
   S.newFolder = null
+  S.move = null
   S.convert = null
   S.repair = null
   S.pw = null
@@ -731,7 +743,8 @@ function splitFolderName(input: string): string[] | null {
 }
 
 /** 「新建文件夹」确认：沿当前目录逐级补齐缺失的目录节点（大小写
- *  不敏感复用已有），成功后进入该目录并展开树的祖先分支。 */
+ *  不敏感复用已有）。不进入新目录——留在当前位置，仅展开树的祖先
+ *  分支让新文件夹立即可见。 */
 export function createFolder() {
   const f = S.newFolder
   if (!f || !S.info) return
@@ -753,17 +766,110 @@ export function createFolder() {
       node.dirs.sort((a, b) =>
         a.name.toLowerCase() < b.name.toLowerCase() ? -1 : a.name.toLowerCase() > b.name.toLowerCase() ? 1 : 0)
       created++
-      S.expanded.push(U.folderKey(full))
     }
     full.push(seg)
     node = next
   }
   S.newFolder = null
   setFilter('') // 退出搜索视图，让新文件夹可见
-  navigate(full)
-  if (!created) { toast.info('文件夹已存在，已进入该文件夹。'); return }
+  // 展开整条祖先链，让新文件夹在目录树中可见（不导航进入）。
+  let key = ''
+  for (const seg of full) {
+    key = key ? `${key}\\${seg.toLowerCase()}` : seg.toLowerCase()
+    if (!S.expanded.includes(key)) S.expanded.push(key)
+  }
+  if (!created) { toast.info('文件夹已存在。'); return }
   log(`已新建文件夹 ${full.join('\\')}——空文件夹不会写入归档，导入文件到其中并应用修改后生效`)
   toast.success(`已新建文件夹：${full.join('\\')}（导入文件后保存才会写入归档）`)
+}
+
+// ---------------------------------------------------------------------------
+// 移动（把条目挪到别的文件夹：以新名字排队待导入 + 标记旧条目待删除）
+
+/** 弹出「移动到…」窗口：keys 为要移动的条目（通常来自当前选择），
+ *  目标默认为当前文件夹（特殊目录退化为归档根）。 */
+export function startMoveModal(keys: string[]) {
+  if (!S.info) { toast.info('请先打开一个归档。'); return }
+  if (keys.length === 0) { toast.info('未选择任何文件。'); return }
+  const base = (S.cwd[0] === SYSTEM_DIR || S.cwd[0] === UNNAMED_DIR) ? [] : S.cwd
+  S.move = { keys: [...keys], target: [...base] }
+}
+
+export function closeMoveModal() {
+  S.move = null
+}
+
+/** 把一组条目移动到 targetDir（路径段数组，[] = 归档根）：内容经
+ *  stage_move_files 读入临时文件后按新名字排队为「待导入」，旧条目
+ *  按选择键标记待删除——都在「修改归档」窗口应用后生效。
+ *  未命名条目（没有名字无法重命名）与已在目标文件夹中的条目跳过。 */
+export async function moveKeysTo(keys: string[], targetDir: string[]) {
+  if (!S.info) return
+  if (targetDir[0] === SYSTEM_DIR || targetDir[0] === UNNAMED_DIR) {
+    toast.error('不能移动到该特殊文件夹。')
+    return
+  }
+  const targetName = targetDir.join('\\')
+  const targetLower = targetName.toLowerCase()
+
+  const moves: MoveSpec[] = []
+  let unnamed = 0, already = 0
+  for (const k of keys) {
+    const e = entryByKey.value.get(k)
+    if (!e) continue
+    if (!e.name) { unnamed++; continue } // 没有名字无法以新路径写回
+    if (U.dirNameOf(e.name).toLowerCase() === targetLower) { already++; continue }
+    // 不同来源的同名文件移到同一处：只保留最后一个（与待导入去重一致）。
+    const name = targetName ? `${targetName}\\${U.baseName(e.name)}` : U.baseName(e.name)
+    const dup = moves.findIndex((m) => m.name.toLowerCase() === name.toLowerCase())
+    if (dup >= 0) moves[dup] = { key: k, name }
+    else moves.push({ key: k, name })
+  }
+  if (unnamed) log(`（${U.fmtBytes(unnamed)} 个未命名条目没有名字，无法移动）`)
+  if (moves.length === 0) {
+    toast.info(already > 0 ? '所选条目已在目标文件夹中。' : '没有可移动的条目。')
+    return
+  }
+
+  let staged: StagedDto[]
+  try {
+    staged = await ipc.invoke<StagedDto[]>('stage_move_files', { moves })
+  } catch (e) {
+    log(String(e))
+    toast.error(String(e))
+    return
+  }
+
+  S.modify ??= defaultModify()
+  const m = S.modify
+  // 待导入：同名（大小写不敏感）后者取代前者，与 mergeStats 一致；
+  // movedFrom 记录旧名字，应用后据此不保留被搬空的源目录。
+  const idxByName = new Map(m.additions.map((a, i) => [a.name.toLowerCase(), i] as const))
+  for (let i = 0; i < staged.length; i++) {
+    const st = staged[i]
+    const from = entryByKey.value.get(moves[i].key)?.name || null
+    const lower = st.name.toLowerCase()
+    const dupIdx = idxByName.get(lower) ?? -1
+    const item: ImportItem = { name: st.name, path: st.path, size: st.size, replaces: st.replaces || dupIdx >= 0, movedFrom: from }
+    if (dupIdx >= 0) m.additions[dupIdx] = item
+    else m.additions.push(item)
+    idxByName.set(lower, dupIdx >= 0 ? dupIdx : m.additions.length - 1)
+  }
+  // 旧条目标记待删除（name 留空 → 按选择键精确删除）。
+  const sorted = [...moves].sort((a, b) => {
+    const [sa, ia] = a.key.split(':'), [sb, ib] = b.key.split(':')
+    return sa === sb ? (+ia) - (+ib) : sa.localeCompare(sb)
+  })
+  for (const mv of sorted) {
+    if (m.deletions.some((d) => d.key === mv.key)) continue
+    const entry = entryByKey.value.get(mv.key)
+    if (!entry) continue
+    m.deletions.push({ display: entry.name || entry.display, name: null, key: mv.key })
+  }
+
+  const where = targetName || '归档根目录'
+  log(`已标记移动 ${U.fmtBytes(staged.length)} 个文件到 ${where}——在「修改归档」窗口应用后生效`)
+  toast.success(`已标记移动 ${U.fmtBytes(staged.length)} 个文件到 ${where}（在「修改归档」中确认写入）`)
 }
 
 export function deleteSelected() {

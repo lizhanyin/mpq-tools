@@ -38,10 +38,11 @@
               </div>
               <div v-else class="pending-list">
                 <div v-for="(a, i) in S.modify.additions" :key="a.name + i" class="pending-row">
-                  <n-tag size="small" round :bordered="false" :type="a.replaces ? 'warning' : 'success'">
-                    {{ a.replaces ? '替换' : '新增' }}
+                  <n-tag size="small" round :bordered="false"
+                         :type="a.movedFrom ? 'info' : a.replaces ? 'warning' : 'success'">
+                    {{ a.movedFrom ? '移动' : a.replaces ? '替换' : '新增' }}
                   </n-tag>
-                  <span class="name" :title="a.name">{{ baseNameOf(a.name) }}</span>
+                  <span class="name" :title="a.movedFrom ? `${a.movedFrom} → ${a.name}` : a.name">{{ baseNameOf(a.name) }}</span>
                   <span class="meta">{{ fmtBytes(a.size) }} 字节</span>
                   <n-button size="tiny" quaternary type="error" class="remove"
                             :disabled="busy" title="移除该项"
