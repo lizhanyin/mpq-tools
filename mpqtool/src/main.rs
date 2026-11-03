@@ -178,6 +178,51 @@ enum Command {
         #[arg(long)]
         no_deep: bool,
     },
+    /// 对比新归档与基线（旧归档），把新增 / 修改过的文件打包成
+    /// 一份独立的补丁归档（patch.mpq）。
+    Patch {
+        /// 新归档（差异以它为准）。
+        archive: PathBuf,
+        /// 基线（旧）归档。
+        #[arg(short, long)]
+        baseline: PathBuf,
+        /// 输出文件（默认：<新归档名>-patch.mpq）。
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// 补丁的头部版本 1–4（默认：与新归档一致）。
+        #[arg(long, value_name = "1-4")]
+        version: Option<u32>,
+        /// 外部 listfile 清单（文件或目录，可多次给出），用于恢复
+        /// 缺失 `(listfile)` 归档的文件名。
+        #[arg(long = "listfile", value_name = "FILE")]
+        listfile: Vec<PathBuf>,
+        #[command(flatten)]
+        pw: PasswordArg,
+    },
+    /// 把来源归档的文件合并进目标归档：来源独有的直接导入，
+    /// 同名且内容不同的默认以来源覆盖（--no-overwrite 跳过）。
+    Merge {
+        /// 目标归档（合并的写入对象）。
+        archive: PathBuf,
+        /// 来源归档（合并的内容）。
+        #[arg(short, long)]
+        source: PathBuf,
+        /// 同名但内容不同的文件保持目标版本，不覆盖。
+        #[arg(long)]
+        no_overwrite: bool,
+        /// 输出文件（默认：原地修改目标）。
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// 将重新编码的 key-v2 文件存为未加密。
+        #[arg(long)]
+        no_reencrypt_key2: bool,
+        /// 外部 listfile 清单（文件或目录，可多次给出），用于恢复
+        /// 缺失 `(listfile)` 归档的文件名。
+        #[arg(long = "listfile", value_name = "FILE")]
+        listfile: Vec<PathBuf>,
+        #[command(flatten)]
+        pw: PasswordArg,
+    },
 }
 
 fn main() {
@@ -234,6 +279,31 @@ fn main() {
             output,
             no_deep,
         }) => cmd_repair(&archive, dry_run, in_place, output, !no_deep),
+        Some(Command::Patch {
+            archive,
+            baseline,
+            output,
+            version,
+            listfile,
+            pw,
+        }) => cmd_patch(&archive, &baseline, output, version, listfile, pw.password.as_deref()),
+        Some(Command::Merge {
+            archive,
+            source,
+            no_overwrite,
+            output,
+            no_reencrypt_key2,
+            listfile,
+            pw,
+        }) => cmd_merge(
+            &archive,
+            &source,
+            no_overwrite,
+            output,
+            !no_reencrypt_key2,
+            listfile,
+            pw.password.as_deref(),
+        ),
     };
     std::process::exit(code);
 }
@@ -694,6 +764,186 @@ fn cmd_delete(
         .map(|n| mpq::Deletion::ByName(n.clone()))
         .collect();
     run_modify(path, password, deletions, Vec::new(), output, reencrypt_key2)
+}
+
+// -- patch / merge ---------------------------------------------------------------
+
+/// 打印 diff 摘要并返回各类别的名字（Added / Changed）。
+/// `old_label` 为旧一侧的称呼（patch 场景「基线」、merge 场景「目标」）。
+/// 读取失败与未命名条目的说明一并输出。
+fn print_diff_summary(report: &mpq::DiffReport, old_label: &str) -> (Vec<String>, Vec<String>) {
+    use mpq::DiffKind::{Added, Changed, Removed, Same};
+    let mut added = Vec::new();
+    let mut changed = Vec::new();
+    let mut same = 0;
+    let mut removed = Vec::new();
+    for e in &report.entries {
+        match e.kind {
+            Added => added.push(e.name.clone()),
+            Changed => changed.push(e.name.clone()),
+            Same => same += 1,
+            Removed => removed.push(e.name.clone()),
+        }
+    }
+    println!("新增 {}：{}", added.len(), names_preview(&added));
+    println!("修改 {}：{}", changed.len(), names_preview(&changed));
+    println!("相同 {same}");
+    println!(
+        "仅{old_label}有 {}：{}（不会被改动，仅供知悉）",
+        removed.len(),
+        names_preview(&removed)
+    );
+    for e in &report.read_errors {
+        eprintln!("warning: 内容比较失败，按修改处理：{e}");
+    }
+    if report.unnamed_old > 0 || report.unnamed_new > 0 {
+        eprintln!(
+            "note: 未命名条目不参与对比（{}侧 {} 个、另一侧 {} 个——没有名字无法配对）",
+            old_label, report.unnamed_old, report.unnamed_new
+        );
+    }
+    (added, changed)
+}
+
+/// 名字列表的单行预览：最多 8 个，超出部分以「等 N 项」收尾。
+fn names_preview(names: &[String]) -> String {
+    if names.is_empty() {
+        return "（无）".to_string();
+    }
+    const MAX: usize = 8;
+    let head: Vec<&str> = names.iter().take(MAX).map(|s| s.as_str()).collect();
+    if names.len() > MAX {
+        format!("{} … 等共 {} 项", head.join("、"), names.len())
+    } else {
+        head.join("、")
+    }
+}
+
+fn cmd_patch(
+    path: &Path,
+    baseline: &Path,
+    output: Option<PathBuf>,
+    version: Option<u32>,
+    listfile: Vec<PathBuf>,
+    password: Option<&str>,
+) -> i32 {
+    // 补丁内容全部来自新归档；两侧都尽量恢复文件名（无名条目无法配对）。
+    let new = match open_archive_with_listfiles(path, password, true, &listfile) {
+        Ok(a) => a,
+        Err(e) => return fail(e),
+    };
+    let old = match open_archive_with_listfiles(baseline, password, false, &listfile) {
+        Ok(a) => a,
+        Err(e) => return fail(e),
+    };
+    print_warnings(&new);
+    print_warnings(&old);
+
+    let report = match mpq::diff_archives(&old, &new, None) {
+        Ok(r) => r,
+        Err(e) => return fail(e),
+    };
+    println!("对比 {}（新）与 {}（基线）：", path.display(), baseline.display());
+    let (added, changed) = print_diff_summary(&report, "基线");
+
+    let mut names = added;
+    names.extend(changed);
+    if names.is_empty() {
+        println!("没有差异，未生成补丁。");
+        return 0;
+    }
+
+    let target = match version {
+        Some(v) => match v {
+            1 => FormatVersion::V1,
+            2 => FormatVersion::V2,
+            3 => FormatVersion::V3,
+            4 => FormatVersion::V4,
+            _ => {
+                eprintln!("error: 无效版本 v{v}（应为 1–4）");
+                return 1;
+            }
+        },
+        None => new.version(),
+    };
+    let outcome = match tasks::build_patch(&new, &names, target, None, None) {
+        Ok(o) => o,
+        Err(e) => return fail(e),
+    };
+    println!(
+        "补丁包含 {} 个文件（v{}）：{}",
+        names.len(),
+        target.as_u32(),
+        names_preview(&names)
+    );
+    let _ = &outcome.report; // 空基线上全部为新增，报告内容已在上方给出
+
+    let out_path = output.unwrap_or_else(|| {
+        let mut p = PathBuf::from(path);
+        p.set_file_name(format!(
+            "{}-patch.mpq",
+            p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+        ));
+        p
+    });
+    write_outcome(path, Some(out_path), &outcome.bytes)
+}
+
+fn cmd_merge(
+    path: &Path,
+    source: &Path,
+    no_overwrite: bool,
+    output: Option<PathBuf>,
+    reencrypt_key2: bool,
+    listfile: Vec<PathBuf>,
+    password: Option<&str>,
+) -> i32 {
+    // 目标是要被修改的归档（run_modify 自行处理受保护与写盘）；
+    // 来源只读取内容，同样需要名字恢复。
+    let target = match open_archive_with_listfiles(path, password, false, &listfile) {
+        Ok(a) => a,
+        Err(e) => return fail(e),
+    };
+    let src = match open_archive_with_listfiles(source, password, true, &listfile) {
+        Ok(a) => a,
+        Err(e) => return fail(e),
+    };
+    print_warnings(&target);
+    print_warnings(&src);
+
+    let report = match mpq::diff_archives(&target, &src, None) {
+        Ok(r) => r,
+        Err(e) => return fail(e),
+    };
+    println!("合并 {} 到 {}：", source.display(), path.display());
+    let (added, changed) = print_diff_summary(&report, "目标");
+    let overridden: Vec<String> = if no_overwrite {
+        Vec::new()
+    } else {
+        changed.clone()
+    };
+    if no_overwrite && !changed.is_empty() {
+        println!("--no-overwrite：{} 个同名文件保持目标版本", changed.len());
+    }
+
+    let mut names = added;
+    names.extend(overridden.iter().cloned());
+    if names.is_empty() {
+        println!("没有需要合并的内容。");
+        return 0;
+    }
+
+    let mut additions: Vec<(String, Vec<u8>)> = Vec::with_capacity(names.len());
+    for name in &names {
+        match src.read_file(name) {
+            Ok(data) => additions.push((name.clone(), data)),
+            Err(e) => {
+                eprintln!("error: 从来源读取 {name} 失败：{e}");
+                return 1;
+            }
+        }
+    }
+    run_modify(path, password, Vec::new(), additions, output, reencrypt_key2)
 }
 
 // -- 密码保护 ---------------------------------------------------------

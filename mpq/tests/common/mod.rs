@@ -457,7 +457,11 @@ fn encode_file(f: &FileSpec, block_pos: u64, sector_size: u32) -> (Vec<u8>, u32,
     let mut crcs: Vec<u32> = Vec::with_capacity(nsec);
     for chunk in f.data.chunks(sector_size as usize) {
         let z = zlib(chunk);
-        let sector = if z.len() < chunk.len() {
+        // 比较须计入 1 字节 method 前缀：压缩 sector 只有在严格更短时
+        // 才可辨识——读取器以「存储长度 < 解压长度」判定 sector 需要
+        // 解压，恰好等长的压缩 sector 会被误当作明文（StormLib 写入
+        // 侧同样只在整体更短时压缩）。
+        let sector = if z.len() + 1 < chunk.len() {
             let mut s = vec![0x02u8];
             s.extend_from_slice(&z);
             s

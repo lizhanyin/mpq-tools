@@ -7,7 +7,7 @@ import { SYSTEM_DIR, UNNAMED_DIR, folderKey } from './utils'
 import * as U from './utils'
 import { toast } from './toast'
 import type {
-  ArchiveInfoDto, ConvertDto, DiagnoseDto, EntryDto, ExtractDto,
+  ArchiveInfoDto, ConvertDto, DiagnoseDto, DiffResultDto, EntryDto, ExtractDto,
   ImportProgress, ImportStatDto, IssueDto, MoveSpec, NoteDto, OpenResult, PreviewDto, StagedDto,
   SearchDto, TreeNodeDto,
 } from './types'
@@ -90,6 +90,32 @@ export interface ConvertState {
   running: boolean
 }
 
+/** 「生成补丁」窗口状态：当前归档 = 新文件，与磁盘上选择的旧基线
+ *  对比，勾选的差异（新增 + 修改）打包成独立的 patch.mpq。 */
+export interface PatchState {
+  /** 旧（基线）文件路径；选好后立即对比。 */
+  oldPath: string | null
+  diff: DiffResultDto | null
+  loading: boolean      // 对比进行中
+  /** added + changed 默认全选；记录被取消勾选的名字（小写）。 */
+  unchecked: Set<string>
+  /** 补丁容器版本；null = 跟随当前归档。 */
+  version: number | null
+  busy: boolean         // 生成进行中
+}
+
+/** 「合并归档」窗口状态：把磁盘上选择的来源归档合并进当前归档。
+ *  来源独有（added）直接导入；同名不同内容（changed）即「覆盖」项，
+ *  默认全选覆盖，可一键全选 / 全不选。 */
+export interface MergeState {
+  sourcePath: string | null
+  diff: DiffResultDto | null
+  loading: boolean
+  /** added + changed 默认全选；记录被取消勾选的名字（小写）。 */
+  unchecked: Set<string>
+  staging: boolean      // 正在读取来源内容写临时文件
+}
+
 /** 「新建归档」窗口状态。 */
 export interface CreateState {
   version: number
@@ -151,6 +177,8 @@ interface AppState {
   move: MoveState | null       // 「移动到」弹窗
   create: CreateState | null   // 新建归档弹窗
   convert: ConvertState | null // 版本转换弹窗
+  patch: PatchState | null     // 生成补丁弹窗
+  merge: MergeState | null     // 合并归档弹窗
   pw: PwState | null           // 密码弹窗
   settingsOpen: boolean
   aboutOpen: boolean           // 「关于」弹窗
@@ -193,6 +221,8 @@ export const S = reactive<AppState>({
   move: null,
   create: null,
   convert: null,
+  patch: null,
+  merge: null,
   pw: null,
   settingsOpen: false,
   aboutOpen: false,
@@ -219,7 +249,7 @@ export const lockedArchive = computed(() => !!S.info?.locked)
 
 /** 是否有任意弹窗/浮窗打开（此时拖拽导入被忽略，见 App.vue）。 */
 export const anyModalOpen = computed(() =>
-  !!(S.modify || S.create || S.convert || S.pw || S.repair || S.preview || S.newFolder || S.move || S.settingsOpen || S.aboutOpen))
+  !!(S.modify || S.create || S.convert || S.patch || S.merge || S.pw || S.repair || S.preview || S.newFolder || S.move || S.settingsOpen || S.aboutOpen))
 
 /** key → entry 的累积缓存：打开时的根目录、每次 list_dir / 搜索 /
  * 目录递归条目都汇入（代替原先对整棵树的一次性遍历——懒加载后前端
@@ -893,12 +923,13 @@ function progressChannel(): Channel<ImportProgress> {
   return ch
 }
 
-/** 进度文案：读取中 / 准备中 / 导入中 / 校验中 / 保存中 + 计数或百分比。 */
+/** 进度文案：读取中 / 准备中 / 对比中 / 导入中 / 校验中 / 保存中 + 计数或百分比。 */
 export function importProgressLabel(p: ImportProgress | null): string {
   if (!p) return ''
   if (p.phase === 'saving') return '保存中…'
   if (p.phase === 'preparing') return '准备中…'
-  const name = p.phase === 'reading' ? '读取中' : p.phase === 'encoding' ? '导入中' : '校验中'
+  const name = p.phase === 'reading' ? '读取中' : p.phase === 'encoding' ? '导入中'
+    : p.phase === 'diffing' ? '对比中' : '校验中'
   const count = p.total > 0 ? `${p.done}/${p.total}` : `已发现 ${p.done} 项`
   const pct = p.total > 0 ? `（${importProgressPercent(p)}%）` : ''
   return `${name} ${count}${pct}`
@@ -1133,6 +1164,147 @@ export async function moveKeysTo(keys: string[], targetDir: string[]) {
   const where = targetName || '归档根目录'
   log(`已标记移动 ${U.fmtBytes(staged.length)} 个文件到 ${where}——在「修改归档」窗口应用后生效`)
   toast.success(`已标记移动 ${U.fmtBytes(staged.length)} 个文件到 ${where}（在「修改归档」中确认写入）`)
+}
+
+// ---------------------------------------------------------------------------
+// 生成补丁 / 合并归档（当前归档 + 磁盘上选择的另一个归档）
+
+/** 弹出「生成补丁」：当前归档作为新文件，另选旧基线对比。 */
+export function startPatch() {
+  if (!S.info) { toast.info('请先打开一个归档。'); return }
+  S.patch = { oldPath: null, diff: null, loading: false, unchecked: new Set(), version: null, busy: false }
+}
+
+export function closePatch() {
+  S.patch = null
+}
+
+/** 弹出「合并归档」：另选来源归档合并进当前归档。 */
+export function startMerge() {
+  if (!S.info) { toast.info('请先打开一个归档。'); return }
+  S.merge = { sourcePath: null, diff: null, loading: false, unchecked: new Set(), staging: false }
+}
+
+export function closeMerge() {
+  S.merge = null
+}
+
+/** 执行对比（两个弹窗共用）：调 diff_with_disk，结果落到弹窗状态。
+ *  期间经 Channel 上报「对比中」进度（弹窗内的进度条显示）。 */
+async function runDiff(target: PatchState | MergeState, path: string, baseline: boolean) {
+  target.diff = null
+  target.unchecked = new Set()
+  target.loading = true
+  S.importProgress = { phase: 'diffing', done: 0, total: 0 }
+  try {
+    target.diff = await ipc.invoke<DiffResultDto>('diff_with_disk', {
+      path, baseline, onProgress: progressChannel(),
+    })
+  } catch (e) {
+    log(String(e))
+    toast.error(String(e))
+  } finally {
+    target.loading = false
+    S.importProgress = null
+  }
+}
+
+/** 选择旧（基线）文件并立即对比。 */
+export async function pickPatchBaseline() {
+  const p = S.patch
+  if (!p || p.loading) return
+  const path = await ipc.dialogOpen({ title: '选择旧文件（基线归档）', filters: ARCHIVE_FILTERS })
+  if (!path || Array.isArray(path)) return
+  p.oldPath = path
+  await runDiff(p, path, true)
+}
+
+/** 选择合并来源归档并立即对比。 */
+export async function pickMergeSource() {
+  const m = S.merge
+  if (!m || m.loading) return
+  const path = await ipc.dialogOpen({ title: '选择要合并进来的来源归档', filters: ARCHIVE_FILTERS })
+  if (!path || Array.isArray(path)) return
+  m.sourcePath = path
+  await runDiff(m, path, false)
+}
+
+/** 差异列表中默认勾选（added + changed）且未被取消的名字。 */
+function pickedDiffNames(d: DiffResultDto, unchecked: Set<string>): string[] {
+  return d.entries
+    .filter((e) => (e.kind === 'added' || e.kind === 'changed') && !unchecked.has(e.name.toLowerCase()))
+    .map((e) => e.name)
+}
+
+/** 「生成补丁」确认：选择保存位置 → 后端提取选中文件并打包写出。
+ *  读取 → 编码 → 自检的进度显示在弹窗内。 */
+export async function confirmBuildPatch() {
+  const p = S.patch
+  if (!p || !p.diff || p.busy) return
+  const names = pickedDiffNames(p.diff, p.unchecked)
+  if (!names.length) { toast.info('请至少勾选一个差异文件。'); return }
+  const out = await ipc.dialogSave({
+    title: '保存补丁归档',
+    defaultPath: 'patch.mpq',
+    filters: ARCHIVE_FILTERS,
+  })
+  if (!out) return
+  const version = p.version ?? S.info?.version ?? 1
+  p.busy = true
+  S.importProgress = { phase: 'reading', done: 0, total: names.length }
+  try {
+    const r = await ipc.invoke<NoteDto>('build_patch', {
+      names, outPath: out, version, onProgress: progressChannel(),
+    })
+    log(r.note)
+    toast.success(r.note)
+    S.patch = null
+  } catch (e) {
+    log(String(e))
+    toast.error(String(e))
+  } finally {
+    S.importProgress = null
+    p.busy = false
+  }
+}
+
+/** 「合并归档」确认：来源内容经 stage_merge_files 读入临时文件后按
+ *  原名排队为「待导入」——同名条目在「修改归档」应用时自动替换
+ *  （即覆盖），与「移动」一致的两阶段流程。 */
+export async function confirmMerge() {
+  const m = S.merge
+  if (!m || !m.diff || m.staging) return
+  if (!m.sourcePath) { toast.info('请先选择来源归档。'); return }
+  const names = pickedDiffNames(m.diff, m.unchecked)
+  if (!names.length) { toast.info('请至少勾选一个要合并的文件。'); return }
+  m.staging = true
+  let staged: StagedDto[]
+  try {
+    staged = await ipc.invoke<StagedDto[]>('stage_merge_files', { source: m.sourcePath, names })
+  } catch (e) {
+    log(String(e))
+    toast.error(String(e))
+    m.staging = false
+    return
+  }
+
+  S.modify ??= defaultModify()
+  const mod = S.modify
+  // 待导入：同名（大小写不敏感）后者取代前者，与 queueImports 一致。
+  const idxByName = new Map(mod.additions.map((a, i) => [a.name.toLowerCase(), i] as const))
+  for (const st of staged) {
+    const lower = st.name.toLowerCase()
+    const dupIdx = idxByName.get(lower) ?? -1
+    const item: ImportItem = { name: st.name, path: st.path, size: st.size, replaces: st.replaces || dupIdx >= 0 }
+    if (dupIdx >= 0) mod.additions[dupIdx] = item
+    else mod.additions.push(item)
+    idxByName.set(lower, dupIdx >= 0 ? dupIdx : mod.additions.length - 1)
+  }
+  const nReplace = staged.filter((s) => s.replaces).length
+  S.merge = null
+  const summary = `已排队合并 ${staged.length} 个文件（新增 ${staged.length - nReplace}、覆盖 ${nReplace}）`
+  log(`${summary}——在「修改归档」窗口应用后生效`)
+  toast.success(`${summary}，请在「修改归档」窗口确认写入`)
 }
 
 export function deleteSelected() {

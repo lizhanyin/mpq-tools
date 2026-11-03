@@ -94,16 +94,22 @@ mpqtool encrypt <archive> -p <密码>   # 启用密码保护（自定义 v4 扩�
 mpqtool decrypt <archive> -p <密码>   # 解除密码保护
 mpqtool passwd  <archive> <旧密码> <新密码>
                                       # 更换密码（不重写数据）
+mpqtool patch  <new> --baseline <old> # 对比新旧归档，差异打包成补丁
+        -o, --output <FILE>           # 输出（默认 <新归档名>-patch.mpq）
+            --version <1-4>           # 补丁版本（默认与新归档一致）
+mpqtool merge  <target> --source <src> # 把来源归档合并进目标
+            --no-overwrite            # 同名文件保持目标版本（默认覆盖）
+        -o, --output <FILE>           # 写到别处（默认就地修改目标）
 mpqtool repair [options] <archive>    # 诊断 / 修复头部元数据
 
-list / extract 额外接受 --listfile <文件|目录>（可多次）：用外部清单
-（如 MPQMaster 的 Listfiles）恢复缺失 (listfile) 归档的文件名。
-未指定时会在存在未命名条目的情况下，自动发现归档旁与可执行文件旁
-的 Listfiles 目录（目录内全部 .txt）。
+list / extract / patch / merge 额外接受 --listfile <文件|目录>（可多次）：
+用外部清单（如 MPQMaster 的 Listfiles）恢复缺失 (listfile) 归档的
+文件名。未指定时会在存在未命名条目的情况下，自动发现归档旁与
+可执行文件旁的 Listfiles 目录（目录内全部 .txt）。
 
-受密码保护的归档：info / list / extract / cat / add / delete 均可加
-`-p/--password`；未提供时 info / list 仅提示（文件名可见），读取与
-修改类命令给出明确错误。
+受密码保护的归档：info / list / extract / cat / add / delete / patch /
+merge 均可加 `-p/--password`；未提供时 info / list 仅提示（文件名可见），
+读取与修改类命令给出明确错误。
 ```
 
 示例：
@@ -269,6 +275,13 @@ cargo build --release -p mpqtool-gui
   （自动重载）或「在界面中打开结果」
 - 「工具 → 修复头信息」：问题列表 → 应用修复 → 保存修复副本
   或直接在界面中重新打开修复结果
+- 「工具 → 生成补丁 (patch.mpq)」：当前归档（新）与磁盘上的旧基线
+  逐文件对比（比较解压后内容，大小不同的快路径判定），勾选
+  「新增 / 修改」差异打包成独立补丁归档；输出版本可选 v1–v4
+  （默认跟随当前归档）
+- 「工具 → 合并归档」：把来源归档合并进当前归档——来源独有的直接
+  导入，同名且内容不同的默认**全部覆盖**，可在列表按组勾选或一键
+  全选 / 清空；确认后排队为待导入，在「修改归档」窗口应用写入
 - **密码保护**（自定义 v4 扩展）：打开受保护归档时自动弹密码框
   （可取消，文件名仍可浏览；「工具 → 输入密码解锁」可再解锁）；
   「工具 → 设置密码 / 修改密码 / 解除密码保护」与修改归档同款
@@ -325,6 +338,7 @@ mpq/            读取/修改库（edition 2024, no unsafe）
   src/passcrypt.rs    密码保护扩展（Argon2id/HKDF/ChaCha20-Poly1305）
   src/repair.rs       头部诊断/修复 + 表位置深度扫描（v4 修复后重算头部 MD5）
   src/modify.rs       导入/删除：块原样拷贝 + 容器重建（v4 保持版本并重算 MD5）
+  src/diff.rs         两归档逐文件对比（补丁 / 合并的分类依据）
   src/create.rs       新建空归档（v1–v4）与版本转换辅助
   src/archive.rs      Archive：打开/查找/读取 + 容错与校验策略
 mpqtool/        CLI + 共享任务库（lib）

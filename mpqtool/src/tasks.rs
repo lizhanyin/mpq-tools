@@ -480,6 +480,41 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
+// -- 补丁生成（CLI patch 与 GUI 共用） ----------------------------------
+
+/// 从 `new` 归档按名字提取 `names` 列出的文件，写入一个全新的
+/// `version` 版本空归档——即生成一份补丁归档（patch.mpq）。补丁不含
+/// 基线信息，靠加载端的补丁优先级覆盖旧归档中的同名文件。
+///
+/// 任一名字不存在或读取失败都以带名字的错误整体失败：缺文件的补丁
+/// 是不完整的，宁可中止也不静默遗漏。`read_progress(done, total)`
+/// 按提取的文件数回调；`modify_progress` 透传给底层修改器
+/// （编码 / 自检阶段）。
+pub fn build_patch<R: Read + std::io::Seek>(
+    new: &Archive<R>,
+    names: &[String],
+    version: mpq::FormatVersion,
+    read_progress: Option<&(dyn Fn(usize, usize) + Sync)>,
+    modify_progress: Option<&(dyn Fn(mpq::ModifyPhase, usize, usize) + Sync)>,
+) -> mpq::Result<mpq::ModifyOutcome> {
+    let total = names.len();
+    let mut additions: Vec<(String, Vec<u8>)> = Vec::with_capacity(total);
+    for (i, name) in names.iter().enumerate() {
+        let data = new
+            .read_file(name)
+            .map_err(|e| mpq::Error::InvalidData(format!("读取 {name} 失败：{e}")))?;
+        additions.push((name.clone(), data));
+        if let Some(cb) = read_progress {
+            cb(i + 1, total);
+        }
+    }
+    let base = mpq::create(&mpq::CreateOptions {
+        version,
+        ..mpq::CreateOptions::default()
+    })?;
+    mpq::modify_with_progress(&base, &[], &additions, &mpq::ModifyOptions::default(), modify_progress)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

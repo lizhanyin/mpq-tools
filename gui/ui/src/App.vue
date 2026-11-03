@@ -13,6 +13,8 @@ import NewArchiveModal from './components/NewArchiveModal.vue'
 import NewFolderModal from './components/NewFolderModal.vue'
 import MoveModal from './components/MoveModal.vue'
 import ConvertModal from './components/ConvertModal.vue'
+import PatchModal from './components/PatchModal.vue'
+import MergeModal from './components/MergeModal.vue'
 import PasswordModal from './components/PasswordModal.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import AboutModal from './components/AboutModal.vue'
@@ -117,6 +119,8 @@ onUnmounted(() => {
       <NewFolderModal />
       <MoveModal />
       <ConvertModal />
+      <PatchModal />
+      <MergeModal />
       <PasswordModal />
       <SettingsModal />
       <AboutModal />
@@ -129,8 +133,8 @@ onUnmounted(() => {
       </div>
 
       <!-- 全局导入进度（弹窗未开时，如拖拽入队后的目录扫描 / 读取）；
-           「修改归档」弹窗内已有详细进度，不重复显示 -->
-      <div v-if="S.importProgress && !S.modify" class="global-import-progress">
+           「修改归档 / 生成补丁 / 合并归档」弹窗内已有详细进度，不重复显示 -->
+      <div v-if="S.importProgress && !S.modify && !S.patch && !S.merge" class="global-import-progress">
         <n-progress type="line" :height="6" :show-indicator="false"
                     :percentage="importProgressPercent(S.importProgress) ?? 0"
                     :processing="importProgressPercent(S.importProgress) === undefined" />

@@ -46,6 +46,7 @@ mod attrs;
 mod compression;
 mod create;
 mod crypt;
+mod diff;
 mod digest;
 mod error;
 mod header;
@@ -93,3 +94,6 @@ pub use modify::{
 
 /// 创建新的空归档。
 pub use create::{create, CreateOptions};
+
+/// 对比两个归档的逐文件差异。
+pub use diff::{diff_archives, DiffEntry, DiffKind, DiffReport};

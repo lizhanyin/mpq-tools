@@ -26,7 +26,7 @@
   import { NDropdown, NButton } from 'naive-ui'
   import type { DropdownOption } from 'naive-ui'
   import {
-    S, openArchiveDialog, extractAll, importFilesDialog, importFolderDialog, startNewFolder, reloadArchive, closeArchive, startRepair, startCreate, startConvert, startUnlock, startPwOp, protectedArchive, lockedArchive,
+    S, openArchiveDialog, extractAll, importFilesDialog, importFolderDialog, startNewFolder, reloadArchive, closeArchive, startRepair, startCreate, startConvert, startPatch, startMerge, startUnlock, startPwOp, protectedArchive, lockedArchive,
   } from '../store'
   import * as ipc from '../ipc'
 
@@ -58,6 +58,8 @@
   const toolsOptions = computed((): DropdownOption[] => [
     { label: '修复头信息…', key: 'repair', disabled: !hasPath.value },
     { label: '版本转换…', key: 'convert', disabled: !hasArchive.value },
+    { label: '生成补丁 (patch.mpq)…', key: 'patch', disabled: !hasArchive.value },
+    { label: '合并归档…', key: 'merge', disabled: !hasArchive.value },
     { type: 'divider', key: 'd2' },
     { label: '设置密码…', key: 'pw-set', disabled: !hasArchive.value || protectedArchive.value },
     { label: '修改密码…', key: 'pw-change', disabled: !protectedArchive.value },
@@ -94,6 +96,8 @@
     toolsShow.value = false
     if (key === 'repair') startRepair()
     else if (key === 'convert') startConvert()
+    else if (key === 'patch') startPatch()
+    else if (key === 'merge') startMerge()
     else if (key === 'pw-set') startPwOp('set')
     else if (key === 'pw-change') startPwOp('change')
     else if (key === 'pw-remove') startPwOp('remove')

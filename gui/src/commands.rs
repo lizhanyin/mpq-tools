@@ -1445,3 +1445,220 @@ pub fn open_converted(state: St) -> Result<OpenResult, String> {
 pub fn discard_convert(state: St) {
     lock(&state).convert_applied = None;
 }
+
+// -- 对比 / 补丁 / 合并 -----------------------------------------------------
+
+/// diff 结果的单条记录（kind 相对「新」一侧；
+/// 语义随调用场景见 [`diff_with_disk`]）。
+#[derive(Serialize, Clone)]
+pub struct DiffEntryDto {
+    pub name: String,
+    /// `"added"` | `"changed"` | `"same"` | `"removed"`。
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_size: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_size: Option<u64>,
+}
+
+/// [`diff_with_disk`] 的完整结果。
+#[derive(Serialize)]
+pub struct DiffResultDto {
+    pub entries: Vec<DiffEntryDto>,
+    /// 旧 / 新一侧未参与对比的未命名条目数。
+    pub unnamed_old: usize,
+    pub unnamed_new: usize,
+    /// 内容比较时读取失败、被保守判为「修改」的条目及原因。
+    pub read_errors: Vec<String>,
+}
+
+/// 重建一份可读取内容的当前归档快照：受密码保护时用状态中保存的
+/// 主密钥重新解锁（未解锁则报错）。快照在全局锁外使用。
+fn rebuild_current(
+    raw: &[u8],
+    master_key: Option<[u8; 32]>,
+) -> Result<mpq::Archive<std::io::Cursor<&[u8]>>, String> {
+    let mut archive = mpq::Archive::new(std::io::Cursor::new(raw))
+        .map_err(|e| format!("归档解析失败：{e}（可先尝试「工具 → 修复头信息」）"))?;
+    if archive.is_password_protected() {
+        let key = master_key.ok_or("当前归档已锁定，请先输入密码解锁。")?;
+        archive
+            .unlock_with_master_key(&key)
+            .map_err(|e| format!("解锁失败：{e}"))?;
+    }
+    Ok(archive)
+}
+
+/// 把当前归档与磁盘上的另一个归档逐文件对比（比较解压后的内容）。
+///
+/// * `baseline = true`（生成补丁场景）：磁盘文件是旧基线，当前归档是
+///   新文件——`added`/`changed` 是要打进补丁的内容；
+/// * `baseline = false`（合并场景）：磁盘文件是合并来源，当前归档是
+///   目标——`added` 是来源独有的新文件，`changed` 是同名待覆盖项，
+///   `removed` 是仅当前归档有、不会被改动的内容。
+///
+/// 对比（读 + 解压两侧全部具名文件）在全局锁**外**进行，进度经
+/// `on_progress` 上报（phase `"diffing"`）。
+#[tauri::command(async)]
+pub fn diff_with_disk(
+    path: String,
+    baseline: bool,
+    on_progress: Channel<ImportProgressDto>,
+    state: St,
+) -> Result<DiffResultDto, String> {
+    let (raw, master_key) = {
+        let s = lock(&state);
+        if s.raw.is_empty() {
+            return Err("请先打开一个归档。".to_string());
+        }
+        (s.raw.clone(), s.master_key)
+    };
+
+    let disk_bytes = std::fs::read(&path).map_err(|e| format!("读取失败：{e}"))?;
+    let disk = mpq::Archive::new(std::io::Cursor::new(&disk_bytes))
+        .map_err(|e| format!("对比文件解析失败：{e}"))?;
+    if disk.is_password_protected() {
+        return Err(
+            "对比文件受密码保护，无法读取内容（请先用「工具 → 解除密码保护」处理它）"
+                .to_string(),
+        );
+    }
+    let current = rebuild_current(&raw, master_key)?;
+
+    let tap = ProgressTap::new(on_progress);
+    let cb = |done: usize, total: usize| tap.emit("diffing", done as u32, total as u32);
+    let report = if baseline {
+        mpq::diff_archives(&disk, &current, Some(&cb))
+    } else {
+        mpq::diff_archives(&current, &disk, Some(&cb))
+    }
+    .map_err(|e| format!("对比失败：{e}"))?;
+
+    Ok(DiffResultDto {
+        entries: report
+            .entries
+            .iter()
+            .map(|e| DiffEntryDto {
+                name: e.name.clone(),
+                kind: match e.kind {
+                    mpq::DiffKind::Added => "added",
+                    mpq::DiffKind::Changed => "changed",
+                    mpq::DiffKind::Same => "same",
+                    mpq::DiffKind::Removed => "removed",
+                }
+                .to_string(),
+                old_size: e.old_size,
+                new_size: e.new_size,
+            })
+            .collect(),
+        unnamed_old: report.unnamed_old,
+        unnamed_new: report.unnamed_new,
+        read_errors: report.read_errors,
+    })
+}
+
+/// 从当前归档提取 `names` 列出的文件，生成一份独立的补丁归档并写入
+/// `out_path`。提取与整档重写都在全局锁**外**进行；读取 → 编码 → 自检
+/// 的进度经 `on_progress` 上报（与导入相同的阶段名）。
+#[tauri::command(async)]
+pub fn build_patch(
+    names: Vec<String>,
+    out_path: String,
+    version: u32,
+    on_progress: Channel<ImportProgressDto>,
+    state: St,
+) -> Result<NoteDto, String> {
+    if names.is_empty() {
+        return Err("没有选择任何文件。".to_string());
+    }
+    let (raw, master_key) = {
+        let s = lock(&state);
+        if s.raw.is_empty() {
+            return Err("请先打开一个归档。".to_string());
+        }
+        (s.raw.clone(), s.master_key)
+    };
+    let current = rebuild_current(&raw, master_key)?;
+    let version = format_version(version)?;
+
+    let tap = ProgressTap::new(on_progress);
+    let read_cb = |done: usize, total: usize| tap.emit("reading", done as u32, total as u32);
+    let modify_cb = |phase: ModifyPhase, done: usize, total: usize| {
+        let name = match phase {
+            ModifyPhase::Encoding => "encoding",
+            ModifyPhase::Verifying => "verifying",
+        };
+        tap.emit(name, done as u32, total as u32);
+    };
+    let outcome = tasks::build_patch(&current, &names, version, Some(&read_cb), Some(&modify_cb))
+        .map_err(|e| format!("生成补丁失败：{e}"))?;
+    std::fs::write(&out_path, &outcome.bytes).map_err(|e| format!("保存失败：{e}"))?;
+    Ok(NoteDto {
+        note: format!(
+            "补丁已生成：{}（{} 个文件，v{}）",
+            out_path,
+            names.len(),
+            version.as_u32()
+        ),
+    })
+}
+
+/// 「合并」的数据准备：从磁盘上的来源归档读出选中名字的内容并写入
+/// 临时文件，返回值供前端按原名排队为「待导入」（同名条目在「修改
+/// 归档」应用时自动替换——即覆盖）。逐条读取：任何一条失败都中止，
+/// 避免只合并一半。
+#[tauri::command(async)]
+pub fn stage_merge_files(
+    source: String,
+    names: Vec<String>,
+    state: St,
+) -> Result<Vec<StagedDto>, String> {
+    let bytes = std::fs::read(&source).map_err(|e| format!("读取失败：{e}"))?;
+    let archive = mpq::Archive::new(std::io::Cursor::new(&bytes))
+        .map_err(|e| format!("来源归档解析失败：{e}"))?;
+    if archive.is_password_protected() {
+        return Err(
+            "来源归档受密码保护，无法读取内容（请先用「工具 → 解除密码保护」处理它）"
+                .to_string(),
+        );
+    }
+
+    let dir = std::env::temp_dir().join("mpqtool-merge");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建临时目录失败：{e}"))?;
+    let s = lock(&state);
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(names.len());
+    for name in &names {
+        let data = archive
+            .read_file(name)
+            .map_err(|e| format!("读取 {name} 失败：{e}"))?;
+        // 临时文件按净化后的归档内名命名（\ / 等替换为 _）；
+        // 净化撞车时追加序号，保证不同条目不互相覆盖。
+        let mut sanitized: String = name
+            .chars()
+            .map(|c| {
+                matches!(c, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_')
+                    .then_some(c)
+                    .unwrap_or('_')
+            })
+            .collect();
+        let mut seq = 1;
+        while !used.insert(sanitized.clone()) {
+            seq += 1;
+            sanitized = format!("{sanitized}_{seq}");
+        }
+        let file = dir.join(sanitized);
+        std::fs::write(&file, &data).map_err(|e| format!("写入临时文件失败：{e}"))?;
+        let replaces = s
+            .archive
+            .as_ref()
+            .is_some_and(|a| a.find_file(name).is_some());
+        out.push(StagedDto {
+            name: name.clone(),
+            path: file.to_string_lossy().to_string(),
+            size: data.len(),
+            replaces,
+        });
+    }
+    Ok(out)
+}

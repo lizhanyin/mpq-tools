@@ -51,6 +51,9 @@ fn main() {
             commands::save_converted,
             commands::open_converted,
             commands::discard_convert,
+            commands::diff_with_disk,
+            commands::build_patch,
+            commands::stage_merge_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

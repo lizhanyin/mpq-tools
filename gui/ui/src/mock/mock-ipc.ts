@@ -6,8 +6,8 @@
 'use strict'
 
 import type {
-  ArchiveInfoDto, ConvertDto, DiagnoseDto, EntryDto, OpenResult,
-  PreviewDto, SearchDto, TreeNodeDto,
+  ArchiveInfoDto, ConvertDto, DiagnoseDto, DiffEntryDto, DiffResultDto, EntryDto, NoteDto,
+  OpenResult, PreviewDto, SearchDto, StagedDto, TreeNodeDto,
 } from '../types'
 
 // MDX 预览样例：mdx-m3-viewer 官方示例资源（模型 + 其引用的 BLP 贴图）。
@@ -467,6 +467,52 @@ const MOCKS: Record<string, (args: any) => unknown> = {
     return r
   },
   discard_convert: () => null,
+  // 对比 / 补丁 / 合并：返回一份固定的假差异，进度事件模拟 diffing 阶段。
+  diff_with_disk: ({ baseline, onProgress }: any): DiffResultDto => {
+    const ch = onProgress as { onmessage?: (p: unknown) => void } | undefined
+    const send = (p: unknown) => ch?.onmessage?.(p)
+    for (let d = 1; d <= 6; d++) send({ phase: 'diffing', done: d, total: 6 })
+    const e = (name: string, kind: DiffEntryDto['kind'], oldSize?: number, newSize?: number): DiffEntryDto =>
+      ({ name, kind, old_size: oldSize, new_size: newSize })
+    // baseline=true（补丁）：added/changed 是当前归档相对基线的新内容；
+    // false（合并）：added/changed 是来源相对当前归档的内容。
+    return baseline
+      ? {
+          entries: [
+            e('war3map.w3e', 'added', undefined, 8192),
+            e('war3map.j', 'changed', 10240, 11264),
+            e('ui\\skin.tga', 'same', 4096, 4096),
+            e('old-only.txt', 'removed', 128, undefined),
+          ],
+          unnamed_old: 1, unnamed_new: 0, read_errors: [],
+        }
+      : {
+          entries: [
+            e('units\\newunit.skin', 'added', undefined, 2048),
+            e('war3map.j', 'changed', 10240, 11264),
+            e('abilities.txt', 'same', 640, 640),
+            e('keep-me.bin', 'removed', 999, undefined),
+          ],
+          unnamed_old: 0, unnamed_new: 2, read_errors: [],
+        }
+  },
+  build_patch: ({ names, outPath, onProgress }: any): NoteDto => {
+    const ch = onProgress as { onmessage?: (p: unknown) => void } | undefined
+    const send = (p: unknown) => ch?.onmessage?.(p)
+    const total = (names || []).length || 2
+    for (let d = 1; d <= total; d++) send({ phase: 'reading', done: d, total })
+    send({ phase: 'preparing', done: 0, total: 0 })
+    for (let d = 1; d <= 4; d++) send({ phase: 'encoding', done: d, total: 4 })
+    send({ phase: 'verifying', done: total, total })
+    return { note: `补丁已生成：${outPath}（${total} 个文件，v1）` }
+  },
+  stage_merge_files: ({ names }: any): StagedDto[] =>
+    (names || []).map((n: string, i: number) => ({
+      name: n,
+      path: `C:\\Temp\\mpqtool-merge\\${i}.tmp`,
+      size: 1024 * (i + 1),
+      replaces: i % 2 === 1,
+    })),
 }
 
 function okOpen(path?: string): OpenResult {

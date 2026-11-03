@@ -161,10 +161,11 @@ export interface ImportStatDto {
 /** stat_imports / apply_modify 经 Channel 推送的导入进度事件。
  *  phase：'reading' 读取待导入文件 / 扫描目录；'preparing' 修改引擎
  *  启动前的准备（克隆归档、重建布局，无计数）；'encoding' 压缩写入
- *  新归档；'verifying' 自检回读；'saving'（仅前端置位）写盘并重新
- *  载入。total 为 0 表示总数未知（目录扫描中），只显示已完成数量。 */
+ *  新归档；'verifying' 自检回读；'diffing' 对比两个归档（diff_with_disk）；
+ *  'saving'（仅前端置位）写盘并重新载入。total 为 0 表示总数未知
+ *  （目录扫描中），只显示已完成数量。 */
 export interface ImportProgress {
-  phase: 'reading' | 'preparing' | 'encoding' | 'verifying' | 'saving'
+  phase: 'reading' | 'preparing' | 'encoding' | 'verifying' | 'diffing' | 'saving'
   done: number
   total: number
 }
@@ -196,4 +197,26 @@ export interface DelSpec {
 export interface ConvertDto {
   note: string
   applied: boolean
+}
+
+// -- 对比 / 补丁 / 合并 ----------------------------------------------------------
+
+/** diff_with_disk 返回的单条差异（kind 相对「新」一侧，语义随场景：
+ *  补丁场景新 = 当前归档、旧 = 基线文件；合并场景新 = 来源文件、
+ *  旧 = 当前归档）。 */
+export interface DiffEntryDto {
+  name: string
+  kind: 'added' | 'changed' | 'same' | 'removed'
+  old_size?: number
+  new_size?: number
+}
+
+/** diff_with_disk 的返回。 */
+export interface DiffResultDto {
+  entries: DiffEntryDto[]
+  /** 旧 / 新一侧未参与对比的未命名条目数。 */
+  unnamed_old: number
+  unnamed_new: number
+  /** 内容比较时读取失败、被保守判为「修改」的条目及原因。 */
+  read_errors: string[]
 }
