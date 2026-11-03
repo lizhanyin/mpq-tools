@@ -29,11 +29,11 @@
   import type { DataTableColumns, DataTableInst } from 'naive-ui'
   import {
     S, rows, toggleSelected, toggleDirSelected, selectNone,
-    scopeSelection, toggleSelectAll, anyModalOpen,
+    scopeSelection, toggleSelectAll, selectedByPrefix, anyModalOpen,
     MAX_ROWS,
   } from '../store'
   import type { Row } from '../store'
-  import { fmtBytes, baseName, collectKeys } from '../utils'
+  import { fmtBytes, baseName, folderKey } from '../utils'
   import {
     ctx, ctxOptions, onCtxSelect,
     activateRow, openRow, openContextMenu, moveCursorTo, rowSelectedState,
@@ -55,14 +55,16 @@
       }),
       render(row) {
         if (row.type === 'dir') {
-          const keys = collectKeys(row.node)
-          const sel = keys.reduce((n, k) => n + (S.selected.has(k) ? 1 : 0), 0)
+          // 懒加载树下没有子树 key 清单：用「已选条目按目录前缀计数」
+          // 对比占位符自带的 file_count 同步推导；勾选时才异步取子树。
+          const total = row.node.file_count
+          const sel = selectedByPrefix.value.get(folderKey(row.path)) ?? 0
           return h(NCheckbox, {
             size: 'small',
-            checked: keys.length > 0 && sel === keys.length,
-            indeterminate: sel > 0 && sel < keys.length,
+            checked: total > 0 && sel === total,
+            indeterminate: sel > 0 && sel < total,
             title: '选中此文件夹下的全部文件',
-            'onUpdate:checked': (v: boolean) => toggleDirSelected(row.node, v),
+            'onUpdate:checked': (v: boolean) => toggleDirSelected(row.path, v),
           })
         }
         return h(NCheckbox, {

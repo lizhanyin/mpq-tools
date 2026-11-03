@@ -7,7 +7,7 @@
 
 import type {
   ArchiveInfoDto, ConvertDto, DiagnoseDto, EntryDto, OpenResult,
-  PreviewDto, TreeNodeDto,
+  PreviewDto, SearchDto, TreeNodeDto,
 } from '../types'
 
 // MDX 预览样例：mdx-m3-viewer 官方示例资源（模型 + 其引用的 BLP 贴图）。
@@ -56,7 +56,57 @@ function dir(name: string, files: EntryDto[] = [], dirs: TreeNodeDto[] = []): Tr
     file_count: files.length + dirs.reduce((n, d) => n + d.file_count, 0),
     total_size: files.reduce((n, f) => n + f.size, 0) + dirs.reduce((n, d) => n + d.total_size, 0),
     total_csize: files.reduce((n, f) => n + f.csize, 0) + dirs.reduce((n, d) => n + d.total_csize, 0),
+    loaded: true, // mock 后端持有完整树
   }
+}
+
+/** 未加载文件夹的占位符（与后端 dir_stub_dto 一致）。 */
+function stubOf(d: TreeNodeDto): TreeNodeDto {
+  return {
+    name: d.name,
+    dirs: [],
+    files: [],
+    file_count: d.file_count,
+    total_size: d.total_size,
+    total_csize: d.total_csize,
+    loaded: false,
+  }
+}
+
+/** 一层视图（与后端 tree_dto 一致）：本层文件 + 子文件夹占位符。 */
+function oneLevel(n: TreeNodeDto): TreeNodeDto {
+  return { ...n, dirs: n.dirs.map(stubOf), files: [...n.files], loaded: true }
+}
+
+/** 大小写不敏感地沿 path 下钻（与 utils.nodeAt 一致）。 */
+function nodeAtPath(root: TreeNodeDto, path: string[]): TreeNodeDto | null {
+  let node: TreeNodeDto | undefined = root
+  for (const seg of path) {
+    const lower = seg.toLowerCase()
+    node = node.dirs.find((d) => d.name.toLowerCase() === lower)
+    if (!node) return null
+  }
+  return node ?? null
+}
+
+function collectFiles(n: TreeNodeDto): EntryDto[] {
+  const out = [...n.files]
+  for (const d of n.dirs) out.push(...collectFiles(d))
+  return out
+}
+
+/** 与后端 search_tree 一致：全路径包含 needle（不区分大小写）。 */
+function searchMock(needle: string): EntryDto[] {
+  const n = needle.toLowerCase()
+  const out: EntryDto[] = []
+  ;(function walk(node: TreeNodeDto, prefix: string) {
+    for (const d of node.dirs) walk(d, prefix ? `${prefix}\\${d.name}` : d.name)
+    for (const f of node.files) {
+      const full = f.name ? (prefix ? `${prefix}\\${f.display}` : f.display) : f.display
+      if (full.toLowerCase().includes(n)) out.push(f)
+    }
+  })(currentTree(), '')
+  return out
 }
 
 const MOCK_TREE: TreeNodeDto = dir('', [
@@ -221,6 +271,23 @@ const MOCKS: Record<string, (args: any) => unknown> = {
   },
   reload_archive: () => okOpen(),
   close_archive: () => null,
+  // -- 目录懒加载（与后端 list_dir / search_archive / dir_entries 对应） --------
+  list_dir: ({ path }: any) => {
+    const segs = (path as string[]) || []
+    const node = nodeAtPath(currentTree(), segs)
+    if (!node) throw new Error(`文件夹不存在：${segs.join('\\')}`)
+    return oneLevel(node)
+  },
+  search_archive: ({ needle }: any): SearchDto => ({
+    entries: searchMock(String(needle ?? '')),
+    truncated: false,
+  }),
+  dir_entries: ({ path }: any) => {
+    const segs = (path as string[]) || []
+    const node = nodeAtPath(currentTree(), segs)
+    if (!node) throw new Error(`文件夹不存在：${segs.join('\\')}`)
+    return collectFiles(node)
+  },
   unlock_archive: ({ password }: any) => {
     if (password === 'wrong') throw new Error('密码错误。')
     return { note: '已解锁：可以读取、提取和修改文件内容。' }
@@ -302,18 +369,28 @@ const MOCKS: Record<string, (args: any) => unknown> = {
   save_repaired: ({ path }: any) => ({ note: `已保存 ${path}` }),
   open_repaired: () => okOpen('D:\\maps\\demo.fixed.w3x'),
   discard_repair: () => null,
-  stat_imports: ({ paths, prefix, childrenOnly }: any) => {
+  stat_imports: ({ paths, prefix, childrenOnly, onProgress }: any) => {
     const pre = prefix ? `${prefix}\\` : ''
     const out = []
     for (const p of paths) {
       // 文件夹导入：展开为递归文件列表（默认以文件夹自身为根，
       // childrenOnly 时只导入子项；键名与真实 Tauri 调用一致用 camelCase）。
+      // 共 300 项，便于调试「加载更多」分批渲染与读取进度。
       if (/war3mapImported$/i.test(p)) {
         const root = childrenOnly ? pre : `${pre}war3mapImported\\`
         out.push(
           { name: `${root}icon.blp`, path: `${p}\\icon.blp`, size: 8192, replaces: false },
           { name: `${root}ui\\panel.tga`, path: `${p}\\ui\\panel.tga`, size: 4096, replaces: false },
         )
+        for (let i = 0; i < 298; i++) {
+          const n = String(i).padStart(3, '0')
+          out.push({
+            name: `${root}assets\\file${n}.blp`,
+            path: `${p}\\assets\\file${n}.blp`,
+            size: 2048 + i,
+            replaces: false,
+          })
+        }
         continue
       }
       const name = p.split(/[\\/]/).pop()
@@ -324,9 +401,24 @@ const MOCKS: Record<string, (args: any) => unknown> = {
         replaces: (pre + name).toLowerCase() === 'war3map.j',
       })
     }
+    // 模拟「读取中」进度：真实后端经 Channel 节流推送；mock 直接调
+    // onmessage（浏览器里 Channel.send 不可用，onmessage 两边共用）。
+    const ch = onProgress as { onmessage?: (p: unknown) => void } | undefined
+    if (ch?.onmessage) {
+      for (let d = 32; d < out.length; d += 32) {
+        ch.onmessage({ phase: 'reading', done: d, total: 0 })
+      }
+    }
     return out
   },
-  apply_modify: ({ deletions }: any) => {
+  apply_modify: ({ deletions, onProgress }: any) => {
+    // 模拟 读取 → 准备 → 导入 → 校验 四阶段进度事件。
+    const ch = onProgress as { onmessage?: (p: unknown) => void } | undefined
+    const send = (p: unknown) => ch?.onmessage?.(p)
+    send({ phase: 'reading', done: 2, total: 2 })
+    send({ phase: 'preparing', done: 0, total: 0 })
+    for (let d = 2; d <= 8; d += 2) send({ phase: 'encoding', done: d, total: 8 })
+    send({ phase: 'verifying', done: 3, total: 3 })
     pendingDeletedNames = (deletions || []).map((d: any) => d.name).filter(Boolean)
     pendingDeletedKeys = (deletions || []).filter((d: any) => !d.name && d.key).map((d: any) => d.key)
     const del = pendingDeletedNames.length + pendingDeletedKeys.length
@@ -378,19 +470,19 @@ const MOCKS: Record<string, (args: any) => unknown> = {
 }
 
 function okOpen(path?: string): OpenResult {
-  const tree = appliedDeletedNames.length || appliedDeletedKeys.length
-    ? filterTree(MOCK_TREE) : MOCK_TREE
-  const info: ArchiveInfoDto = { ...MOCK_INFO, tree, path: path || MOCK_INFO.path }
-  if (tree !== MOCK_TREE) {
+  // 打开只发根目录一层（模拟懒加载）；完整树留在 mock 后端。
+  const full = currentTree()
+  const info: ArchiveInfoDto = { ...MOCK_INFO, tree: oneLevel(full), path: path || MOCK_INFO.path }
+  if (full !== MOCK_TREE) {
     let named = 0
     ;(function walk(n: TreeNodeDto) {
       for (const d of n.dirs) walk(d)
       named += n.files.filter((f) => f.name).length
-    })(tree)
+    })(full)
     info.listfile_count = named
     info.entry_count = (function count(n: TreeNodeDto): number {
       return n.files.length + n.dirs.reduce((s, d) => s + count(d), 0)
-    })(tree)
+    })(full)
   }
   return { ok: true, info }
 }
@@ -402,6 +494,12 @@ let pendingDeletedNames: string[] = []
 let pendingDeletedKeys: string[] = []
 let appliedDeletedNames: string[] = []
 let appliedDeletedKeys: string[] = []
+
+/** 当前完整树：有已应用删除时为过滤后的副本。 */
+function currentTree(): TreeNodeDto {
+  return appliedDeletedNames.length || appliedDeletedKeys.length
+    ? filterTree(MOCK_TREE) : MOCK_TREE
+}
 
 function filterTree(node: TreeNodeDto): TreeNodeDto {
   const files = node.files.filter(

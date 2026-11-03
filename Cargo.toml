@@ -19,6 +19,8 @@ chacha20poly1305 = { version = "0.10", default-features = false, features = ["al
 hkdf = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 getrandom = "0.2"
+# 导入大批量文件时并行读取 / 并行压缩（zlib sector 与 Fresh 块预编码）。
+rayon = "1"
 
 [profile.release]
 opt-level = 3

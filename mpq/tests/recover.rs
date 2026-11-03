@@ -337,3 +337,88 @@ fn complete_listfile_skips_recovery_warning() {
     assert_eq!(archive.file_names(), ["war3map.j".to_string()]);
     assert!(!archive.has_unnamed_entries());
 }
+
+#[test]
+fn case_variants_of_recovered_names_are_not_duplicated() {
+    // 无 listfile：内置清单恢复 war3map.j 后，大小写变体（外部清单
+    // 途径）不得重复登记 —— try_recover_name 的查重集合与收录路径
+    // 必须保持同步。
+    let bytes = build(&ArchiveSpec {
+        files: vec![FileSpec::text("war3map.j", "// x\n")],
+        ..ArchiveSpec::default()
+    });
+    let mut archive = open(&bytes);
+    assert!(archive
+        .file_names()
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case("war3map.j")));
+
+    assert_eq!(archive.recover_names_with(["War3Map.J", "war3map.j"]), 0);
+    assert_eq!(
+        archive
+            .file_names()
+            .iter()
+            .filter(|n| n.eq_ignore_ascii_case("war3map.j"))
+            .count(),
+        1
+    );
+
+    // 附名仍恰好命中一个条目（不因查重改动产生重复条目）。
+    let named = archive
+        .entries()
+        .iter()
+        .filter(|e| e.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case("war3map.j")))
+        .count();
+    assert_eq!(named, 1);
+}
+
+#[test]
+fn listfile_entries_gate_external_candidates() {
+    // 带 listfile：listfile 载入的名字同样参与查重（集合在赋值后
+    // 整体重建），外部清单的大小写变体不再重复收录。
+    let bytes = build(&ArchiveSpec {
+        files: vec![FileSpec::text(r"units\footman.blp", "blp")],
+        with_listfile: true,
+        ..ArchiveSpec::default()
+    });
+    let mut archive = open(&bytes);
+    assert!(archive
+        .file_names()
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case(r"units\footman.blp")));
+
+    assert_eq!(
+        archive.recover_names_with([r"Units\FOOTMAN.blp", r"units\footman.blp"]),
+        0
+    );
+    assert_eq!(
+        archive
+            .file_names()
+            .iter()
+            .filter(|n| n.eq_ignore_ascii_case(r"units\footman.blp"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn partial_listfile_still_recovers_missing_names() {
+    // listfile 只列出部分文件：仍有未命名条目 → 恢复流水线照常运行
+    // （门控只跳过 listfile 已覆盖全部条目、无任何可恢复名字的情形）。
+    let bytes = build(&ArchiveSpec {
+        files: vec![
+            FileSpec::text("war3map.j", "// s\n"),
+            FileSpec::text("war3map.w3e", "terrain"),
+            FileSpec::text("(listfile)", "war3map.j"),
+        ],
+        ..ArchiveSpec::default()
+    });
+    let archive = open(&bytes);
+    // w3e 不在 listfile 里，但能经内置清单恢复。
+    assert!(archive
+        .file_names()
+        .iter()
+        .any(|n| n.eq_ignore_ascii_case("war3map.w3e")));
+    let entries = archive.entries();
+    assert!(entries.iter().any(|e| e.name.as_deref() == Some("war3map.w3e")));
+}

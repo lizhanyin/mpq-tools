@@ -21,6 +21,12 @@ pub struct GuiState {
     pub archive: Option<Archive<Cursor<Vec<u8>>>>,
     /// 支撑目录树的扁平条目列表（用于 key 查找）。
     pub entries: Vec<FileEntry>,
+    /// 完整虚拟目录树（后端持有；前端按目录懒加载一层层的视图，
+    /// 大归档不必整体序列化传输）。
+    pub tree: TreeNode,
+    /// `(attributes)` 提供的 `block_index -> file_time`，`load` 时算好，
+    /// 供懒加载各目录的 DTO 复用。
+    pub times: HashMap<usize, u64>,
     /// 受密码保护的归档解锁成功后的主密钥（自定义 AEAD 扩展）；
     /// 会回填给修改 / 转换使用。
     pub master_key: Option<[u8; 32]>,
@@ -131,6 +137,11 @@ pub struct TreeNodeDto {
     pub file_count: usize,
     pub total_size: u64,
     pub total_csize: u64,
+    /// 此文件夹的直接内容（`files` 与各子文件夹占位符）是否已随本
+    /// 节点发送。懒加载：初始只发根目录一层，子文件夹以占位符
+    ///（`loaded: false`、空的 `dirs`/`files`，但计数齐全）表示，
+    /// 前端进入 / 展开时经 `list_dir` 补齐。
+    pub loaded: bool,
 }
 
 #[derive(Serialize)]
@@ -182,14 +193,31 @@ fn entry_dto(e: &FileEntry, times: &HashMap<usize, u64>) -> EntryDto {
     }
 }
 
+/// 未加载文件夹的占位符：名称与聚合计数齐全，内容为空、`loaded`
+/// 为 `false`，前端据此在进入 / 展开时再取真正的子级。
+fn dir_stub_dto(node: &TreeNode) -> TreeNodeDto {
+    TreeNodeDto {
+        name: node.name.clone(),
+        dirs: Vec::new(),
+        files: Vec::new(),
+        file_count: node.file_count,
+        total_size: node.total_size,
+        total_csize: node.total_csize,
+        loaded: false,
+    }
+}
+
+/// 序列化 `node` 的一层视图：本文件夹的文件 + 各子文件夹的占位符。
+/// 根与 `list_dir` 返回的节点都用它——每次 IPC 只传一个目录的数据。
 fn tree_dto(node: &TreeNode, times: &HashMap<usize, u64>) -> TreeNodeDto {
     TreeNodeDto {
         name: node.name.clone(),
-        dirs: node.dirs.iter().map(|d| tree_dto(d, times)).collect(),
+        dirs: node.dirs.iter().map(dir_stub_dto).collect(),
         files: node.files.iter().map(|f| entry_dto(f, times)).collect(),
         file_count: node.file_count,
         total_size: node.total_size,
         total_csize: node.total_csize,
+        loaded: true,
     }
 }
 
@@ -255,6 +283,8 @@ impl GuiState {
                     locked,
                 };
                 self.entries = entries;
+                self.tree = tree;
+                self.times = times;
                 self.archive = Some(archive);
                 self.path = Some(path);
                 self.raw = bytes;
@@ -268,6 +298,8 @@ impl GuiState {
             Err(e) => {
                 self.archive = None;
                 self.entries.clear();
+                self.tree = TreeNode::default();
+                self.times.clear();
                 self.master_key = None;
                 self.path = Some(path);
                 self.raw = bytes;
@@ -279,6 +311,35 @@ impl GuiState {
                 }
             }
         }
+    }
+
+    /// 懒加载：`path` 目录的一层视图（本层文件 + 子文件夹占位符）。
+    /// 路径不存在（含大小写不匹配）返回 `None`。
+    pub fn list_dir_dto(&self, path: &[String]) -> Option<TreeNodeDto> {
+        tasks::node_at(&self.tree, path).map(|node| tree_dto(node, &self.times))
+    }
+
+    /// 全树搜索（前端懒加载后只有已载入的目录，过滤改在后端做），
+    /// 最多 `limit` 条。返回（条目，是否因超限被截断）。
+    pub fn search_entries(&self, needle: &str, limit: usize) -> (Vec<EntryDto>, bool) {
+        let found = tasks::search_tree(&self.tree, needle);
+        let truncated = found.len() > limit;
+        (
+            found
+                .iter()
+                .take(limit)
+                .map(|f| entry_dto(f, &self.times))
+                .collect(),
+            truncated,
+        )
+    }
+
+    /// `path` 目录及其全部子级的条目（“选中/提取/移动文件夹”等
+    /// 递归交互用；这些 key 对应的条目前端未必加载过）。
+    pub fn dir_entries_dto(&self, path: &[String]) -> Option<Vec<EntryDto>> {
+        tasks::node_at(&self.tree, path)
+            .map(|node| tasks::collect_files(node))
+            .map(|files| files.iter().map(|f| entry_dto(f, &self.times)).collect())
     }
 }
 
@@ -365,5 +426,108 @@ mod war3_chain_tests {
             Some(b"footman".to_vec())
         );
         assert_eq!(s.read_war3_bytes("Units\\Human\\Footman.blp", ""), None);
+    }
+}
+
+#[cfg(test)]
+mod lazy_tree_tests {
+    use super::*;
+
+    /// 生成一个含给定文件的最小 MPQ（与 war3_chain_tests 的同名辅助一致）。
+    fn mini_mpq(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let base = mpq::create(&mpq::CreateOptions {
+            version: mpq::FormatVersion::V1,
+            hash_table_size: 16,
+            sector_shift: 3,
+        })
+        .expect("create");
+        let additions: Vec<(String, Vec<u8>)> = files
+            .iter()
+            .map(|(n, d)| (n.to_string(), d.to_vec()))
+            .collect();
+        mpq::modify(&base, &[], &additions).expect("modify").bytes
+    }
+
+    fn loaded(files: &[(&str, &[u8])]) -> GuiState {
+        let mut s = GuiState::default();
+        let r = s.load("t.mpq".into(), mini_mpq(files));
+        assert!(r.ok, "{:?}", r.error);
+        s
+    }
+
+    fn segs(path: &[&str]) -> Vec<String> {
+        path.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 打开归档只发送根目录一层：根 loaded 且含本层文件；子文件夹是
+    /// 计数齐全的占位符（loaded=false、内容为空）。
+    #[test]
+    fn open_sends_root_level_only() {
+        let s = loaded(&[
+            ("a.txt", b"a"),
+            ("d\\b.txt", b"b"),
+            ("d\\sub\\c.txt", b"c"),
+        ]);
+        let tree = &s.tree; // 后端持有完整树
+        // 3 个用户文件 + modify 自动重建的 (listfile)。
+        assert_eq!(tree.file_count, 4);
+
+        let dto = tree_dto(tree, &s.times);
+        assert!(dto.loaded);
+        // 根的文件 = 根目录下的 a.txt；特殊文件在 (系统文件) 里。
+        assert_eq!(dto.files.len(), 1);
+        assert_eq!(dto.files[0].name.as_deref(), Some("a.txt"));
+        // 根的子文件夹占位符：d 与 (系统文件) / (未命名)（后者为空，
+        // build_tree 也会为特殊文件建目录）。
+        let names: Vec<&str> = dto.dirs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"d"));
+        assert!(names.contains(&"(系统文件)"));
+        let d = dto.dirs.iter().find(|x| x.name == "d").unwrap();
+        assert!(!d.loaded);
+        assert_eq!(d.file_count, 2);
+        assert!(d.dirs.is_empty() && d.files.is_empty());
+    }
+
+    /// list_dir 补齐一层：本层文件 + 子文件夹占位符；大小写不敏感；
+    /// 不存在的路径返回 None。
+    #[test]
+    fn list_dir_returns_one_level() {
+        let s = loaded(&[("d\\b.txt", b"b"), ("d\\sub\\c.txt", b"c")]);
+        let d = s.list_dir_dto(&segs(&["D"])).expect("list d");
+        assert!(d.loaded);
+        assert_eq!(d.files.len(), 1);
+        assert_eq!(d.files[0].name.as_deref(), Some("d\\b.txt"));
+        assert_eq!(d.dirs.len(), 1);
+        assert_eq!(d.dirs[0].name, "sub");
+        assert!(!d.dirs[0].loaded);
+        assert_eq!(d.dirs[0].file_count, 1);
+
+        let sub = s.list_dir_dto(&segs(&["d", "sub"])).expect("list sub");
+        assert_eq!(sub.files.len(), 1);
+        assert_eq!(sub.files[0].name.as_deref(), Some("d\\sub\\c.txt"));
+
+        assert!(s.list_dir_dto(&segs(&["nope"])).is_none());
+    }
+
+    /// 搜索与递归条目都作用在后端完整树上——覆盖前端尚未加载的目录。
+    #[test]
+    fn search_and_dir_entries_cover_unloaded_parts() {
+        let s = loaded(&[("a.txt", b"a"), ("d\\b.txt", b"b"), ("d\\sub\\c.txt", b"c")]);
+
+        let (found, truncated) = s.search_entries("b.t", 100);
+        assert!(!truncated);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name.as_deref(), Some("d\\b.txt"));
+
+        // 超限截断。
+        let (_, truncated) = s.search_entries(".", 1);
+        assert!(truncated);
+
+        let root_all = s.dir_entries_dto(&[]).expect("root entries");
+        // 3 个用户文件 + modify 自动重建的 (listfile)。
+        assert_eq!(root_all.len(), 4);
+        let d_all = s.dir_entries_dto(&segs(&["d"])).expect("d entries");
+        assert_eq!(d_all.len(), 2);
+        assert!(s.dir_entries_dto(&segs(&["nope"])).is_none());
     }
 }

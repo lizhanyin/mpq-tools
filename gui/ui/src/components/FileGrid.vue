@@ -44,14 +44,14 @@
   import type { VirtualListInst } from 'naive-ui'
   import {
     rows, selectNone, setSelectedKeys, moveKeysTo, anyModalOpen, MAX_ROWS, S,
-    SYSTEM_DIR, UNNAMED_DIR,
+    SYSTEM_DIR, UNNAMED_DIR, getDirEntries, peekDirEntries,
   } from '../store'
   import type { Row } from '../store'
   import { fmtBytes, baseName, isImageName, folderKey } from '../utils'
   import { thumbFor } from '../thumbs'
   import {
     ctx, ctxOptions, onCtxSelect,
-    activateRow, openRow, openContextMenu, moveCursorTo, rowSelectedState, rowKeys,
+    activateRow, openRow, openContextMenu, moveCursorTo, rowSelectedState, dirRowKeys,
   } from './entryActions'
 
   // 网格单元几何尺寸（px，固定）：列数随容器宽度自适应，行高固定，
@@ -338,7 +338,9 @@
     if (band.active) applyBandSelection()
   }
 
-  /** 选中与矩形相交的全部（已渲染的）单元格；目录格 = 其下全部文件。 */
+  /** 选中与矩形相交的全部（已渲染的）单元格；目录格 = 其下全部文件。
+   * 目录子树条目经后端异步取：首次扫到时先跳过，取回后重算框选
+   * （缓存命中后连续拖动全程同步）。 */
   function applyBandSelection() {
     const wrap = wrapEl.value
     if (!wrap) return
@@ -349,7 +351,14 @@
       const rc = el.getBoundingClientRect()
       if (rc.right <= l || rc.left >= r || rc.bottom <= t || rc.top >= b) continue
       const row = rows.value.list[Number((el as HTMLElement).dataset?.idx)]
-      if (row) for (const k of rowKeys(row)) keys.push(k)
+      if (!row) continue
+      if (row.type === 'file') { keys.push(row.entry.key); continue }
+      const entries = peekDirEntries(row.path)
+      if (entries) {
+        for (const e of entries) keys.push(e.key)
+      } else {
+        void getDirEntries(row.path).then(() => { if (band.active) applyBandSelection() })
+      }
     }
     setSelectedKeys(band.add ? [...band.base, ...keys] : keys)
   }
@@ -368,8 +377,9 @@
   function startDrag(row: Row) {
     if (!press) return
     // 拖动未选中的行时把选择切到该行（资源管理器语义）；已选中则拖整个选择集。
+    // 目录行的子树条目异步取（毫秒级，拖拽持续期间必然到位）。
     drag.base = [...S.selected]
-    if (rowSelectedState(row) !== 'full') setSelectedKeys(rowKeys(row))
+    if (rowSelectedState(row) !== 'full') void dirRowKeys(row).then(setSelectedKeys)
     drag.active = true
     drag.row = row
     drag.x = press.x

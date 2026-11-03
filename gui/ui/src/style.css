@@ -660,6 +660,54 @@ body {
 .pending-row .meta { color: var(--text-weak); font-size: 0.88em; white-space: nowrap; margin-left: auto; }
 .pending-row .remove { flex: none; }
 
+/* 大批量分批渲染：列表底部的「加载更多」 */
+.load-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 4px 0 2px;
+  color: var(--text-weak);
+  font-size: 0.88em;
+}
+
+/* 「修改归档」确认后的导入进度（读取 → 导入 → 校验 → 保存） */
+.import-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.import-progress .n-progress { flex: 1; min-width: 0; }
+.import-progress-label {
+  color: var(--text-weak);
+  font-size: 0.92em;
+  white-space: nowrap;
+}
+
+/* 全局导入进度条（弹窗未开时，如拖拽入队后的目录扫描） */
+.global-import-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 16px;
+  pointer-events: none;
+  background: rgba(250, 251, 253, 0.94);
+  border-bottom: 1px solid var(--border);
+  box-shadow: 0 2px 10px rgba(15, 25, 45, 0.08);
+}
+.global-import-progress .n-progress { flex: 1; min-width: 0; }
+.global-import-progress-label {
+  color: var(--text-weak);
+  font-size: 0.92em;
+  white-space: nowrap;
+}
+
 .info-mark {
   color: var(--text-weak);
   cursor: help;

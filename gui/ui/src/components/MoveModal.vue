@@ -25,7 +25,7 @@
             :expanded-keys="expanded"
             :render-label="renderLabel"
             @update:selected-keys="onSelect"
-            @update:expanded-keys="(keys: Array<string | number>) => { expanded = keys as string[] }"
+            @update:expanded-keys="onUpdateExpanded"
           />
         </div>
       </div>
@@ -45,7 +45,7 @@
   import { ref, computed, watch } from 'vue'
   import { NModal, NButton, NTree } from 'naive-ui'
   import type { TreeOption } from 'naive-ui'
-  import { S, moveKeysTo, closeMoveModal, SYSTEM_DIR, UNNAMED_DIR } from '../store'
+  import { S, moveKeysTo, closeMoveModal, ensureDirLoaded, SYSTEM_DIR, UNNAMED_DIR } from '../store'
   import type { MoveState } from '../store'
   import { fmtBytes, folderKey } from '../utils'
   import type { TreeNodeDto } from '../types'
@@ -100,12 +100,25 @@
       keys.push(k)
     }
     expanded.value = keys
+    // 目标目录（及其祖先）展开即需要内容——按需加载一层层补齐。
+    void ensureDirLoaded(m.target)
   }, { immediate: true })
 
   function renderLabel({ option }: { option: TreeOption }) {
     const o = option as DirRow | RootRow
     if ('isRoot' in o) return '🏠 归档根目录'
     return `📁 ${o.path[o.path.length - 1]}`
+  }
+
+  /** 展开分支：新展开的目录按需加载（key 即小写路径段，
+   * nodeAt 大小写不敏感，与 FileTree 同一手法）。 */
+  function onUpdateExpanded(keys: Array<string | number>) {
+    const prev = new Set(expanded.value.map(String))
+    expanded.value = keys as string[]
+    for (const k of keys) {
+      const s = String(k)
+      if (s !== ROOT_KEY && !prev.has(s)) void ensureDirLoaded(s.split('\\'))
+    }
   }
 
   /** 选择目标（不允许取消选择：点已选节点等于维持原目标）。 */

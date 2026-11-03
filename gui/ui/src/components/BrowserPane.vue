@@ -45,7 +45,7 @@
         <span class="sep">|</span>
 
         <template v-if="searching">
-          <span class="searching">搜索 “{{ S.appliedFilter.trim() }}”：{{ fmtBytes(matchCount) }} 个匹配</span>
+          <span class="searching">搜索 “{{ S.appliedFilter.trim() }}”：{{ fmtBytes(matchCount) }}{{ S.searchTruncated ? '+' : '' }} 个匹配</span>
         </template>
         <template v-else>
           <n-button size="tiny" quaternary :disabled="S.cwd.length === 0"
@@ -57,7 +57,10 @@
                       @click="navigate(S.cwd.slice(0, i + 1))">{{ seg }}</n-button>
           </template>
           <span v-if="cwdNode" class="weak">
-            （{{ fmtBytes(cwdNode.dirs.length) }} 个子文件夹，{{ fmtBytes(cwdNode.files.length) }} 个文件）
+            <template v-if="cwdNode.loaded">
+              （{{ fmtBytes(cwdNode.dirs.length) }} 个子文件夹，{{ fmtBytes(cwdNode.files.length) }} 个文件）
+            </template>
+            <template v-else>（正在载入…）</template>
           </span>
         </template>
       </div>

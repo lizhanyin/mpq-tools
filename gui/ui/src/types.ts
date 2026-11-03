@@ -36,6 +36,17 @@ export interface TreeNodeDto {
   file_count: number
   total_size: number
   total_csize: number
+  /** 直接内容（files 与子文件夹）是否已发送到前端。懒加载：初始
+   * 只发根目录一层，子文件夹为计数齐全的占位符（loaded=false、
+   * dirs/files 为空），进入 / 展开时经 list_dir 补齐。 */
+  loaded: boolean
+}
+
+/** search_archive 的返回。 */
+export interface SearchDto {
+  entries: EntryDto[]
+  /** 命中数超过上限（MAX_ROWS）被截断。 */
+  truncated: boolean
 }
 
 /** 最近一次成功打开的归档概要。 */
@@ -145,6 +156,17 @@ export interface ImportStatDto {
   /** 是否存在同名的归档条目。 */
   replaces: boolean
   error?: string
+}
+
+/** stat_imports / apply_modify 经 Channel 推送的导入进度事件。
+ *  phase：'reading' 读取待导入文件 / 扫描目录；'preparing' 修改引擎
+ *  启动前的准备（克隆归档、重建布局，无计数）；'encoding' 压缩写入
+ *  新归档；'verifying' 自检回读；'saving'（仅前端置位）写盘并重新
+ *  载入。total 为 0 表示总数未知（目录扫描中），只显示已完成数量。 */
+export interface ImportProgress {
+  phase: 'reading' | 'preparing' | 'encoding' | 'verifying' | 'saving'
+  done: number
+  total: number
 }
 
 /** apply_modify 的待导入项（参数）。 */

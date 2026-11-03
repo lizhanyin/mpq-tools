@@ -110,6 +110,11 @@ pub struct Archive<R: Read + Seek> {
     het: Option<HetTable>,
     bet: Option<BetTable>,
     names: Vec<String>,
+    /// `names` 的 ASCII 小写键集合：[`Archive::try_recover_name`] 的
+    /// O(1) 大小写不敏感查重（语义等价于逐个 `eq_ignore_ascii_case`——
+    /// 只折叠 A-Z，非 ASCII 字节原样保留）。与 `names` 同步维护：
+    /// listfile 赋值后整体重建，收录新名时插入。
+    name_set: std::collections::HashSet<String>,
     /// 未命名条目按内容识别的类型后缀（按表来源 + 索引缓存，
     /// 打开时探测一次）。
     guessed: std::collections::HashMap<(TableSource, usize), &'static str>,
@@ -157,6 +162,7 @@ impl<R: Read + Seek> Archive<R> {
             het: None,
             bet: None,
             names: Vec::new(),
+            name_set: std::collections::HashSet::new(),
             guessed: std::collections::HashMap::new(),
             scanned_models: std::collections::HashSet::new(),
             attributes: None,
@@ -170,12 +176,15 @@ impl<R: Read + Seek> Archive<R> {
         archive.guess_unnamed_kinds();
         // 类型探测后补一轮模型 TEXS × 资源惯例启发式的迭代：
         // 未命名模型的贴图引用 → 贴图名 → 同名反推其它模型 →
-        // 新模型的 TEXS → …… 收敛到不动点。
-        for _ in 0..4 {
-            let a = archive.scan_model_textures();
-            let b = archive.heuristic_round();
-            if a + b == 0 {
-                break;
+        // 新模型的 TEXS → …… 收敛到不动点。没有未命名条目时不可能
+        // 恢复出新名字，整轮跳过（否则要读取解压归档里的全部模型）。
+        if archive.has_unnamed_entries() {
+            for _ in 0..4 {
+                let a = archive.scan_model_textures();
+                let b = archive.heuristic_round();
+                if a + b == 0 {
+                    break;
+                }
             }
         }
         Ok(archive)
@@ -599,6 +608,11 @@ impl<R: Read + Seek> Archive<R> {
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
                         .collect();
+                    self.name_set = self
+                        .names
+                        .iter()
+                        .map(|n| n.to_ascii_lowercase())
+                        .collect();
                 }
                 Err(e) => self.warn(format!("(listfile) present but unreadable: {e}")),
             }
@@ -612,9 +626,12 @@ impl<R: Read + Seek> Archive<R> {
             } else {
                 self.warn("no (listfile); file names unknown");
             }
-        } else {
+        } else if self.has_unnamed_entries() {
             // 受保护地图也可能只保留删减过的 listfile：静默补上
-            // 未列出但能对上 hash 表的标准文件名。
+            // 未列出但能对上 hash 表的标准文件名。listfile 已覆盖
+            // 全部条目时（原版客户端归档的常态）没有任何可恢复的
+            // 名字，整条恢复流水线（含逐文件读取解压的内容扫描）
+            // 直接跳过 —— 大归档的打开耗时由秒级降到毫秒级。
             self.recover_names();
         }
 
@@ -783,14 +800,13 @@ impl<R: Read + Seek> Archive<R> {
         if SPECIAL_FILES.iter().any(|s| s.eq_ignore_ascii_case(name)) {
             return;
         }
-        if self.has_file(name)
-            && !self
-                .names
-                .iter()
-                .any(|n| n.eq_ignore_ascii_case(name))
-        {
-            self.names.push(name.to_string());
+        // 先查已收录集合（远便宜于 hash 试探），未收录再做试探。
+        let lower = name.to_ascii_lowercase();
+        if self.name_set.contains(&lower) || !self.has_file(name) {
+            return;
         }
+        self.names.push(name.to_string());
+        self.name_set.insert(lower);
     }
 
     /// 试探候选名及其**模型扩展名互替**变体（`.mdl` ↔ `.mdx`）。
@@ -1156,23 +1172,29 @@ impl<R: Read + Seek> Archive<R> {
         }
 
         // 附上名字：先处理 (listfile) 条目，再处理已知的特殊文件。
+        // (来源, 块索引) → result 下标的查表取代逐名线性扫描
+        //（大归档下 名字数 × 条目数 是平方级）；or_insert 保持
+        // 首个键胜出，与原先线性 find 的语义一致。
+        let mut slot_of: std::collections::HashMap<(TableSource, usize), usize> =
+            std::collections::HashMap::with_capacity(result.len());
+        for (i, e) in result.iter().enumerate() {
+            slot_of.entry((e.source, e.block_index)).or_insert(i);
+        }
         for name in self
             .names
             .iter()
             .map(|s| s.as_str())
             .chain(SPECIAL_FILES)
         {
-            if let Some(mut entry) = self.find_entry(name) {
-                if entry.exists() {
-                    entry.name = Some(name.to_string());
-                    if let Some(slot) = result
-                        .iter_mut()
-                        .find(|e| e.block_index == entry.block_index && e.source == entry.source)
-                    {
-                        if slot.name.is_none() {
-                            slot.name = entry.name.clone();
-                        }
-                    }
+            let Some(entry) = self.find_entry(name) else {
+                continue;
+            };
+            if !entry.exists() {
+                continue;
+            }
+            if let Some(&slot) = slot_of.get(&(entry.source, entry.block_index)) {
+                if result[slot].name.is_none() {
+                    result[slot].name = Some(name.to_string());
                 }
             }
         }

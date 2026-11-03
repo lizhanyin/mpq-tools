@@ -87,8 +87,8 @@ pub use repair::{diagnose, locate_header, repair, RepairIssue, RepairReport};
 
 /// 归档修改：导入（添加 / 替换）与删除文件，以及容器版本转换。
 pub use modify::{
-    change_password, convert, modify, modify_with, protect, unprotect, Deletion, ModifyOptions,
-    ModifyOutcome, ModifyReport, PasswordProtect,
+    change_password, convert, modify, modify_with, modify_with_progress, protect, unprotect,
+    Deletion, ModifyOptions, ModifyOutcome, ModifyPhase, ModifyReport, PasswordProtect,
 };
 
 /// 创建新的空归档。

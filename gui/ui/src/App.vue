@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from 'vue'
-import { NConfigProvider } from 'naive-ui'
+import { NConfigProvider, NProgress } from 'naive-ui'
 import MenuBar from './components/MenuBar.vue'
 import StatusBar from './components/StatusBar.vue'
 import Welcome from './components/Welcome.vue'
@@ -15,7 +15,7 @@ import MoveModal from './components/MoveModal.vue'
 import ConvertModal from './components/ConvertModal.vue'
 import PasswordModal from './components/PasswordModal.vue'
 import SettingsModal from './components/SettingsModal.vue'
-import { S, reloadArchive, handleDrop, anyModalOpen, selectAll, log } from './store'
+import { S, reloadArchive, handleDrop, anyModalOpen, selectAll, log, importProgressLabel, importProgressPercent } from './store'
 import { toast } from './toast'
 import * as ipc from './ipc'
 
@@ -124,6 +124,15 @@ onUnmounted(() => {
           S.info ? `📥 松开鼠标以导入 ${S.dropping.count} 项文件/文件夹到当前归档`
                  : '📂 松开鼠标以打开归档'
         }}</div>
+      </div>
+
+      <!-- 全局导入进度（弹窗未开时，如拖拽入队后的目录扫描 / 读取）；
+           「修改归档」弹窗内已有详细进度，不重复显示 -->
+      <div v-if="S.importProgress && !S.modify" class="global-import-progress">
+        <n-progress type="line" :height="6" :show-indicator="false"
+                    :percentage="importProgressPercent(S.importProgress) ?? 0"
+                    :processing="importProgressPercent(S.importProgress) === undefined" />
+        <span class="global-import-progress-label">{{ importProgressLabel(S.importProgress) }}</span>
       </div>
     </div>
   </n-config-provider>

@@ -6,29 +6,42 @@
 import { reactive, computed, nextTick, watch } from 'vue'
 import type { DropdownOption } from 'naive-ui'
 import {
-  S, rows, navigate, previewFile, log, entryByKey,
-  toggleSelected, toggleDirSelected, setSelectedKeys,
-  extractKeys, markDeletions, startMoveModal,
+  S, rows, navigate, previewFile, entryByKey,
+  toggleSelected, toggleDirSelected, setSelectedKeys, selectedByPrefix,
+  getDirEntries, extractKeys, markDeletions, startMoveModal,
 } from '../store'
 import type { Row } from '../store'
-import { collectKeys } from '../utils'
-import type { TreeNodeDto } from '../types'
+import { folderKey } from '../utils'
 import { toast } from '../toast'
 
 // -- 行的选中语义 ---------------------------------------------------------------
 
-/** 行对应的条目 key：目录行 = 其下全部文件（递归，与勾选列一致），文件行 = 自身。 */
+/** 文件行对应的条目 key（同步）。目录行的子树 key 需经后端异步取
+ * （懒加载树下前端未必加载过其内容），见 dirRowKeys。 */
 export function rowKeys(row: Row): string[] {
-  return row.type === 'dir' ? collectKeys(row.node) : [row.entry.key]
+  return row.type === 'file' ? [row.entry.key] : []
 }
 
-/** 行的选中态：'full' 全选 / 'partial' 部分选中（仅目录行会出现）/ 'none'。 */
+/** 行对应的全部条目 key（目录行 = 其下全部文件，递归）。异步：
+ * 点击 / 框选等交互在结果到达后应用选择。 */
+export function dirRowKeys(row: Row): Promise<string[]> {
+  if (row.type === 'file') return Promise.resolve([row.entry.key])
+  return getDirEntries(row.path).then((entries) => entries.map((e) => e.key))
+}
+
+/** 目录行子树内已选条目数（selectedByPrefix 同步计数）。 */
+function dirSelectedCount(row: Row & { type: 'dir' }): number {
+  return selectedByPrefix.value.get(folderKey(row.path)) ?? 0
+}
+
+/** 行的选中态：'full' 全选 / 'partial' 部分选中（仅目录行会出现）/ 'none'。
+ * 目录行用「子树已选数 vs 占位符自带的 file_count」推导，无需子树
+ * key 清单。 */
 export function rowSelectedState(row: Row): 'full' | 'partial' | 'none' {
-  const keys = rowKeys(row)
-  if (keys.length === 0) return 'none'
-  let sel = 0
-  for (const k of keys) if (S.selected.has(k)) sel++
-  return sel === keys.length ? 'full' : (sel > 0 ? 'partial' : 'none')
+  if (row.type === 'file') return S.selected.has(row.entry.key) ? 'full' : 'none'
+  const total = row.node.file_count
+  const sel = dirSelectedCount(row)
+  return total > 0 && sel === total ? 'full' : (sel > 0 ? 'partial' : 'none')
 }
 
 // -- 单击 / Ctrl 多选 / Shift 范围 -------------------------------------------------
@@ -42,19 +55,29 @@ watch(() => rows.value.list, () => {
   if (enterSelectFirst) {
     enterSelectFirst = false
     const first = rows.value.list[0]
-    setSelectedKeys(first ? rowKeys(first) : [])
     anchorIdx = first ? 0 : -1
+    if (first) void dirRowKeys(first).then(setSelectedKeys)
+    else setSelectedKeys([])
     return
   }
   anchorIdx = -1
 })
 
-/** 把 list[a..b]（含）的全部条目 key 设为选择集。 */
-function selectRange(a: number, b: number) {
+/** 把 list[a..b]（含）的全部条目 key 设为选择集。含目录行时需异步
+ * 取其子树条目（不用 spread：大目录可能超参数上限）。 */
+async function selectRange(a: number, b: number) {
   const list = rows.value.list
   const keys: string[] = []
+  const dirRows: Array<Row & { type: 'dir' }> = []
   for (let i = a; i <= b; i++) {
-    for (const k of rowKeys(list[i])) keys.push(k) // 不用 spread：大目录可能超参数上限
+    const r = list[i]
+    if (!r) continue
+    if (r.type === 'file') keys.push(r.entry.key)
+    else dirRows.push(r)
+  }
+  const subtrees = await Promise.all(dirRows.map((r) => getDirEntries(r.path)))
+  for (const entries of subtrees) {
+    for (const e of entries) keys.push(e.key)
   }
   setSelectedKeys(keys)
 }
@@ -64,17 +87,18 @@ export function activateRow(row: Row, ev: MouseEvent) {
   const idx = list.indexOf(row)
   if (ev.shiftKey && anchorIdx >= 0 && anchorIdx < list.length && idx >= 0) {
     const [a, b] = anchorIdx <= idx ? [anchorIdx, idx] : [idx, anchorIdx]
-    selectRange(a, b)
+    anchorIdx = idx
+    void selectRange(a, b)
     return
   }
+  anchorIdx = idx
   if (ev.ctrlKey || ev.metaKey) {
     const on = rowSelectedState(row) !== 'full'
-    if (row.type === 'dir') toggleDirSelected(row.node, on)
+    if (row.type === 'dir') toggleDirSelected(row.path, on)
     else toggleSelected(row.entry.key, on)
   } else {
-    setSelectedKeys(rowKeys(row))
+    void dirRowKeys(row).then(setSelectedKeys)
   }
-  anchorIdx = idx
 }
 
 /** 方向键导航（网格视图）：把选择移动到 rows.list[idx]。
@@ -86,9 +110,9 @@ export function moveCursorTo(idx: number, extend?: boolean): Row | null {
   if (!row) return null
   if (extend && anchorIdx >= 0 && anchorIdx < list.length) {
     const [a, b] = anchorIdx <= idx ? [anchorIdx, idx] : [idx, anchorIdx]
-    selectRange(a, b)
+    void selectRange(a, b)
   } else {
-    setSelectedKeys(rowKeys(row))
+    void dirRowKeys(row).then(setSelectedKeys)
     anchorIdx = idx
   }
   return row
@@ -111,19 +135,21 @@ export const ctx = reactive<{ show: boolean; x: number; y: number; row: Row | nu
   show: false, x: 0, y: 0, row: null,
 })
 
-/** 选择集是否恰好等于该行（= 单选了这一行，菜单用单项形态）。 */
+/** 选择集是否恰好等于该行（= 单选了这一行，菜单用单项形态）。
+ * 目录行按「已选数 = 子树总数 = 选择集大小」判定。 */
 function selectionIsExactly(row: Row): boolean {
-  const keys = rowKeys(row)
-  if (keys.length !== S.selected.size) return false
-  for (const k of keys) if (!S.selected.has(k)) return false
-  return true
+  if (row.type === 'file') {
+    return S.selected.size === 1 && S.selected.has(row.entry.key)
+  }
+  const total = row.node.file_count
+  return total > 0 && dirSelectedCount(row) === total && S.selected.size === total
 }
 
 export function openContextMenu(row: Row, ev: MouseEvent) {
   ev.preventDefault()
   if (rowSelectedState(row) !== 'full') {
-    setSelectedKeys(rowKeys(row))
     anchorIdx = rows.value.list.indexOf(row)
+    void dirRowKeys(row).then(setSelectedKeys)
   }
   ctx.row = row
   ctx.show = false
@@ -134,9 +160,10 @@ export function openContextMenu(row: Row, ev: MouseEvent) {
   })
 }
 
-function dirAllSelected(node: TreeNodeDto): boolean {
-  const keys = collectKeys(node)
-  return keys.length > 0 && keys.every((k) => S.selected.has(k))
+/** 目录行子树是否已全选（右键菜单「选中/取消选中」的标签用）。 */
+function dirRowAllSelected(row: Row & { type: 'dir' }): boolean {
+  const total = row.node.file_count
+  return total > 0 && dirSelectedCount(row) === total
 }
 
 export const ctxOptions = computed((): DropdownOption[] => {
@@ -156,7 +183,7 @@ export const ctxOptions = computed((): DropdownOption[] => {
   if (row.type === 'dir') {
     return [
       { label: '打开', key: 'enter' },
-      { label: dirAllSelected(row.node) ? '取消选中' : '选中', key: 'dir-select' },
+      { label: dirRowAllSelected(row) ? '取消选中' : '选中', key: 'dir-select' },
       { label: '提取…', key: 'dir-extract' },
       { type: 'divider', key: 'd1' },
       { label: '移动到…', key: 'dir-move', disabled: row.node.file_count === 0 },
@@ -186,12 +213,14 @@ export function onCtxSelect(key: string | number) {
   if (key === 'batch-move') { startMoveModal([...S.selected]); return }
   if (key === 'batch-delete') { markDeletions([...S.selected]); return }
   if (row.type === 'dir') {
+    // 目录行的批量动作：先异步取子树条目再执行（懒加载树下子树
+    // key 不在前端）。
     if (key === 'enter') openRow(row)
-    else if (key === 'dir-select') toggleDirSelected(row.node, !dirAllSelected(row.node))
-    else if (key === 'dir-extract') extractKeys(collectKeys(row.node))
-    else if (key === 'dir-move') startMoveModal(collectKeys(row.node))
+    else if (key === 'dir-select') toggleDirSelected(row.path, !dirRowAllSelected(row))
+    else if (key === 'dir-extract') void dirRowKeys(row).then(extractKeys)
+    else if (key === 'dir-move') void dirRowKeys(row).then(startMoveModal)
     else if (key === 'copy-name') copyText(row.node.name)
-    else if (key === 'dir-delete') markDeletions(collectKeys(row.node))
+    else if (key === 'dir-delete') void dirRowKeys(row).then(markDeletions)
     return
   }
   const e = row.entry

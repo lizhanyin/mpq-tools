@@ -1,12 +1,24 @@
 //! 暴露给前端的 IPC 命令。路径（归档、提取目录、导入文件、保存目标）
 //! 均来自 Tauri 文件对话框；所有文件 I/O 都在 Rust 这一侧完成。
+//!
+//! 重 I/O 命令（整归档读取 / 解析 / 写盘、Argon2 校验、目录遍历、
+//! 图片解码等）标注 `(async)`：Tauri 的同步命令在**主线程**执行，
+//! 秒级的工作会冻结窗口事件循环（Windows 判定“无响应”）；
+//! `(async)` 把同步函数放到线程池执行，签名与前端调用方式不变。
+//! 所有会取全局状态锁的命令（包括 `list_dir` 等原本轻量的）一律
+//! `(async)`：长操作（修改 / 转换 / 密码）可能持锁数分钟，同步命令
+//! 在主线程等锁会连带冻结窗口，并堵住同样经主线程派发的 Channel
+//! 进度事件。`write_password_note` 不碰状态锁且只写小文本，保持同步。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use mpq::{Deletion, ModifyOptions};
+use mpq::{Deletion, ModifyOptions, ModifyPhase};
 use mpqtool::tasks;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use tauri::ipc::Channel;
 use tauri::State;
 
 use crate::state::{GuiState, OpenResult, parse_key};
@@ -28,7 +40,7 @@ fn format_version(n: u32) -> Result<mpq::FormatVersion, String> {
 
 // -- 打开 / 重载 --------------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_archive(path: String, state: St) -> Result<OpenResult, String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("读取失败：{e}"))?;
     let mut s = lock(&state);
@@ -36,7 +48,7 @@ pub fn open_archive(path: String, state: St) -> Result<OpenResult, String> {
 }
 
 /// 从磁盘重新读取当前归档（🔄 / F5）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reload_archive(state: St) -> Result<OpenResult, String> {
     let mut s = lock(&state);
     let path = s.path.clone().ok_or("请先打开一个归档。")?;
@@ -47,16 +59,55 @@ pub fn reload_archive(state: St) -> Result<OpenResult, String> {
 
 /// 关闭当前归档（文件菜单）：释放后端保存的字节、主密钥与
 /// 修复 / 修改 / 转换的中间结果。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn close_archive(state: St) {
     *lock(&state) = GuiState::default();
+}
+
+// -- 目录懒加载（大归档初始只发根目录一层） ----------------------------
+
+/// 搜索结果的上限：与前端 MAX_ROWS 一致——更宽泛的词只会在表格里
+/// 显示同样的上限，没必要经 IPC 多传。
+const SEARCH_LIMIT: usize = 50_000;
+
+/// 进入 / 展开文件夹时取该目录的一层视图（本层文件 + 子文件夹占位符）。
+/// `path` 为路径段数组（[] = 归档根）。
+#[tauri::command(async)]
+pub fn list_dir(path: Vec<String>, state: St) -> Result<crate::state::TreeNodeDto, String> {
+    let s = lock(&state);
+    s.list_dir_dto(&path)
+        .ok_or_else(|| format!("文件夹不存在：{}", path.join("\\")))
+}
+
+#[derive(Serialize)]
+pub struct SearchDto {
+    pub entries: Vec<crate::state::EntryDto>,
+    /// 命中数超过上限被截断。
+    pub truncated: bool,
+}
+
+/// 在整个归档（含前端尚未加载的目录）中按全路径搜索。
+#[tauri::command(async)]
+pub fn search_archive(needle: String, state: St) -> Result<SearchDto, String> {
+    let s = lock(&state);
+    let (entries, truncated) = s.search_entries(&needle, SEARCH_LIMIT);
+    Ok(SearchDto { entries, truncated })
+}
+
+/// 某个文件夹及其全部子级中的条目——「选中/提取/移动/删除文件夹」
+/// 等递归交互用（这些条目对应的目录前端未必加载过）。
+#[tauri::command(async)]
+pub fn dir_entries(path: Vec<String>, state: St) -> Result<Vec<crate::state::EntryDto>, String> {
+    let s = lock(&state);
+    s.dir_entries_dto(&path)
+        .ok_or_else(|| format!("文件夹不存在：{}", path.join("\\")))
 }
 
 // -- 密码保护（自定义 AEAD 扩展）---------------------------------
 
 /// 针对 `(password)` 保管库校验密码，并把主密钥保存在状态中，
 /// 供后续读取 / 修改使用。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn unlock_archive(password: String, state: St) -> Result<NoteDto, String> {
     let mut s = lock(&state);
     let archive = s.archive.as_mut().ok_or("未打开归档。")?;
@@ -75,27 +126,30 @@ pub fn unlock_archive(password: String, state: St) -> Result<NoteDto, String> {
 
 /// 对已载入的原始字节应用密码操作（`op` 取值 "set" | "change" |
 /// "remove"）；结果（与 apply_modify 一样）保留在状态中，直到保存 /
-/// 打开 / 丢弃。
-#[tauri::command]
+/// 打开 / 丢弃。重写整档（可达分钟级）在全局锁**外**进行（同
+/// apply_modify），期间界面不被阻塞。
+#[tauri::command(async)]
 pub fn apply_password_op(
     op: String,
     password: String,
     new_password: Option<String>,
     state: St,
 ) -> Result<NoteDto, String> {
-    let mut s = lock(&state);
-    if s.raw.is_empty() {
-        return Err("请先打开一个归档。".to_string());
-    }
-    let note = match op.as_str() {
+    let (raw, key_before) = {
+        let s = lock(&state);
+        if s.raw.is_empty() {
+            return Err("请先打开一个归档。".to_string());
+        }
+        (s.raw.clone(), s.master_key)
+    };
+    // (输出字节, 摘要, 操作后的主密钥)。
+    let (bytes, note, key_after) = match op.as_str() {
         "set" => {
             if password.is_empty() {
                 return Err("密码不能为空。".to_string());
             }
-            let outcome = mpq::protect(&s.raw, &password, &mpq::Argon2Params::default())
+            let outcome = mpq::protect(&raw, &password, &mpq::Argon2Params::default())
                 .map_err(|e| format!("设置密码失败：{e}"))?;
-            // 保留新生成的主密钥，这样保存后重新载入仍保持解锁状态。
-            s.master_key = outcome.master_key;
             let mut note = format!(
                 "已启用密码保护（{} 个文件已按扇区密封，容器转为 v4）",
                 outcome.report.encrypted
@@ -104,8 +158,8 @@ pub fn apply_password_op(
                 note.push_str(&format!("；自动移除 {}", outcome.report.dropped.join("、")));
             }
             note.push_str("。注意：第三方 MPQ 工具将无法打开该文件。");
-            s.modify_applied = Some((outcome.bytes, note.clone()));
-            note
+            // 保留新生成的主密钥，这样保存后重新载入仍保持解锁状态。
+            (outcome.bytes, note, outcome.master_key)
         }
         "change" => {
             let new = new_password.as_deref().ok_or("缺少新密码。")?.to_string();
@@ -113,26 +167,29 @@ pub fn apply_password_op(
                 return Err("新密码不能为空。".to_string());
             }
             let bytes =
-                mpq::change_password(&s.raw, &password, &new, &mpq::Argon2Params::default())
+                mpq::change_password(&raw, &password, &new, &mpq::Argon2Params::default())
                     .map_err(|e| format!("修改密码失败：{e}"))?;
-            // 主密钥未变；s.master_key 依然有效。
-            let note = "已更换密码（仅重新包装主密钥，数据未重写）。".to_string();
-            s.modify_applied = Some((bytes, note.clone()));
-            note
+            // 主密钥未变；沿用快照。
+            (
+                bytes,
+                "已更换密码（仅重新包装主密钥，数据未重写）。".to_string(),
+                key_before,
+            )
         }
         "remove" => {
             let outcome =
-                mpq::unprotect(&s.raw, &password).map_err(|e| format!("解除密码保护失败：{e}"))?;
-            s.master_key = None;
+                mpq::unprotect(&raw, &password).map_err(|e| format!("解除密码保护失败：{e}"))?;
             let note = format!(
                 "已解除密码保护（{} 个文件已解密）。",
                 outcome.report.decrypted
             );
-            s.modify_applied = Some((outcome.bytes, note.clone()));
-            note
+            (outcome.bytes, note, None)
         }
         other => return Err(format!("未知的密码操作 {other}")),
     };
+    let mut s = lock(&state);
+    s.master_key = key_after;
+    s.modify_applied = Some((bytes, note.clone()));
     Ok(NoteDto { note })
 }
 
@@ -333,7 +390,7 @@ fn read_for_preview(
 /// 未命名条目以 key 寻址（显示名带识别出的类型后缀，如
 /// `<unnamed #3>.blp`，据此走图片 / 模型预览）。full=true 时不截断
 /// 地加载整个文本（前端「加载全部」按钮）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn preview_file(
     key: Option<String>,
     name: Option<String>,
@@ -403,7 +460,7 @@ pub fn preview_file(
 /// 读取归档内一个文件的原始字节（base64）——MDX 预览按需加载贴图用。
 /// 归档里没有时回退到老客户端 MPQ 链（`war3dir` 设置；补丁优先）。
 /// 两者都没有返回 None，由前端回退到无贴图渲染。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_file_bytes(
     name: String,
     war3dir: Option<String>,
@@ -425,7 +482,7 @@ pub fn read_file_bytes(
 }
 
 /// 老客户端目录下可用的 War3*.mpq 数量（设置页校验提示用）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn war3_mpq_count(dir: String) -> usize {
     [
         "War3Patch.mpq",
@@ -448,7 +505,7 @@ pub struct ModelTextureDto {
     pub source: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn model_textures(
     key: String,
     war3dir: Option<String>,
@@ -478,7 +535,7 @@ pub fn model_textures(
 
 /// 贴图缩略图（PNG data URL）：当前归档优先，回退老客户端 MPQ 链。
 /// 找不到或无法解码返回 None（前端显示占位）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn texture_thumbnail(
     path: String,
     war3dir: Option<String>,
@@ -498,7 +555,7 @@ pub fn texture_thumbnail(
 
 /// 网格视图缩略图：解码并等比缩到 192px 内的 PNG data URL。
 /// 非图片或解码失败返回 None（前端回退到图标），不弹错误。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn thumbnail(
     key: Option<String>,
     name: Option<String>,
@@ -522,7 +579,7 @@ pub struct StagedDto {
 
 /// 把预览窗中编辑后的文本按原编码写入临时文件，返回其路径，
 /// 供前端作为「修改归档 → 待导入」条目排队（保存回到归档的流程）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stage_edited_file(
     name: String,
     text: String,
@@ -567,7 +624,7 @@ pub struct MoveSpec {
 /// 「移动」的数据准备：把选中条目的内容读出并写入临时文件，返回值供
 /// 前端按新名字排队为「待导入」（配合删除旧条目，在「修改归档」窗口
 /// 应用后生效）。逐条读取：任何一条失败都中止本次移动，避免只移动一半。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn stage_move_files(moves: Vec<MoveSpec>, state: St) -> Result<Vec<StagedDto>, String> {
     let s = lock(&state);
     let Some(archive) = &s.archive else {
@@ -623,7 +680,7 @@ impl From<tasks::ExtractResult> for ExtractDto {
 
 /// 按选择键把条目提取到 `dir`；`keys` 列表为空表示
 /// “全部具名文件”（提取全部）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn extract(keys: Vec<String>, dir: String, state: St) -> Result<ExtractDto, String> {
     let s = lock(&state);
     let Some(archive) = &s.archive else {
@@ -665,7 +722,7 @@ pub struct DiagnoseDto {
 
 /// 对已载入的原始字节做头信息损坏诊断（即使归档打开失败也能执行——
 /// 这正是最主要的使用场景）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn diagnose_archive(state: St) -> Result<DiagnoseDto, String> {
     let s = lock(&state);
     if s.raw.is_empty() {
@@ -692,7 +749,7 @@ pub struct NoteDto {
 
 /// 对已载入的原始字节应用修复；结果保留在状态中，
 /// 直到保存 / 打开 / 丢弃。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn apply_repair(state: St) -> Result<NoteDto, String> {
     let mut s = lock(&state);
     if s.raw.is_empty() {
@@ -713,7 +770,7 @@ pub fn apply_repair(state: St) -> Result<NoteDto, String> {
     Ok(NoteDto { note })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_repaired(path: String, state: St) -> Result<NoteDto, String> {
     let s = lock(&state);
     let fixed = s.repair_fixed.as_ref().ok_or("请先应用修复。")?;
@@ -724,7 +781,7 @@ pub fn save_repaired(path: String, state: St) -> Result<NoteDto, String> {
 }
 
 /// 把修复后的字节载入界面，而不写入磁盘。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_repaired(state: St) -> Result<OpenResult, String> {
     let mut s = lock(&state);
     let fixed = s.repair_fixed.clone().ok_or("请先应用修复。")?;
@@ -830,18 +887,22 @@ mod tests {
         std::fs::write(base.join("img/ui/b.png"), b"bb").unwrap();
         std::fs::write(base.join("img/.hidden"), b"h").unwrap();
 
-        let s = crate::state::GuiState::default();
-        let mut out = Vec::new();
-        super::walk_import_dir(&base.join("img"), "img", &s, &mut out);
+        // 与 stat_imports 相同的两段式：锁外扫描 + 短暂加锁补 replaces。
+        let stat = |dir: &std::path::Path, prefix: &str| -> Vec<super::ImportStatDto> {
+            let s = crate::state::GuiState::default();
+            let mut found = Vec::new();
+            super::walk_import_dir(dir, prefix, &mut found, &super::ProgressTap::noop());
+            found.into_iter().map(|f| f.into_dto(&s)).collect()
+        };
 
+        let out = stat(&base.join("img"), "img");
         let mut names: Vec<&str> = out.iter().map(|o| o.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["img\\.hidden", "img\\a.png", "img\\ui\\b.png"]);
         assert!(out.iter().all(|o| o.error.is_none() && !o.replaces));
 
         // 「只导入子项」在归档根目录：前缀为空，不能出现前导 `\`。
-        let mut out = Vec::new();
-        super::walk_import_dir(&base.join("img"), "", &s, &mut out);
+        let out = stat(&base.join("img"), "");
         let mut names: Vec<&str> = out.iter().map(|o| o.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec![".hidden", "a.png", "ui\\b.png"]);
@@ -852,8 +913,7 @@ mod tests {
         std::fs::write(base.join("dup/file.txt"), b"root").unwrap();
         std::fs::write(base.join("dup/dirA/file.txt"), b"A").unwrap();
         std::fs::write(base.join("dup/dirB/file.txt"), b"B").unwrap();
-        let mut out = Vec::new();
-        super::walk_import_dir(&base.join("dup"), "", &s, &mut out);
+        let out = stat(&base.join("dup"), "");
         let mut names: Vec<&str> = out.iter().map(|o| o.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(names, vec!["dirA\\file.txt", "dirB\\file.txt", "file.txt"]);
@@ -869,12 +929,67 @@ mod tests {
 }
 
 /// 丢弃待处理的修复结果（窗口已关闭）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn discard_repair(state: St) {
     lock(&state).repair_fixed = None;
 }
 
 // -- 导入 / 删除 -------------------------------------------------------------
+
+/// 导入进度事件（经 Tauri Channel 推送到前端）。
+/// phase：`"reading"` 读取待导入文件 / 扫描目录；`"encoding"` 压缩写入
+/// 新归档；`"verifying"` 自检回读。total 为 0 表示总数未知（目录扫描
+/// 尚在进行），前端只显示已完成数量。
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ImportProgressDto {
+    pub phase: String,
+    pub done: u32,
+    pub total: u32,
+}
+
+/// 进度节流器：仅在跨过阈值时真正发送 Channel 消息——总数已知时约
+/// 1%，未知时每 32 项——避免上万条目时 IPC 消息淹没前端。rayon 工作
+/// 线程可能并发调用，CAS 保证同一进度只发一次（竞争失败者直接放弃，
+/// 下一个阈值仍会触发）。
+struct ProgressTap {
+    channel: Channel<ImportProgressDto>,
+    last: AtomicU32,
+}
+
+impl ProgressTap {
+    fn new(channel: Channel<ImportProgressDto>) -> Self {
+        Self {
+            channel,
+            last: AtomicU32::new(0),
+        }
+    }
+
+    /// 测试用：丢弃全部进度事件（不需要真实 webview）。
+    #[cfg(test)]
+    fn noop() -> Self {
+        Self::new(Channel::new(|_| Ok(())))
+    }
+
+    fn emit(&self, phase: &str, done: u32, total: u32) {
+        let step = if total == 0 { 32 } else { (total / 100).max(1) };
+        let prev = self.last.load(Ordering::Relaxed);
+        let crossed = done.saturating_sub(prev) >= step || (total > 0 && done == total);
+        if !crossed {
+            return;
+        }
+        if self
+            .last
+            .compare_exchange(prev, done, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let _ = self.channel.send(ImportProgressDto {
+                phase: phase.to_string(),
+                done,
+                total,
+            });
+        }
+    }
+}
 
 #[derive(Serialize)]
 pub struct ImportStatDto {
@@ -897,15 +1012,21 @@ pub struct ImportStatDto {
 /// `img\a.png`、`img\ui\b.png`）；`children_only` 为真时只导入其
 /// 子项（得到 `a.png`、`ui\b.png`）。`prefix` 非空时（前端浏览到
 /// 子目录时导入）加在每项名称之前。符号链接目录不跟随，避免循环。
-#[tauri::command]
+///
+/// 递归扫描（含每项一次 metadata，慢盘 / 网络盘上可达分钟级）在
+/// **锁外**进行；扫描完短暂加锁补上 `replaces`（每项一次内存哈希
+/// 查找，微秒级）——持锁遍历会让所有其他命令（含主线程上的进度
+/// 事件派发）排队到扫描结束。
+#[tauri::command(async)]
 pub fn stat_imports(
     paths: Vec<String>,
     prefix: Option<String>,
     children_only: Option<bool>,
+    on_progress: Channel<ImportProgressDto>,
     state: St,
 ) -> Vec<ImportStatDto> {
-    let s = lock(&state);
-    let mut out = Vec::new();
+    let tap = ProgressTap::new(on_progress);
+    let mut found: Vec<FoundFile> = Vec::new();
     let pre = prefix.as_deref().unwrap_or("");
     for p in &paths {
         let path = Path::new(p);
@@ -919,16 +1040,17 @@ pub fn stat_imports(
                     .unwrap_or_default();
                 join_arc(pre, &base)
             };
-            walk_import_dir(path, &root, &s, &mut out);
+            walk_import_dir(path, &root, &mut found, &tap);
         } else {
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            out.push(stat_one(path, join_arc(pre, &name), &s));
+            found.push(stat_one(path, join_arc(pre, &name)));
         }
     }
-    out
+    let s = lock(&state);
+    found.into_iter().map(|f| f.into_dto(&s)).collect()
 }
 
 /// `\` 连接归档内路径；`a` 为空时直接返回 `b`（避免前导 `\`）。
@@ -940,38 +1062,60 @@ fn join_arc(a: &str, b: &str) -> String {
     }
 }
 
+/// 扫描发现的一个待导入文件（或读取失败的路径）。磁盘 I/O（遍历 +
+/// metadata）在锁外完成；`replaces` 由 [`FoundFile::into_dto`] 稍后
+/// 短暂加锁补上。
+struct FoundFile {
+    name: String,
+    path: String,
+    size: u64,
+    error: Option<String>,
+}
+
+impl FoundFile {
+    fn into_dto(self, s: &GuiState) -> ImportStatDto {
+        let replaces = self.error.is_none()
+            && s.archive
+                .as_ref()
+                .is_some_and(|a| a.find_file(&self.name).is_some());
+        ImportStatDto {
+            name: self.name,
+            path: self.path,
+            size: self.size,
+            replaces,
+            error: self.error,
+        }
+    }
+}
+
 /// 单个文件（或读取失败的路径）的导入信息。
-fn stat_one(path: &Path, name: String, s: &GuiState) -> ImportStatDto {
+fn stat_one(path: &Path, name: String) -> FoundFile {
     let (size, error) = match std::fs::metadata(path) {
         Ok(m) => (m.len(), None),
         Err(e) => (0, Some(e.to_string())),
     };
-    let replaces = s
-        .archive
-        .as_ref()
-        .is_some_and(|a| a.find_file(&name).is_some());
-    ImportStatDto {
+    FoundFile {
         name,
         path: path.to_string_lossy().to_string(),
         size,
-        replaces,
         error,
     }
 }
 
 /// 递归收集 `dir` 下的文件，归档名前缀为 `arc_prefix`（已含文件夹
 /// 自身名与可能的导入前缀）。读取失败只影响对应条目，不中断整体。
-fn walk_import_dir(dir: &Path, arc_prefix: &str, s: &GuiState, out: &mut Vec<ImportStatDto>) {
+/// `tap` 按条目数节流上报扫描进度（总数未知，done 为已发现项数）。
+fn walk_import_dir(dir: &Path, arc_prefix: &str, out: &mut Vec<FoundFile>, tap: &ProgressTap) {
     let read = match std::fs::read_dir(dir) {
         Ok(r) => r,
         Err(e) => {
-            out.push(ImportStatDto {
+            out.push(FoundFile {
                 name: arc_prefix.to_string(),
                 path: dir.to_string_lossy().to_string(),
                 size: 0,
-                replaces: false,
                 error: Some(format!("读取文件夹失败：{e}")),
             });
+            tap.emit("reading", out.len() as u32, 0);
             return;
         }
     };
@@ -984,10 +1128,11 @@ fn walk_import_dir(dir: &Path, arc_prefix: &str, s: &GuiState, out: &mut Vec<Imp
         let path = child.path();
         if ft.is_dir() {
             let sub = join_arc(arc_prefix, &child.file_name().to_string_lossy());
-            walk_import_dir(&path, &sub, s, out);
+            walk_import_dir(&path, &sub, out, tap);
         } else if ft.is_file() {
             let name = join_arc(arc_prefix, &child.file_name().to_string_lossy());
-            out.push(stat_one(&path, name, s));
+            out.push(stat_one(&path, name));
+            tap.emit("reading", out.len() as u32, 0);
         }
     }
 }
@@ -1010,22 +1155,36 @@ pub struct DelSpec {
 
 /// 把待处理的导入 / 删除列表应用到已载入的原始字节；结果保留在
 /// 状态中，直到保存 / 打开 / 丢弃。
-#[tauri::command]
+///
+/// 导入文件的磁盘读取与修改引擎（整档重写 + 压缩，可达分钟级）都在
+/// 全局锁**外**进行：期间其他命令（浏览 / 预览）以及主线程上的
+/// Channel 进度事件派发不会被阻塞；输入在锁内快照，结果稍后短暂
+/// 加锁写回。读取 / 编码 / 自检阶段经 `on_progress` 推送进度事件。
+#[tauri::command(async)]
 pub fn apply_modify(
     additions: Vec<AddSpec>,
     deletions: Vec<DelSpec>,
     reencrypt: bool,
+    on_progress: Channel<ImportProgressDto>,
     state: St,
 ) -> Result<NoteDto, String> {
-    let mut s = lock(&state);
-    if s.raw.is_empty() {
-        return Err("请先打开一个归档。".to_string());
-    }
-
-    let mut adds: Vec<(String, Vec<u8>)> = Vec::new();
-    for a in &additions {
-        let data = std::fs::read(&a.path).map_err(|e| format!("读取失败 {}: {e}", a.path))?;
-        adds.push((a.name.clone(), data));
+    // 并行读取全部待导入文件；按原始顺序收集，保持首个错误即中止的
+    // 语义与错误文案不变。
+    let total = additions.len() as u32;
+    let read_tap = ProgressTap::new(on_progress.clone());
+    let read_done = AtomicU32::new(0);
+    let results: Vec<(String, Result<Vec<u8>, String>)> = additions
+        .par_iter()
+        .map(|a| {
+            let r = std::fs::read(&a.path).map_err(|e| format!("读取失败 {}: {e}", a.path));
+            let done = read_done.fetch_add(1, Ordering::Relaxed) + 1;
+            read_tap.emit("reading", done, total);
+            (a.name.clone(), r)
+        })
+        .collect();
+    let mut adds: Vec<(String, Vec<u8>)> = Vec::with_capacity(results.len());
+    for (name, r) in results {
+        adds.push((name, r?));
     }
     let dels: Vec<Deletion> = deletions
         .iter()
@@ -1039,13 +1198,38 @@ pub fn apply_modify(
         })
         .collect::<Result<_, String>>()?;
 
+    // 引擎启动前还有一段无事件的准备期（克隆归档字节、重建源块布局），
+    // 先推一条 preparing，避免进度条停在「读取中 N/N」。
+    let _ = on_progress.send(ImportProgressDto {
+        phase: "preparing".to_string(),
+        done: 0,
+        total: 0,
+    });
+    let tap = ProgressTap::new(on_progress);
+    let cb = |phase: ModifyPhase, done: usize, total: usize| {
+        let name = match phase {
+            ModifyPhase::Encoding => "encoding",
+            ModifyPhase::Verifying => "verifying",
+        };
+        tap.emit(name, done as u32, total as u32);
+    };
+    let progress = Some(&cb as &(dyn Fn(ModifyPhase, usize, usize) + Sync));
+
+    let (raw, master_key) = {
+        let s = lock(&state);
+        if s.raw.is_empty() {
+            return Err("请先打开一个归档。".to_string());
+        }
+        (s.raw.clone(), s.master_key)
+    };
+
     let options = ModifyOptions {
         reencrypt_key_v2: reencrypt,
-        master_key: s.master_key,
+        master_key,
         ..Default::default()
     };
-    let outcome =
-        mpq::modify_with(&s.raw, &dels, &adds, &options).map_err(|e| format!("修改失败：{e}"))?;
+    let outcome = mpq::modify_with_progress(&raw, &dels, &adds, &options, progress)
+        .map_err(|e| format!("修改失败：{e}"))?;
     let mut summary = summarize_modify(&outcome.report);
     if !outcome.report.re_encoded.is_empty() {
         summary.push_str(if reencrypt {
@@ -1054,13 +1238,13 @@ pub fn apply_modify(
             "（key-v2 已存为未加密）"
         });
     }
-    s.modify_applied = Some((outcome.bytes, summary.clone()));
+    lock(&state).modify_applied = Some((outcome.bytes, summary.clone()));
     Ok(NoteDto { note: summary })
 }
 
 /// 把已应用的修改写入磁盘，并从写出的文件重新载入归档
 /// （与 egui 流程一致）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_modified(path: String, state: St) -> Result<OpenResult, String> {
     let mut s = lock(&state);
     let (bytes, _) = s.modify_applied.clone().ok_or("请先应用修改。")?;
@@ -1069,7 +1253,7 @@ pub fn save_modified(path: String, state: St) -> Result<OpenResult, String> {
 }
 
 /// 把修改后的字节载入界面，而不写入磁盘。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_modified(state: St) -> Result<OpenResult, String> {
     let mut s = lock(&state);
     let (bytes, summary) = s.modify_applied.clone().ok_or("请先应用修改。")?;
@@ -1083,7 +1267,7 @@ pub fn open_modified(state: St) -> Result<OpenResult, String> {
 }
 
 /// 丢弃待处理的修改结果（窗口已关闭）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn discard_modify(state: St) {
     lock(&state).modify_applied = None;
 }
@@ -1131,7 +1315,7 @@ fn summarize_modify(report: &mpq::ModifyReport) -> String {
 
 /// 在 `path` 处新建一个空归档，使用所选的头版本（v1–v4）与哈希表
 /// 大小，然后载入界面。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_archive(
     path: String,
     version: u32,
@@ -1164,15 +1348,19 @@ pub struct ConvertDto {
 
 /// 把已载入归档的容器转换为另一种头版本；结果保留在状态中，
 /// 直到保存 / 打开 / 丢弃。无法转换的情况会以携带原因的错误返回。
-#[tauri::command]
+/// 整档重写在全局锁**外**进行（同 apply_modify），期间界面不被阻塞。
+#[tauri::command(async)]
 pub fn apply_convert(target: u32, state: St) -> Result<ConvertDto, String> {
-    let mut s = lock(&state);
-    if s.raw.is_empty() {
-        return Err("请先打开一个归档。".to_string());
-    }
     let target = format_version(target)?;
+    let (raw, master_key) = {
+        let s = lock(&state);
+        if s.raw.is_empty() {
+            return Err("请先打开一个归档。".to_string());
+        }
+        (s.raw.clone(), s.master_key)
+    };
 
-    let source = mpq::Archive::new(std::io::Cursor::new(&s.raw))
+    let source = mpq::Archive::new(std::io::Cursor::new(&raw))
         .map_err(|e| format!("归档解析失败：{e}（可先尝试「工具 → 修复头信息」）"))?;
     let from = source.version();
     if from == target {
@@ -1189,11 +1377,11 @@ pub fn apply_convert(target: u32, state: St) -> Result<ConvertDto, String> {
     // 便可以传入受保护归档的主密钥。
     let options = ModifyOptions {
         target_version: Some(target),
-        master_key: s.master_key,
+        master_key,
         ..Default::default()
     };
     let outcome =
-        mpq::modify_with(&s.raw, &[], &[], &options).map_err(|e| format!("转换失败：{e}"))?;
+        mpq::modify_with(&raw, &[], &[], &options).map_err(|e| format!("转换失败：{e}"))?;
     let mut parts = vec![format!(
         "已从 v{} 转换为 v{}（{} 个条目）",
         from.as_u32(),
@@ -1222,7 +1410,7 @@ pub fn apply_convert(target: u32, state: St) -> Result<ConvertDto, String> {
         ));
     }
     let note = parts.join("；") + "。";
-    s.convert_applied = Some((outcome.bytes, note.clone()));
+    lock(&state).convert_applied = Some((outcome.bytes, note.clone()));
     Ok(ConvertDto {
         note,
         applied: true,
@@ -1230,7 +1418,7 @@ pub fn apply_convert(target: u32, state: St) -> Result<ConvertDto, String> {
 }
 
 /// 把已应用的转换写入磁盘，并从写出的文件重新载入归档。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_converted(path: String, state: St) -> Result<OpenResult, String> {
     let mut s = lock(&state);
     let (bytes, _) = s.convert_applied.clone().ok_or("请先应用转换。")?;
@@ -1239,7 +1427,7 @@ pub fn save_converted(path: String, state: St) -> Result<OpenResult, String> {
 }
 
 /// 把转换后的字节载入界面，而不写入磁盘。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_converted(state: St) -> Result<OpenResult, String> {
     let mut s = lock(&state);
     let (bytes, note) = s.convert_applied.clone().ok_or("请先应用转换。")?;
@@ -1253,7 +1441,7 @@ pub fn open_converted(state: St) -> Result<OpenResult, String> {
 }
 
 /// 丢弃待处理的转换结果（窗口已关闭）。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn discard_convert(state: St) {
     lock(&state).convert_applied = None;
 }

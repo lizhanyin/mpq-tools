@@ -37,6 +37,9 @@
 //!   该扩展只存在于 v4 归档中。
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rayon::prelude::*;
 
 use crate::archive::Archive;
 use crate::compression::M_ZLIB;
@@ -151,6 +154,15 @@ pub struct ModifyOutcome {
     pub master_key: Option<[u8; 32]>,
 }
 
+/// [`modify_with_progress`] 进度回调的阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModifyPhase {
+    /// 正在把块编码（压缩）进新归档。
+    Encoding,
+    /// 自检：逐项回读写出的结果比对内容。
+    Verifying,
+}
+
 /// 一个块写入新归档的方式。
 enum Payload {
     /// 原样复制的已存储字节 + 原始标志。
@@ -158,6 +170,8 @@ enum Payload {
     /// 内容全新编码：zlib sectors / 单块，不加密（因此编码永不依赖
     /// 块的位置）。
     Fresh { data: Vec<u8> },
+    /// 已并行预编码完成的 [`Payload::Fresh`] —— 布局阶段直接取字节。
+    FreshEncoded { bytes: Vec<u8>, flags: u32 },
     /// 内容重新编码*并*用以块新偏移派生的 key-v2 密钥重新加密 ——
     /// 依赖位置，因此在布局阶段得知偏移后才编码。
     ReEncrypted { name: String, data: Vec<u8> },
@@ -332,6 +346,19 @@ pub fn modify_with(
     deletions: &[Deletion],
     additions: &[(String, Vec<u8>)],
     options: &ModifyOptions,
+) -> Result<ModifyOutcome> {
+    modify_with_progress(data, deletions, additions, options, None)
+}
+
+/// [`modify_with`] 的进度上报变体：新块并行预编码、布局以及自检回读
+/// 期间以 `(阶段, 已完成, 总数)` 回调 `progress`。并行预编码阶段回调
+/// 可能从多个工作线程并发触发，因此回调要求 `Sync`。
+pub fn modify_with_progress(
+    data: &[u8],
+    deletions: &[Deletion],
+    additions: &[(String, Vec<u8>)],
+    options: &ModifyOptions,
+    progress: Option<&(dyn Fn(ModifyPhase, usize, usize) + Sync)>,
 ) -> Result<ModifyOutcome> {
     let mut archive = Archive::new(std::io::Cursor::new(data))?;
     let base = archive.archive_offset() as usize;
@@ -829,6 +856,29 @@ pub fn modify_with(
         bytes: Vec<u8>,
         flags: u32,
     }
+
+    // --- 并行预编码新块 -----------------------------------
+    // Fresh 块的编码不依赖块位置（不加密），全部新增 / 替换文件的压缩
+    // 可以先在这里并行完成，布局阶段直接取字节；ReEncrypted / Aead 的
+    // 密钥派生自新偏移 / 新块索引，只能留在下方串行的布局循环里。
+    let total_blocks = blocks.len();
+    let encoded_blocks = AtomicUsize::new(0);
+    blocks.par_iter_mut().for_each(|b| {
+        let fresh = match &b.payload {
+            Payload::Fresh { data } => Some(encode_fresh(data, sector_size)),
+            _ => None,
+        };
+        if let Some((bytes, flags)) = fresh {
+            b.payload = Payload::FreshEncoded { bytes, flags };
+            if let Some(cb) = progress {
+                let done = encoded_blocks.fetch_add(1, Ordering::Relaxed) + 1;
+                cb(ModifyPhase::Encoding, done, total_blocks);
+            }
+        }
+    });
+    // 已完成的进度基数：预编码阶段上报过的 Fresh 块数。
+    let mut done_blocks = encoded_blocks.into_inner();
+
     let mut cursor = header_size;
     let mut placed: Vec<Placed> = Vec::with_capacity(blocks.len());
     for (idx, b) in blocks.iter().enumerate() {
@@ -837,6 +887,8 @@ pub fn modify_with(
         let pos = cursor;
         let (bytes, flags) = match &b.payload {
             Payload::Raw { bytes, flags } => (bytes.clone(), *flags),
+            Payload::FreshEncoded { bytes, flags } => (bytes.clone(), *flags),
+            // 预编码阶段已把全部 Fresh 转为 FreshEncoded；保留兜底以穷尽匹配。
             Payload::Fresh { data } => encode_fresh(data, sector_size),
             Payload::ReEncrypted { name, data } => {
                 encode_fresh_reencrypted(name, data, sector_size, pos)
@@ -849,6 +901,13 @@ pub fn modify_with(
         cursor += bytes.len() as u64;
         cursor = (cursor + 3) & !3; // dword 对齐，与真实归档一致
         placed.push(Placed { pos, bytes, flags });
+        if matches!(b.payload, Payload::FreshEncoded { .. }) {
+            continue; // 进度已在预编码阶段上报
+        }
+        done_blocks += 1;
+        if let Some(cb) = progress {
+            cb(ModifyPhase::Encoding, done_blocks, total_blocks);
+        }
     }
 
     // --- hash table ------------------------------------------------------------
@@ -980,11 +1039,21 @@ pub fn modify_with(
                 .map_err(|_| Error::InvalidData("校验失败：主密钥不匹配".to_string()))?;
         }
     }
+    // 自检逐项上报进度（新增 + 重编码 + 重封装的总量）。
+    let verify_total = adds.len() + reencoded.len() + aead_reencoded.len();
+    let mut verified = 0usize;
+    let mut bump_verify = || {
+        verified += 1;
+        if let Some(cb) = progress {
+            cb(ModifyPhase::Verifying, verified, verify_total);
+        }
+    };
     for (name, bytes) in &adds {
         let read = check.read_file(name)?;
         if &read != bytes {
             return Err(Error::InvalidData(format!("校验失败：{name} 内容不一致")));
         }
+        bump_verify();
     }
     // 重新编码的 key-v2 文件必须能读回逐字节一致的内容，
     // 无论它们是被重新加密还是明文存储。
@@ -995,6 +1064,7 @@ pub fn modify_with(
         if &read != content {
             return Err(Error::InvalidData(format!("校验失败：{name} 内容不一致")));
         }
+        bump_verify();
     }
     // 重新封装的 AEAD 块同理，按表索引寻址（无名文件无法按名读取）。
     for (new_index, content) in &aead_reencoded {
@@ -1013,6 +1083,7 @@ pub fn modify_with(
                 "校验失败：块 #{new_index} 内容不一致"
             )));
         }
+        bump_verify();
     }
     for del in deletions {
         if let Deletion::ByName(n) = del {
@@ -1121,18 +1192,11 @@ fn encode_fresh(data: &[u8], sector_size: u32) -> (Vec<u8>, u32) {
     }
 
     let nsec = fsize.div_ceil(sector_size) as usize;
-    let mut sectors: Vec<Vec<u8>> = Vec::with_capacity(nsec);
-    for chunk in data.chunks(sector_size as usize) {
-        let z = zlib(chunk);
-        if z.len() + 1 < chunk.len() {
-            let mut s = Vec::with_capacity(z.len() + 1);
-            s.push(M_ZLIB);
-            s.extend_from_slice(&z);
-            sectors.push(s);
-        } else {
-            sectors.push(chunk.to_vec());
-        }
-    }
+    // 单个大文件内部按 sector 并行压缩；拼装顺序不变，产物与串行一致。
+    let sectors: Vec<Vec<u8>> = data
+        .par_chunks(sector_size as usize)
+        .map(|chunk| zlib_sector(chunk, 1).unwrap_or_else(|| chunk.to_vec()))
+        .collect();
     if sectors.iter().map(|s| s.len()).sum::<usize>() >= data.len() {
         // 没有任何内容可压缩：按固定偏移明文存储 sector。
         return (data.to_vec(), 0);
@@ -1157,6 +1221,22 @@ fn zlib(data: &[u8]) -> Vec<u8> {
     let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
     enc.write_all(data).expect("in-memory zlib");
     enc.finish().expect("in-memory zlib")
+}
+
+/// 用 zlib 压缩单个 sector（前置 1 字节掩码 `M_ZLIB`）。只有压缩结果
+/// 加上 `margin` 字节的余量仍小于原文时才算有收益，否则返回 `None`
+/// （调用方回退为明文 sector；两个编码路径的判定余量不同，见其注释）。
+/// 每个 sector 的压缩互相独立，天然适合并行。
+fn zlib_sector(chunk: &[u8], margin: usize) -> Option<Vec<u8>> {
+    let z = zlib(chunk);
+    if z.len() + margin < chunk.len() {
+        let mut s = Vec::with_capacity(z.len() + 1);
+        s.push(M_ZLIB);
+        s.extend_from_slice(&z);
+        Some(s)
+    } else {
+        None
+    }
 }
 
 /// [`encode_fresh`] 再加上以块新偏移派生密钥的 key-v2 加密 ——
@@ -1206,20 +1286,24 @@ fn encode_fresh_reencrypted(
     }
 
     let nsec = fsize.div_ceil(sector_size) as usize;
-    let mut sectors: Vec<Vec<u8>> = Vec::with_capacity(nsec);
+    // 并行预压缩（余量判定见函数注释）；加密依赖新偏移派生的密钥，
+    // 仍按序在压缩结果上进行。
+    let compressed: Vec<Option<Vec<u8>>> = data
+        .par_chunks(sector_size as usize)
+        .map(|chunk| zlib_sector(chunk, 4))
+        .collect();
     let mut compressed_any = false;
-    for chunk in data.chunks(sector_size as usize) {
-        let z = zlib(chunk);
-        if z.len() + 4 < chunk.len() {
-            compressed_any = true;
-            let mut s = Vec::with_capacity(z.len() + 1);
-            s.push(M_ZLIB);
-            s.extend_from_slice(&z);
-            sectors.push(s);
-        } else {
-            sectors.push(chunk.to_vec());
-        }
-    }
+    let mut sectors: Vec<Vec<u8>> = compressed
+        .into_iter()
+        .zip(data.chunks(sector_size as usize))
+        .map(|(s, chunk)| match s {
+            Some(s) => {
+                compressed_any = true;
+                s
+            }
+            None => chunk.to_vec(),
+        })
+        .collect();
     if !compressed_any {
         // 按固定偏移明文存储 sector，每个使用各自的密钥。
         let mut payload = Vec::with_capacity(data.len());

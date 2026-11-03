@@ -2,6 +2,35 @@
 
 import type { EntryDto, TreeNodeDto } from './types'
 
+/** 收集未命名条目的虚拟文件夹名（与后端 tasks.rs 一致）。 */
+export const UNNAMED_DIR = '(未命名)'
+/** 收集 MPQ 内部元数据文件的虚拟文件夹名（与后端 tasks.rs 一致）。 */
+export const SYSTEM_DIR = '(系统文件)'
+
+/** 与后端 mpq::SPECIAL_FILES 一致的内部文件名（大小写不敏感全名匹配）：
+ * 归入 (系统文件) 虚拟文件夹（build_tree 的规则）。 */
+const SPECIAL_NAMES = new Set([
+  '(listfile)', '(attributes)', '(signature)', '(userdata)', '(password)',
+])
+
+export function isSpecialName(name: string): boolean {
+  return SPECIAL_NAMES.has(name.toLowerCase())
+}
+
+/** 与后端 split_path 一致：`\`/`/` 分隔，丢弃空段与 `.`/`..`。 */
+export function splitPath(name: string): string[] {
+  return name.replace(/\//g, '\\').split('\\').filter((s) => s && s !== '.' && s !== '..')
+}
+
+/** 条目所属目录的小写 `\` 前缀（根为 ''）：未命名 → (未命名)、内部
+ * 文件 → (系统文件)，其余按名字的目录部分——与 build_tree 的分桶
+ * 一致，供 selectedByPrefix 按目录前缀计数。 */
+export function dirPrefixOf(e: EntryDto): string {
+  if (!e.name) return UNNAMED_DIR.toLowerCase()
+  if (isSpecialName(e.name)) return SYSTEM_DIR.toLowerCase()
+  return dirNameOf(e.name).toLowerCase()
+}
+
 export function fmtBytes(n: number): string {
   return (n).toLocaleString('en-US')
 }
@@ -64,38 +93,6 @@ export function nodeAt(root: TreeNodeDto, path: string[]): TreeNodeDto | null {
     if (!node) return null
   }
   return node ?? null
-}
-
-/** node 及其子目录下的全部文件条目（tasks::collect_files）。 */
-export function collectFiles(node: TreeNodeDto): EntryDto[] {
-  const out = [...node.files]
-  for (const d of node.dirs) out.push(...collectFiles(d))
-  return out
-}
-
-export function collectKeys(node: TreeNodeDto): string[] {
-  return collectFiles(node).map((f) => f.key)
-}
-
-/** 全路径包含 needle（已小写）的条目（tasks::search_tree）。 */
-export function searchTree(root: TreeNodeDto, needle: string): EntryDto[] {
-  const out: EntryDto[] = []
-  ;(function walk(node: TreeNodeDto, prefix: string) {
-    for (const d of node.dirs) {
-      walk(d, prefix ? `${prefix}\\${d.name}` : d.name)
-    }
-    for (const f of node.files) {
-      const full = f.name ? (prefix ? `${prefix}\\${f.display}` : f.display)
-                          : f.display
-      if (full.toLowerCase().includes(needle)) out.push(f)
-    }
-  })(root, '')
-  return out
-}
-
-/** node 子树下是否有条目命中 needle（过滤后的树只保留命中分支）。 */
-export function subtreeMatches(node: TreeNodeDto, needle: string): boolean {
-  return searchTree(node, needle).length > 0
 }
 
 /** 默认修复副本名：<stem>.fixed.<ext>。 */

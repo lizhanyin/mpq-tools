@@ -18,13 +18,13 @@
   import { NTree } from 'naive-ui'
   import type { TreeOption } from 'naive-ui'
   import {
-    S, searching, needle, navigate, toggleExpanded,
+    S, searching, navigate, toggleExpanded, ensureDirLoaded,
     SYSTEM_DIR, UNNAMED_DIR,
   } from '../store'
-  import { fmtBytes, folderKey, subtreeMatches, basenameOf } from '../utils'
+  import { fmtBytes, folderKey, basenameOf, splitPath, isSpecialName } from '../utils'
   import type { TreeNodeDto } from '../types'
 
-  // 根节点 + 过滤后的文件夹树。节点带原始数据（node/path），供导航与展开使用。
+  // 根节点 + 文件夹树。节点带原始数据（node/path），供导航与展开使用。
   // 根节点始终展开（disableExpand + expandedKeys 强制包含），顶层文件夹常显。
   const ROOT_KEY = '__root__'
 
@@ -45,22 +45,65 @@
     children: TreeRow[]
   }
 
-  function buildNode(d: TreeNodeDto, path: string[]): TreeRow | null {
-    if (needle.value && !subtreeMatches(d, needle.value)) return null
+  function buildNode(d: TreeNodeDto, path: string[]): TreeRow {
     return {
       key: folderKey(path),
       node: d,
       path,
       isLeaf: false,
-      children: d.dirs.map((c) => buildNode(c, [...path, c.name])).filter(Boolean) as TreeRow[],
+      children: d.dirs.map((c) => buildNode(c, [...path, c.name])),
     }
+  }
+
+  /** 搜索态：从后端搜索结果的完整路径构建只含命中分支的骨架树
+   * （懒加载后前端树不完整，无法在本地过滤）。节点计数 = 该分支下
+   * 的命中数；点击仍按真实路径导航（navigate 会按需加载真目录）。 */
+  function buildSearchSkeleton(): TreeRow[] {
+    type Skel = { name: string; node: TreeNodeDto; children: Map<string, Skel> }
+    const root: Skel = { name: '', node: emptySkeletonNode(''), children: new Map() }
+    const at = (parent: Skel, seg: string): Skel => {
+      const lower = seg.toLowerCase()
+      let child = parent.children.get(lower)
+      if (!child) {
+        child = { name: seg, node: emptySkeletonNode(seg), children: new Map() }
+        parent.children.set(lower, child)
+      }
+      return child
+    }
+    for (const f of S.searchResults) {
+      const segs = !f.name ? [UNNAMED_DIR]
+        : isSpecialName(f.name) ? [SYSTEM_DIR]
+        : splitPath(f.name).slice(0, -1)
+      let cur = root
+      for (const seg of segs) cur = at(cur, seg)
+      cur.node.file_count++
+    }
+    const toRows = (skel: Skel, path: string[]): TreeRow[] => {
+      const children = [...skel.children.values()]
+        .sort((a, b) => (a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1))
+      return children.map((c) => {
+        const childPath = [...path, c.name]
+        // 分支计数自底向上聚合（含本层命中 + 子分支）。
+        const rows = toRows(c, childPath)
+        c.node.file_count += rows.reduce((n, r) => n + r.node.file_count, 0)
+        return { key: folderKey(childPath), node: c.node, path: childPath, isLeaf: false, children: rows }
+      })
+    }
+    return toRows(root, [])
+  }
+
+  function emptySkeletonNode(name: string): TreeNodeDto {
+    return { name, dirs: [], files: [], file_count: 0, total_size: 0, total_csize: 0, loaded: true }
   }
 
   const treeData = computed(() => {
     if (!S.info) return [] as (TreeRow | RootRow)[]
-    const children = S.info.tree.dirs
-      .map((d) => buildNode(d, [d.name]))
-      .filter(Boolean) as TreeRow[]
+    let children: TreeRow[]
+    if (searching.value) {
+      children = buildSearchSkeleton()
+    } else {
+      children = S.info.tree.dirs.map((d) => buildNode(d, [d.name]))
+    }
     const root: RootRow = { key: ROOT_KEY, isRoot: true, isLeaf: false, disableExpand: true, children }
     return [root]
   })
@@ -118,12 +161,22 @@
     navigate('isRoot' in option ? [] : [...option.path])
   }
 
-  /** 双击文件夹：切换展开/收缩（搜索态下展开被强制，不切换）。 */
+  /** 双击文件夹：切换展开/收缩（搜索态下展开被强制，不切换）。
+   * 未加载的占位符也可切换——展开本身会触发按需加载。 */
   function toggleDir(option: TreeRow | RootRow) {
-    if (!('isRoot' in option) && option.node.dirs.length && !searching.value) toggleExpanded(option.key)
+    if (!('isRoot' in option) && !searching.value
+      && (!option.node.loaded || option.node.dirs.length > 0)) {
+      toggleExpanded(option.key)
+    }
   }
 
   function onUpdateExpanded(keys: Array<string | number>) {
-    if (!searching.value) S.expanded = keys.filter((k) => k !== ROOT_KEY) as string[]
+    if (searching.value) return
+    const prev = new Set(S.expanded)
+    S.expanded = keys.filter((k) => k !== ROOT_KEY) as string[]
+    // 新展开的分支按需加载一层（key 即小写路径段，nodeAt 大小写不敏感）。
+    for (const k of S.expanded) {
+      if (!prev.has(k)) void ensureDirLoaded(k.split('\\'))
+    }
   }
 </script>
