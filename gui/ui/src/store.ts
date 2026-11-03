@@ -153,6 +153,7 @@ interface AppState {
   convert: ConvertState | null // 版本转换弹窗
   pw: PwState | null           // 密码弹窗
   settingsOpen: boolean
+  aboutOpen: boolean           // 「关于」弹窗
   logs: string[]
   fontSize: number
   gridThumbs: boolean   // 网格视图显示图片缩略图（localStorage 持久化，默认关闭）
@@ -194,6 +195,7 @@ export const S = reactive<AppState>({
   convert: null,
   pw: null,
   settingsOpen: false,
+  aboutOpen: false,
   logs: [],
   fontSize: FONT_DEFAULT,
   gridThumbs: false,
@@ -217,7 +219,7 @@ export const lockedArchive = computed(() => !!S.info?.locked)
 
 /** 是否有任意弹窗/浮窗打开（此时拖拽导入被忽略，见 App.vue）。 */
 export const anyModalOpen = computed(() =>
-  !!(S.modify || S.create || S.convert || S.pw || S.repair || S.preview || S.newFolder || S.move || S.settingsOpen))
+  !!(S.modify || S.create || S.convert || S.pw || S.repair || S.preview || S.newFolder || S.move || S.settingsOpen || S.aboutOpen))
 
 /** key → entry 的累积缓存：打开时的根目录、每次 list_dir / 搜索 /
  * 目录递归条目都汇入（代替原先对整棵树的一次性遍历——懒加载后前端

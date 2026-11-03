@@ -16,6 +16,7 @@
                 v-model:show="settingsShow" :options="settingsOptions" @select="onSettingsSelect">
       <n-button quaternary size="tiny">设置</n-button>
     </n-dropdown>
+    <n-button quaternary size="tiny" @click="S.aboutOpen = true">关于</n-button>
     <div class="menu-path">{{ S.openPath || '未打开归档' }}</div>
   </div>
 </template>

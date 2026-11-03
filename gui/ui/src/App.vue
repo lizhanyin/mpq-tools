@@ -15,6 +15,7 @@ import MoveModal from './components/MoveModal.vue'
 import ConvertModal from './components/ConvertModal.vue'
 import PasswordModal from './components/PasswordModal.vue'
 import SettingsModal from './components/SettingsModal.vue'
+import AboutModal from './components/AboutModal.vue'
 import { S, reloadArchive, handleDrop, anyModalOpen, selectAll, log, importProgressLabel, importProgressPercent } from './store'
 import { toast } from './toast'
 import * as ipc from './ipc'
@@ -118,6 +119,7 @@ onUnmounted(() => {
       <ConvertModal />
       <PasswordModal />
       <SettingsModal />
+      <AboutModal />
 
       <div v-if="S.dropping" class="drop-overlay">
         <div class="banner">{{

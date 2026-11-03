@@ -351,3 +351,7 @@ docs/           格式依据备忘（源自 StormLib 源码验证）
 - 库：`flate2`（zlib，miniz_oxide 后端）、`bzip2-rs`、`lzma-rs`、
   `md-5`（RustCrypto，v4 校验）（全部纯 Rust），`no unsafe`
 - 工具：`clap`（CLI）、`eframe/egui`（GUI）、`rfd`（文件对话框）
+
+## 许可证
+
+[BSD 3-Clause](LICENSE) © lizy
