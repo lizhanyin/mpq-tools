@@ -155,15 +155,17 @@ export interface ImportStatDto {
   size: number
   /** 是否存在同名的归档条目。 */
   replaces: boolean
+  /** 同名条目存在且内容逐字节相同——跳过不入待导入队列。 */
+  same_content?: boolean
   error?: string
 }
 
 /** stat_imports / apply_modify 经 Channel 推送的导入进度事件。
- *  phase：'reading' 读取待导入文件 / 扫描目录；'preparing' 修改引擎
- *  启动前的准备（克隆归档、重建布局，无计数）；'encoding' 压缩写入
- *  新归档；'verifying' 自检回读；'diffing' 对比两个归档（diff_with_disk）；
- *  'saving'（仅前端置位）写盘并重新载入。total 为 0 表示总数未知
- *  （目录扫描中），只显示已完成数量。 */
+ *  phase：'reading' 读取待导入文件 / 扫描目录 / 同名条目的内容比对；
+ *  'preparing' 修改引擎启动前的准备（克隆归档、重建布局，无计数）；
+ *  'encoding' 压缩写入新归档；'verifying' 自检回读；'diffing' 对比两个
+ *  归档（diff_with_disk）；'saving'（仅前端置位）写盘并重新载入。
+ *  total 为 0 表示总数未知（目录扫描中），只显示已完成数量。 */
 export interface ImportProgress {
   phase: 'reading' | 'preparing' | 'encoding' | 'verifying' | 'diffing' | 'saving'
   done: number

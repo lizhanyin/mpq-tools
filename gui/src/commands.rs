@@ -26,8 +26,9 @@ use crate::state::{GuiState, OpenResult, parse_key};
 type St<'a> = State<'a, Mutex<GuiState>>;
 
 /// 锁定全局状态；若锁已中毒（之前的某条命令发生过 panic）也视为可恢复——
-/// 其中的数据仍然足够一致。
-fn lock<'a>(state: &'a St<'a>) -> MutexGuard<'a, GuiState> {
+/// 其中的数据仍然足够一致。参数取 `&Mutex`（`State` 会解引用成它），
+/// 测试可直接传入裸 `Mutex`。
+fn lock<'a>(state: &'a Mutex<GuiState>) -> MutexGuard<'a, GuiState> {
     state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -887,12 +888,13 @@ mod tests {
         std::fs::write(base.join("img/ui/b.png"), b"bb").unwrap();
         std::fs::write(base.join("img/.hidden"), b"h").unwrap();
 
-        // 与 stat_imports 相同的两段式：锁外扫描 + 短暂加锁补 replaces。
+        // 与 stat_imports 相同的两段式：锁外扫描 + finalize_found 收尾
+        //（未打开归档：只补 replaces，全部为 false）。
         let stat = |dir: &std::path::Path, prefix: &str| -> Vec<super::ImportStatDto> {
-            let s = crate::state::GuiState::default();
+            let state = std::sync::Mutex::new(crate::state::GuiState::default());
             let mut found = Vec::new();
             super::walk_import_dir(dir, prefix, &mut found, &super::ProgressTap::noop());
-            found.into_iter().map(|f| f.into_dto(&s)).collect()
+            super::finalize_found(found, &state, &super::ProgressTap::noop())
         };
 
         let out = stat(&base.join("img"), "img");
@@ -920,6 +922,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// 生成一个含给定文件的最小 MPQ（与 state.rs 测试的同名辅助一致）。
+    fn mini_mpq(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let base = mpq::create(&mpq::CreateOptions {
+            version: mpq::FormatVersion::V1,
+            hash_table_size: 16,
+            sector_shift: 3,
+        })
+        .expect("create");
+        let additions: Vec<(String, Vec<u8>)> = files
+            .iter()
+            .map(|(n, d)| (n.to_string(), d.to_vec()))
+            .collect();
+        mpq::modify(&base, &[], &additions).expect("modify").bytes
+    }
+
+    /// 同名条目内容逐字节相同 → `same_content`（前端跳过不入队）；
+    /// 同长不同内容、长度不同、归档中没有的文件不受影响。
+    #[test]
+    fn stat_marks_identical_content() {
+        let mut s = crate::state::GuiState::default();
+        let r = s.load(
+            "t.mpq".into(),
+            mini_mpq(&[("same.txt", b"aa"), ("diff.txt", b"old"), ("short.txt", b"s")]),
+        );
+        assert!(r.ok, "{:?}", r.error);
+
+        let base = std::env::temp_dir().join("mpqtool-gui-test-same-content");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("same.txt"), b"aa").unwrap(); // 完全相同
+        std::fs::write(base.join("diff.txt"), b"new").unwrap(); // 同长不同内容
+        std::fs::write(base.join("short.txt"), b"longer").unwrap(); // 长度不同
+        std::fs::write(base.join("added.txt"), b"x").unwrap(); // 归档中没有
+
+        let mut found = Vec::new();
+        super::walk_import_dir(&base, "", &mut found, &super::ProgressTap::noop());
+        let state = std::sync::Mutex::new(s);
+        let dtos = super::finalize_found(found, &state, &super::ProgressTap::noop());
+        let by = |n: &str| dtos.iter().find(|d| d.name == n).unwrap();
+
+        assert_eq!((by("same.txt").replaces, by("same.txt").same_content), (true, Some(true)));
+        // 同长不同内容：比对了但不同 → None。
+        assert_eq!((by("diff.txt").replaces, by("diff.txt").same_content), (true, None));
+        // 长度不同：直接判定不同，不进比对。
+        assert_eq!((by("short.txt").replaces, by("short.txt").same_content), (true, None));
+        assert_eq!((by("added.txt").replaces, by("added.txt").same_content), (false, None));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn join_arc_omits_leading_separator() {
         assert_eq!(super::join_arc("", "a.png"), "a.png");
@@ -937,9 +989,9 @@ pub fn discard_repair(state: St) {
 // -- 导入 / 删除 -------------------------------------------------------------
 
 /// 导入进度事件（经 Tauri Channel 推送到前端）。
-/// phase：`"reading"` 读取待导入文件 / 扫描目录；`"encoding"` 压缩写入
-/// 新归档；`"verifying"` 自检回读。total 为 0 表示总数未知（目录扫描
-/// 尚在进行），前端只显示已完成数量。
+/// phase：`"reading"` 读取待导入文件 / 扫描目录 / 同名条目的内容比对；
+/// `"encoding"` 压缩写入新归档；`"verifying"` 自检回读。total 为 0
+/// 表示总数未知（目录扫描中），前端只显示已完成数量。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ImportProgressDto {
     pub phase: String,
@@ -1002,16 +1054,22 @@ pub struct ImportStatDto {
     pub size: u64,
     /// 是否存在同名的归档条目。
     pub replaces: bool,
+    /// 同名条目存在且内容与磁盘文件逐字节相同——前端据此跳过，
+    /// 不入待导入队列。`None` = 不同或未比较（新文件 / 大小不一致 /
+    /// 读取失败按不同保守处理）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub same_content: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-/// 检查待导入的文件 / 文件夹：名称、大小，以及是否会替换已有条目。
-/// 文件内容在应用修改时才读取。路径是文件夹时递归展开其中的全部
-/// 文件，归档名以文件夹自身为根（如选 `D:\img` 会得到
-/// `img\a.png`、`img\ui\b.png`）；`children_only` 为真时只导入其
-/// 子项（得到 `a.png`、`ui\b.png`）。`prefix` 非空时（前端浏览到
-/// 子目录时导入）加在每项名称之前。符号链接目录不跟随，避免循环。
+/// 检查待导入的文件 / 文件夹：名称、大小，以及是否会替换已有条目；
+/// 同名且大小一致的条目还会比对内容（见 [`finalize_found`]）。
+/// 路径是文件夹时递归展开其中的全部文件，归档名以文件夹自身为根
+/// （如选 `D:\img` 会得到 `img\a.png`、`img\ui\b.png`）；
+/// `children_only` 为真时只导入其子项（得到 `a.png`、`ui\b.png`）。
+/// `prefix` 非空时（前端浏览到子目录时导入）加在每项名称之前。
+/// 符号链接目录不跟随，避免循环。
 ///
 /// 递归扫描（含每项一次 metadata，慢盘 / 网络盘上可达分钟级）在
 /// **锁外**进行；扫描完短暂加锁补上 `replaces`（每项一次内存哈希
@@ -1049,8 +1107,7 @@ pub fn stat_imports(
             found.push(stat_one(path, join_arc(pre, &name)));
         }
     }
-    let s = lock(&state);
-    found.into_iter().map(|f| f.into_dto(&s)).collect()
+    finalize_found(found, &state, &tap)
 }
 
 /// `\` 连接归档内路径；`a` 为空时直接返回 `b`（避免前导 `\`）。
@@ -1063,8 +1120,8 @@ fn join_arc(a: &str, b: &str) -> String {
 }
 
 /// 扫描发现的一个待导入文件（或读取失败的路径）。磁盘 I/O（遍历 +
-/// metadata）在锁外完成；`replaces` 由 [`FoundFile::into_dto`] 稍后
-/// 短暂加锁补上。
+/// metadata）在锁外完成；`replaces` / `same_content` 由
+/// [`finalize_found`] 稍后补上。
 struct FoundFile {
     name: String,
     path: String,
@@ -1073,19 +1130,84 @@ struct FoundFile {
 }
 
 impl FoundFile {
-    fn into_dto(self, s: &GuiState) -> ImportStatDto {
-        let replaces = self.error.is_none()
-            && s.archive
-                .as_ref()
-                .is_some_and(|a| a.find_file(&self.name).is_some());
+    /// 基础 DTO；`replaces` / `same_content` 留给 [`finalize_found`]。
+    fn into_dto(self) -> ImportStatDto {
         ImportStatDto {
             name: self.name,
             path: self.path,
             size: self.size,
-            replaces,
+            replaces: false,
+            same_content: None,
             error: self.error,
         }
     }
+}
+
+/// 扫描后的两段式收尾（与扫描本身同理：慢活不放锁内）：
+///
+/// 1. 短暂加锁补 `replaces`（内存哈希查找，微秒级），并把「同名且
+///    大小一致」的条目记为待比对；需要比对时顺手快照原始字节与
+///    主密钥（与 `apply_modify` 相同的模式）。
+/// 2. **锁外**从快照开一个独立归档视图，逐个把磁盘文件与同名条目的
+///    解压字节比较（与 `diff_archives` 相同的判据：大小相同才比，
+///    任一侧读失败按「不同」保守处理），一致则标 `same_content`——
+///    重复导入整个文件夹时，未变化的文件前端会直接跳过，不再为
+///    它们白付一次整档重写。
+fn finalize_found(
+    found: Vec<FoundFile>,
+    state: &Mutex<GuiState>,
+    tap: &ProgressTap,
+) -> Vec<ImportStatDto> {
+    let mut dtos: Vec<ImportStatDto> = found.into_iter().map(|f| f.into_dto()).collect();
+    // 待比对项：(dtos 索引, 归档名, 磁盘路径)。
+    let mut candidates: Vec<(usize, String, String)> = Vec::new();
+    let snapshot = {
+        let s = lock(state);
+        for (i, d) in dtos.iter_mut().enumerate() {
+            if d.error.is_some() {
+                continue;
+            }
+            let Some(entry) = s
+                .archive
+                .as_ref()
+                .and_then(|a| a.find_file(&d.name))
+            else {
+                continue;
+            };
+            d.replaces = true;
+            if entry.size as u64 == d.size {
+                candidates.push((i, d.name.clone(), d.path.clone()));
+            }
+        }
+        if candidates.is_empty() {
+            None
+        } else {
+            Some((s.raw.clone(), s.master_key))
+        }
+    };
+    let Some((raw, master_key)) = snapshot else {
+        return dtos;
+    };
+    // 快照打不开（或受保护且无法解锁）时读条目会失败，按「不同」处理。
+    if let Ok(mut archive) = mpq::Archive::new(std::io::Cursor::new(raw)) {
+        if archive.is_password_protected() {
+            if let Some(master) = master_key {
+                let _ = archive.unlock_with_master_key(&master);
+            }
+        }
+        let total = candidates.len() as u32;
+        for (done, (i, name, path)) in candidates.into_iter().enumerate() {
+            let same = std::fs::read(&path)
+                .ok()
+                .zip(archive.read_file(&name).ok())
+                .is_some_and(|(disk, entry)| disk == entry);
+            if same {
+                dtos[i].same_content = Some(true);
+            }
+            tap.emit("reading", done as u32 + 1, total);
+        }
+    }
+    dtos
 }
 
 /// 单个文件（或读取失败的路径）的导入信息。

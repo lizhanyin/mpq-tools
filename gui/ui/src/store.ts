@@ -958,15 +958,22 @@ async function fetchStats(paths: string[], opts: { childrenOnly?: boolean } = {}
   }
 }
 
-/** 把 stat 结果合并进待导入列表（同名后者取代前者）并记日志。 */
+/** 把 stat 结果合并进待导入列表（同名后者取代前者）并记日志；
+ * 与归档内同名条目内容相同的直接跳过（重复导入文件夹时未变化的
+ * 文件不再参与应用修改时的整档重写）。 */
 function mergeStats(stats: ImportStatDto[], m: ModifyState): ImportItem[] {
   // 同名（大小写不敏感）后导入的取代先排队的。
   const idxByName = new Map(m.additions.map((a, i) => [a.name.toLowerCase(), i] as const))
   const added: ImportItem[] = []
+  const skipped: string[] = []
   for (const st of stats) {
     if (st.error) {
       log(`读取失败 ${st.path}: ${st.error}`)
       toast.error(`读取失败 ${st.name}: ${st.error}`)
+      continue
+    }
+    if (st.same_content) {
+      skipped.push(st.name)
       continue
     }
     const lower = st.name.toLowerCase()
@@ -978,8 +985,12 @@ function mergeStats(stats: ImportStatDto[], m: ModifyState): ImportItem[] {
     added.push(item)
   }
 
+  skipped.slice(0, IMPORT_LOG_MAX).forEach((n) => log(`跳过 ${n}（与归档内相同）`))
+  if (skipped.length > IMPORT_LOG_MAX) log(`（其余 ${skipped.length - IMPORT_LOG_MAX} 个相同文件也已跳过）`)
+
   if (added.length === 0) {
-    toast.info('没有可导入的文件（所选内容为空或全部读取失败）。')
+    if (skipped.length > 0) toast.info(`所选文件与归档内现有内容相同，已跳过 ${skipped.length} 个。`)
+    else toast.info('没有可导入的文件（所选内容为空或全部读取失败）。')
     return []
   }
   added.slice(0, IMPORT_LOG_MAX).forEach((it) =>
